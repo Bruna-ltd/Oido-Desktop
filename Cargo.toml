@@ -1,0 +1,36 @@
+[package]
+name = "oido-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+chacha20poly1305 = "0.11.0"
+dirs = "7.0.0"
+getrandom = "0.4.3"
+keyring-core = "1.0.1"
+# Rune is pre-release: pin a rev of `dev` (never rewritten) and bump it deliberately.
+rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b" }
+# Components and app shell (sidebar, split view, toolbar). `markdown` renders agent replies.
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ureq = "3.5.1"
+uuid = { version = "1.29.1", features = ["v4"] }
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-io-crypto-rust"] }
+zeroize = "1.9.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "deny"
+
+[profile.dev.package."*"]
+debug = false

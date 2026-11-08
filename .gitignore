@@ -1,0 +1,31 @@
+# Build output
+/target
+
+# Local databases and their logs. The app keeps its data in the user's data folder, but
+# OIDO_DB can point anywhere, and tests and headless runs make throwaway files.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secrets: provider keys live encrypted in the database and the master key in the OS keyring,
+# never in files, but keep anything key-shaped out of the repo all the same.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Claude Code's local settings
+.claude/settings.local.json
