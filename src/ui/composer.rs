@@ -9,17 +9,18 @@ use super::icons;
 use super::model_picker::ModelPicker;
 use crate::agents::Agent;
 use crate::app::{App, Effort};
-use crate::model::AgentStatus;
 use crate::models::can_think;
 use crate::providers::ModelStatus;
 use crate::theme;
 
 const IDLE: &str = "Write a message.";
-const BUSY: &str = "Add something while it works — it will pick this up on its next step.";
+const BUSY: &str = "Waiting for the reply. Press Stop to cut it short.";
+const ASKED: &str = "Answer or decide on the request above first.";
 
 pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let running = agent.status == AgentStatus::Running;
+    let running = s.busy();
+    let asked = s.awaiting_answer();
     let status = s.providers.status(agent.model.as_ref());
     let ready = matches!(status, ModelStatus::Ready(_));
     let has_text = !s.composer.text.trim().is_empty();
@@ -37,7 +38,16 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
         .key("composer-input")
         .w_full()
         .color(c.text_base)
-        .placeholder(if running { BUSY } else { IDLE }, c.text_faint)
+        .placeholder(
+            if running {
+                BUSY
+            } else if asked {
+                ASKED
+            } else {
+                IDLE
+            },
+            c.text_faint,
+        )
         .caret(c.text_base, k.selection())
         .label("Message")
         .on_edit(|s: &mut App| &mut s.composer)
@@ -81,7 +91,7 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
             .build(k)
             .key("stop")
     } else {
-        let can_send = has_text && ready;
+        let can_send = has_text && ready && !asked;
         let mut send = IconButton::new(&glyphs::ARROW_RIGHT)
             .variant(if can_send {
                 IconButtonVariant::Submit

@@ -49,6 +49,16 @@ fn title(s: &App, a: &Agent, k: &Kit) -> El {
                 .child(text(subtitle).font(k.ty.small).color(ink)),
         )
         .child(
+            Button::new("Save as workflow")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .disabled(!s.can_teach())
+                .help("Turn what the agent did in this chat into steps it can run again. You see a draft first.")
+                .on_press(|s: &mut App| s.teach_open())
+                .build(k)
+                .key("teach"),
+        )
+        .child(
             Button::new("Start fresh")
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)

@@ -66,11 +66,26 @@ impl Store {
                     tools,
                     active,
                     r.get::<_, Option<String>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                    r.get::<_, String>(12)?,
                 ))
             })?;
             for row in rows {
-                let (parent, id, name, prompt, model, hue, pinned, skills, tools, active, provider) =
-                    row?;
+                let (
+                    parent,
+                    id,
+                    name,
+                    prompt,
+                    model,
+                    hue,
+                    pinned,
+                    skills,
+                    tools,
+                    active,
+                    provider,
+                    workdir,
+                    description,
+                ) = row?;
                 let mut chats = sessions.remove(&id).unwrap_or_default();
                 if chats.is_empty() {
                     chats.push(chat("New chat", Vec::new()));
@@ -91,6 +106,8 @@ impl Store {
                     skills: serde_json::from_str(&skills)?,
                     tools: serde_json::from_str(&tools)?,
                     subagents: Vec::new(),
+                    workdir,
+                    description,
                 };
                 match parent {
                     None => top.push(agent),
@@ -123,6 +140,8 @@ impl Store {
                 a.active as i64,
                 position as i64,
                 a.model.as_ref().map(|m| &m.provider),
+                &a.workdir,
+                &a.description,
             ))?;
         Ok(())
     }
@@ -188,5 +207,25 @@ impl Store {
             .prepare_cached(self.sql("PutMessage")?)?
             .execute((session_id, seq as i64, serde_json::to_string(m)?))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crate::agents::Agent;
+    use crate::store::Store;
+    use crate::vault::Vault;
+
+    #[test]
+    fn an_agents_working_folder_is_saved_and_none_stays_none() {
+        let db = Store::in_memory(Vault::fixed([1; 32])).unwrap();
+        let (mut a, mut b) = (Agent::blank("a".into()), Agent::blank("b".into()));
+        (a.name, b.name) = ("A".into(), "B".into());
+        a.workdir = Some("/srv/project".into());
+        db.save_roster(&[a, b]).unwrap();
+        let loaded = db.load_agents().unwrap();
+        assert_eq!(loaded[0].workdir.as_deref(), Some("/srv/project"));
+        assert_eq!(loaded[1].workdir, None);
     }
 }

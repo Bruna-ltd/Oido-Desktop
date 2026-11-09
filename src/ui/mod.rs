@@ -5,13 +5,18 @@ mod agent_form;
 mod chat;
 mod chat_header;
 mod composer;
+mod flow;
+mod folder_picker;
 mod icons;
 mod inspector;
 mod model_picker;
+mod multi_picker;
 mod providers;
 mod rail;
 mod runs;
 mod sidebar;
+mod tools;
+mod workflows;
 
 use std::time::Duration;
 
@@ -34,6 +39,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         }
         Route::Runs => ("Runs".to_owned(), runs::screen(s, &k)),
         Route::Providers => ("Providers".to_owned(), providers::screen(s, &k, &mut layer)),
+        Route::Tools => ("Tools".to_owned(), tools::screen(s, &k)),
+        Route::Workflows => ("Workflows".to_owned(), workflows::screen(s, &k)),
         Route::Soon(name) => (name.to_owned(), soon(name, &k)),
     };
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.
@@ -137,4 +144,93 @@ fn soon(name: &str, k: &Kit) -> El {
                 .font(k.ty.small)
                 .color(k.c.text_muted),
         )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use rune::{Env, Runtime};
+
+    use super::view;
+    use crate::app::{App, Route};
+
+    /// Presses `trigger` and returns where the list is drawn, as (x, y, w, h), with where the
+    /// trigger is, as (x, y).
+    fn press(app: App, trigger: &str) -> ([f32; 4], (f32, f32)) {
+        let mut rt = Runtime::new(
+            app,
+            view,
+            (1280.0, 900.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        rt.frame(0.0);
+        let at = rt.find(trigger).unwrap();
+        rt.pointer_down(at.0, at.1);
+        rt.pointer_up(at.0, at.1);
+        for _ in 0..10 {
+            rt.frame(1.0 / 60.0);
+        }
+        let list = ["model-content", "default-model-content"]
+            .iter()
+            .find_map(|k| rt.presented(k))
+            .unwrap();
+        (list.0, at)
+    }
+
+    /// The list sits against its field: below it, or above it when there is no room below, and
+    /// starts at the field's left edge. In the window's corner it is nowhere near.
+    fn assert_beside(list: [f32; 4], field: (f32, f32)) {
+        let [x, y, _, h] = list;
+        assert!(
+            x > 100.0 && y > 100.0,
+            "the list is drawn at ({x}, {y}), the window's corner"
+        );
+        assert!(
+            (x - field.0).abs() < 330.0,
+            "it starts at x={x}, far from its field at x={}",
+            field.0
+        );
+        let (below, above) = (y >= field.1, y + h <= field.1 + 30.0);
+        assert!(
+            below || above,
+            "the list (y {y}..{}) overlaps its field at y={}",
+            y + h,
+            field.1
+        );
+    }
+
+    #[test]
+    fn the_new_agents_model_list_opens_beside_its_field_not_in_the_corner() {
+        let mut app = App::new(None);
+        crate::demo::demo_models(&mut app);
+        app.new_agent();
+        let (list, field) = press(app, "model-value-trigger");
+        assert_beside(list, field);
+    }
+
+    #[test]
+    fn the_default_models_list_opens_beside_its_field_when_none_is_set() {
+        let mut app = App::new(None);
+        crate::demo::demo_models(&mut app);
+        app.providers.default_model = None;
+        app.route = Route::Providers;
+        let (list, field) = press(app, "default-model-value-trigger");
+        assert_beside(list, field);
+    }
+
+    #[test]
+    fn the_edit_forms_model_list_still_opens_beside_its_field() {
+        let mut app = crate::testing::samples();
+        crate::demo::demo_models(&mut app);
+        app.edit_agent(&crate::agents::Target::agent("atlas"));
+        app.roster.form.model = Some(crate::models::ModelRef::new(
+            "anthropic",
+            "claude-sonnet-4-6",
+        ));
+        let (list, field) = press(app, "model-value-trigger");
+        assert_beside(list, field);
+    }
 }

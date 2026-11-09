@@ -31,11 +31,21 @@ static OPERATE: [Item; 3] = [
     },
 ];
 
-static CONFIGURE: [Item; 6] = [
+static CONFIGURE: [Item; 8] = [
     Item {
         label: "Providers",
         icon: &icons::PROVIDERS,
         route: Route::Providers,
+    },
+    Item {
+        label: "Workflows",
+        icon: &icons::WORKFLOWS,
+        route: Route::Workflows,
+    },
+    Item {
+        label: "Tools",
+        icon: &icons::TOOLS,
+        route: Route::Tools,
     },
     soon("Channels", &icons::CHANNELS),
     soon("Extensions", &icons::EXTENSIONS),
@@ -112,7 +122,7 @@ fn item(s: &App, it: &'static Item, k: &Kit) -> El {
         } else {
             Color::TRANSPARENT
         })
-        .on_press(move |s: &mut App| s.route = it.route)
+        .on_press(move |s: &mut App| s.go(it.route))
         .role("link")
         .label(it.label)
         .child(icon(it.icon, 18.0).color(ink));
