@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use crate::vault::{self, Vault};
 
 mod agents;
+mod mcp;
 mod models;
 mod providers;
 mod runs;
@@ -90,7 +91,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 9] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -99,15 +100,17 @@ const MIGRATIONS: [&str; 8] = [
     include_str!("../../db/migrations/006_agent_workdir.sql"),
     include_str!("../../db/migrations/007_workflows.sql"),
     include_str!("../../db/migrations/008_delegation.sql"),
+    include_str!("../../db/migrations/009_mcp.sql"),
 ];
 
-const QUERY_FILES: [&str; 6] = [
+const QUERY_FILES: [&str; 7] = [
     include_str!("../../db/queries/settings.sql"),
     include_str!("../../db/queries/providers.sql"),
     include_str!("../../db/queries/agents.sql"),
     include_str!("../../db/queries/sessions.sql"),
     include_str!("../../db/queries/runs.sql"),
     include_str!("../../db/queries/workflows.sql"),
+    include_str!("../../db/queries/mcp.sql"),
 ];
 
 pub struct Store {

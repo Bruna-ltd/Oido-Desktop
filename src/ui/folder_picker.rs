@@ -12,7 +12,6 @@ use rune_kit::{
 };
 
 use crate::app::App;
-use crate::theme;
 
 const ROW: f32 = 30.0;
 const MAX_HEIGHT: f32 = 240.0;
@@ -133,7 +132,7 @@ fn browser(s: &App, k: &Kit) -> El {
         results.child(
             text(why.clone())
                 .font(k.ty.small)
-                .color(theme::amber())
+                .color(k.c.warning.icon)
                 .wrap()
                 .px(8.0),
         )

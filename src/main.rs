@@ -14,8 +14,10 @@ mod files;
 mod flows;
 mod folders;
 mod listing;
+mod mcp;
 mod model;
 mod models;
+mod omarchy;
 mod persist;
 mod picker;
 mod providers;
@@ -29,6 +31,7 @@ mod theme;
 mod tools;
 mod typesafe;
 mod ui;
+mod update;
 mod vault;
 mod workflow;
 
@@ -49,6 +52,10 @@ fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
 }
 
 fn main() {
+    if std::env::args().skip(1).any(|a| a == "--version") {
+        println!("oido-desktop {}", update::VERSION);
+        return;
+    }
     let chrome = Chrome {
         full_size_content: true,
         traffic_lights: Some((16.0, 25.0)),
@@ -64,5 +71,17 @@ fn main() {
     .chrome(chrome);
     // Worker threads (checking a key, refreshing models) hand their results back through this.
     app::set_handle(app.handle());
+    // The Settings page can follow Omarchy's theme: a switch there reads the themes again.
+    let handle = app.handle();
+    theme::follow_omarchy(move || handle.update(|s: &mut app::App, _| s.look.reload()));
+    // Automatic updates: a newer release is downloaded and installed for the next launch.
+    let handle = app.handle();
+    update::every_so_often(move || {
+        handle.update(|s: &mut app::App, _| {
+            if s.updates.auto {
+                s.check_for_updates();
+            }
+        });
+    });
     app.run();
 }

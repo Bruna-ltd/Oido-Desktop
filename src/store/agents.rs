@@ -46,6 +46,9 @@ impl Store {
         }
         let mut top: Vec<Agent> = Vec::new();
         let mut members: Vec<(String, Agent)> = Vec::new();
+        // Chats made up for agents that had none saved: saved below, so a message sent in one has a
+        // row to belong to.
+        let mut made_up: Vec<(String, Session)> = Vec::new();
         {
             let mut stmt = self.conn.prepare_cached(self.sql("ListAgents")?)?;
             let rows = stmt.query_map([], |r| {
@@ -88,7 +91,9 @@ impl Store {
                 ) = row?;
                 let mut chats = sessions.remove(&id).unwrap_or_default();
                 if chats.is_empty() {
-                    chats.push(chat("New chat", Vec::new()));
+                    let first = chat("New chat", Vec::new());
+                    made_up.push((id.clone(), first.clone()));
+                    chats.push(first);
                 }
                 let agent = Agent {
                     active: (active.max(0) as usize).min(chats.len() - 1),
@@ -114,6 +119,9 @@ impl Store {
                     Some(p) => members.push((p, agent)),
                 }
             }
+        }
+        for (agent, session) in &made_up {
+            self.save_session(agent, session, 0)?;
         }
         for (parent, member) in members {
             if let Some(p) = top.iter_mut().find(|a| a.id == parent) {
@@ -216,6 +224,24 @@ mod tests {
     use crate::agents::Agent;
     use crate::store::Store;
     use crate::vault::Vault;
+
+    #[test]
+    fn an_agent_saved_without_a_chat_gets_one_that_is_saved_so_its_messages_can_be() {
+        use crate::model::Message;
+        let db = Store::in_memory(Vault::fixed([1; 32])).unwrap();
+        let mut lone = Agent::blank("lone".into());
+        lone.name = "Lone".into();
+        db.save_agent(&lone, None, 0).unwrap();
+        let loaded = db.load_agents().unwrap();
+        let chat = loaded[0].chat().id.clone();
+        // Before this, saving the first message failed: FOREIGN KEY constraint failed.
+        db.put_message(&chat, 0, &Message::User("hello".into()))
+            .unwrap();
+        let again = db.load_agents().unwrap();
+        assert_eq!(again[0].sessions.len(), 1, "no second chat is made up");
+        assert_eq!(again[0].chat().id, chat, "the same chat comes back");
+        assert_eq!(again[0].chat().messages.len(), 1);
+    }
 
     #[test]
     fn an_agents_working_folder_is_saved_and_none_stays_none() {

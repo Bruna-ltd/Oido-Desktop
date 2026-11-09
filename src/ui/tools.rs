@@ -10,7 +10,7 @@ use crate::completion::ToolSpec;
 const COLUMN: f32 = 760.0;
 
 pub fn screen(s: &App, k: &Kit) -> El {
-    let tools = crate::tools::registered();
+    let tools = s.all_tools();
     col()
         .key("tools")
         .w_full()
@@ -39,7 +39,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
 
 fn card(s: &App, t: &ToolSpec, k: &Kit) -> El {
     let c = &k.c;
-    let needs = crate::tools::needs_typesafe(t.name);
+    let needs = crate::tools::needs_typesafe(&t.name);
     col()
         .key(format!("tool-{}", t.name))
         .w_full()
@@ -53,7 +53,7 @@ fn card(s: &App, t: &ToolSpec, k: &Kit) -> El {
                 .w_full()
                 .center_y()
                 .gap(8.0)
-                .child(text(t.name).font(k.ty.mono).color(c.text_base))
+                .child(text(t.name.clone()).font(k.ty.mono).color(c.text_base))
                 .child(el().grow(1.0))
                 .child(
                     Badge::new(if needs { "Needs TypeSafe" } else { "Built in" })
@@ -62,7 +62,7 @@ fn card(s: &App, t: &ToolSpec, k: &Kit) -> El {
                 ),
         )
         .child(
-            text(t.description)
+            text(t.description.clone())
                 .font(k.ty.small)
                 .color(c.text_muted)
                 .wrap(),
@@ -80,7 +80,7 @@ fn card(s: &App, t: &ToolSpec, k: &Kit) -> El {
                 .wrap()
         }))
         .child(
-            text(used_by(s, t.name))
+            text(used_by(s, &t.name))
                 .font(k.ty.small)
                 .color(c.text_faint)
                 .wrap(),

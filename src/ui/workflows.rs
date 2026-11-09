@@ -261,7 +261,7 @@ fn detail(s: &App, k: &Kit) -> El {
         out = out.child(
             text(why.clone())
                 .font(k.ty.small)
-                .color(crate::theme::amber())
+                .color(k.c.warning.icon)
                 .wrap(),
         );
     }
@@ -320,7 +320,7 @@ fn run_detail(r: &RunRecord, k: &Kit) -> El {
         out = out.child(
             text(format!("Failed at {}: {}", r.failed_step, r.error))
                 .font(k.ty.small)
-                .color(crate::theme::amber())
+                .color(k.c.warning.icon)
                 .wrap()
                 .selectable(true),
         );
@@ -339,7 +339,7 @@ fn run_detail(r: &RunRecord, k: &Kit) -> El {
                 text(if more { format!("{cut}…") } else { cut })
                     .font(k.ty.mono)
                     .color(if st.error.is_some() {
-                        crate::theme::amber()
+                        k.c.warning.icon
                     } else {
                         c.text_faint
                     })

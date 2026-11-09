@@ -174,8 +174,8 @@ impl Turn {
 /// A tool offered to the model.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     /// JSON Schema of the arguments.
     pub schema: Value,
 }
@@ -977,8 +977,8 @@ mod tests {
     fn tool_calls_are_offered_and_sent_back_in_each_providers_shape() {
         let mut r = req(None);
         r.tools = vec![ToolSpec {
-            name: "ask",
-            description: "Ask.",
+            name: "ask".into(),
+            description: "Ask.".into(),
             schema: json!({"type": "object"}),
         }];
         r.turns.push(Turn::assistant(

@@ -24,6 +24,10 @@ pub enum Route {
     Tools,
     /// Saved workflows and their runs.
     Workflows,
+    /// MCP servers: other programs that give agents tools.
+    Mcp,
+    /// The app's own settings: its appearance.
+    Settings,
     /// The create, edit and team-member form (`Roster::editing` says which).
     AgentForm,
     /// A Studio section not built natively yet.
@@ -111,6 +115,14 @@ pub struct App {
     /// Skills found in the skills folder, and where it is.
     pub skills: Vec<crate::skills::Skill>,
     pub skills_dir: Option<std::path::PathBuf>,
+    /// MCP servers and the page that manages them.
+    pub mcp: crate::mcp::Mcp,
+    /// The chosen appearance and the Omarchy themes it can pick from.
+    pub look: crate::theme::Look,
+    /// The Settings page's theme list is open.
+    pub theme_open: bool,
+    /// This app's own updates: on their own or not, and where they stand.
+    pub updates: crate::update::Updates,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
 }
@@ -177,6 +189,7 @@ impl App {
 
     pub fn new(store: Option<Store>) -> App {
         let (roster, providers) = persist::load(store.as_ref());
+        let look = crate::theme::Look::load(persist::appearance(store.as_ref()));
         let skills_dir = crate::skills::dir();
         let mut app = App {
             sidebar: PaneState::new(264.0).range(180.0, 420.0),
@@ -218,10 +231,15 @@ impl App {
                 .map(crate::skills::discover)
                 .unwrap_or_default(),
             skills_dir,
+            mcp: crate::mcp::Mcp::new(Vec::new()),
+            look,
+            theme_open: false,
+            updates: crate::update::Updates::new(persist::auto_update(store.as_ref())),
             store,
         };
         app.settle_interrupted_commands();
         app.load_workflows();
+        app.load_mcp();
         app
     }
 

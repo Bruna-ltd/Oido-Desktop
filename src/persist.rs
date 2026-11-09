@@ -8,10 +8,13 @@ use crate::app::App;
 use crate::models::ModelRef;
 use crate::providers::{self, Providers};
 use crate::store::{self, Store, Verified};
+use crate::theme::Appearance;
 
 const SEEDED: &str = "seeded";
 const SELECTED: &str = "agents.selected";
 const DEFAULT_MODEL: &str = "models.default";
+const APPEARANCE: &str = "appearance";
+const AUTO_UPDATE: &str = "updates.auto";
 
 /// What the app starts with: what the store holds, or on the very first launch the sample data
 /// (written once, so deleting all of it stays deleted).
@@ -23,6 +26,32 @@ pub fn load(store: Option<&Store>) -> (Roster, Providers) {
         eprintln!("oido: could not read saved data, starting with samples: {e}");
         (Roster::new(), providers::init())
     })
+}
+
+/// The appearance chosen on the Settings page; Oido's own when none was, or it cannot be read.
+pub fn appearance(store: Option<&Store>) -> Appearance {
+    let Some(db) = store else {
+        return Appearance::default();
+    };
+    db.setting::<Appearance>(APPEARANCE)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the appearance: {e}");
+            None
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the app updates itself: on unless turned off on the Settings page.
+pub fn auto_update(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return true;
+    };
+    db.setting::<bool>(AUTO_UPDATE)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the update setting: {e}");
+            None
+        })
+        .unwrap_or(true)
 }
 
 fn try_load(db: &Store) -> store::Result<(Roster, Providers)> {
@@ -162,6 +191,19 @@ impl App {
     pub fn toggle_pin(&mut self, id: &str) {
         self.roster.toggle_pin(id);
         self.save_agent_row(&Target::agent(id));
+    }
+
+    /// Wears `appearance` and remembers it.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.save("the appearance", |db| {
+            db.set_setting(APPEARANCE, &appearance)
+        });
+        self.look.appearance = appearance;
+    }
+
+    pub(crate) fn save_auto_update(&self) {
+        let on = self.updates.auto;
+        self.save("the update setting", |db| db.set_setting(AUTO_UPDATE, &on));
     }
 
     /// Picks the model for the current agent (the composer's picker, and the agent form's).

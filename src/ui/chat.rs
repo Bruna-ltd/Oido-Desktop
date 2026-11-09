@@ -8,7 +8,6 @@ use rune_kit::{
 use crate::agents::Agent;
 use crate::app::App;
 use crate::model::{Approval, Decision, Message, Outcome, Stats, ToolCall};
-use crate::theme;
 
 const COLUMN: f32 = 760.0;
 
@@ -252,7 +251,7 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
     }
     match r.outcome {
         Outcome::Stopped => out = out.child(ended("Stopped.", c.text_faint, r.last, k)),
-        Outcome::Failed(why) => out = out.child(ended(why, theme::amber(), r.last, k)),
+        Outcome::Failed(why) => out = out.child(ended(why, k.c.warning.icon, r.last, k)),
         Outcome::Working | Outcome::Done => {}
     }
     let mut foot = row().w_full().center_y().gap(8.0);
@@ -321,7 +320,7 @@ fn question(s: &App, t: &ToolCall, last: bool, j: usize, k: &Kit) -> El {
     };
     if let Some(answer) = &t.output {
         return card(
-            theme::green(),
+            k.c.success.icon,
             text(format!("You answered: {answer}"))
                 .font(k.ty.small)
                 .color(c.text_muted)
@@ -331,7 +330,7 @@ fn question(s: &App, t: &ToolCall, last: bool, j: usize, k: &Kit) -> El {
     }
     if !last {
         return card(
-            theme::amber(),
+            k.c.warning.icon,
             text("Not answered.").font(k.ty.small).color(c.text_faint),
         );
     }
@@ -417,7 +416,7 @@ fn question(s: &App, t: &ToolCall, last: bool, j: usize, k: &Kit) -> El {
                         .key("ask-skip"),
                 ),
         );
-    card(theme::amber(), body)
+    card(k.c.warning.icon, body)
 }
 
 /// The workflow being learned from this chat, or the draft of it: the steps as lines, and what you
@@ -488,7 +487,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
             body = body.child(
                 text(why.clone())
                     .font(k.ty.small)
-                    .color(theme::amber())
+                    .color(k.c.warning.icon)
                     .wrap()
                     .selectable(true),
             );
@@ -573,7 +572,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
     }
     Some(
         Card::new()
-            .accent(theme::violet())
+            .accent(k.c.info.icon)
             .title(
                 match draft {
                     Some(d) => format!("Workflow draft: {}", d.name),
@@ -634,10 +633,10 @@ fn command_card(s: &App, t: &ToolCall, j: usize, k: &Kit) -> El {
                 .color(c.text_faint)
                 .truncate(),
         );
-    let mut accent = theme::amber();
+    let mut accent = k.c.warning.icon;
     match &t.output {
         Some(out) => {
-            accent = theme::green();
+            accent = k.c.success.icon;
             let (shown, cut) = crate::runs::clip(out, 2000);
             body = body.child(mono(
                 if cut { format!("{shown}\n…") } else { shown },
@@ -739,9 +738,9 @@ fn gate(a: &Approval, k: &Kit) -> El {
         ),
     };
     let accent = if a.decision.is_none() {
-        theme::amber()
+        k.c.warning.icon
     } else {
-        theme::green()
+        k.c.success.icon
     };
     Card::new()
         .accent(accent)

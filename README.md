@@ -22,6 +22,20 @@ cargo test -- --ignored        # also exercises the real system keyring (needs a
 cargo clippy --all-targets
 ```
 
+## Release
+
+```
+scripts/release.sh 0.2.0       # bump Cargo.toml, test, build, tag v0.2.0, push, publish the GitHub release
+oido-desktop --version
+```
+
+`Cargo.toml`'s version is the app's version. A release is a GitHub release tagged `vX.Y.Z` holding
+`oido-desktop-<arch>-linux` and its `.sha256`. Installed apps look for one at launch and every six
+hours (Settings → Updates; on unless turned off), download it, check its SHA-256, and rename it over
+their own binary, so the next launch runs it ("Restart now" does that at once). The repository must
+be public for apps to see its releases. Debug builds never update themselves, and a binary in a folder
+the user cannot write to (a package manager's) reports why it cannot.
+
 ## Where things live
 
 | What | Where |
@@ -48,6 +62,12 @@ system keyring is unavailable, no key is stored.
   `src/tools.rs`: the tools every agent is given (`ask_user_question`, `shell`, `read_file`, `write_file`, `edit_file`, `teach_workflow`, `run_workflow`).
   `src/workflow/`: workflows (definition and checks, references, the engine, learning one from a chat);
   `src/flows.rs`: teaching, saving and running them in the app.
+  `src/mcp/`: MCP servers, any number of them. `client.rs` speaks JSON-RPC to a remote server (HTTP) or a local
+  program (a child process, kept running between calls); `oauth.rs` signs in through the browser (discovery,
+  registration, PKCE, a loopback callback, renewal); `flow.rs` is the form, the background work and the call;
+  `catalog.rs` are the one-click presets. A server's tools join the register as `mcp__<server>__<tool>`, and an
+  agent is given them in its form like any other. Keys, variables and tokens are sealed in the database
+  (`store/mcp.rs`). Nothing asks before an MCP tool runs.
   `src/files.rs`: the file tools, confined to the agent's working folder.
   `src/command.rs`: running a shell command (runs at once when an agent that has the shell tool asks, in
   the agent's working folder). `src/folders.rs`: the folder browser behind that choice.

@@ -311,7 +311,11 @@ impl App {
             context: Some(context.clone()),
             think: think_of(self.effort).filter(|_| can_think),
             turns: turns.clone(),
-            tools: crate::delegate::tools_for(agent, self.typesafe_connected()),
+            tools: crate::delegate::tools_for(
+                agent,
+                self.typesafe_connected(),
+                &crate::mcp::specs(&self.mcp.servers),
+            ),
         };
         let run = Run {
             id: new_id(),
@@ -466,6 +470,8 @@ impl App {
                 live.thought = Some(live.began.elapsed());
             }
         }
+        // Found before the chat is borrowed: whether a name is an MCP server's tool depends on the app.
+        let known_calls: Vec<bool> = calls.iter().map(|c| self.tool_known(&c.name)).collect();
         if let Some(Message::Assistant {
             text: body, tools, ..
         }) = self
@@ -475,9 +481,8 @@ impl App {
             .and_then(|s| s.messages.last_mut())
         {
             body.push_str(&text);
-            for call in calls {
-                // The only tool there is asks you; a tool the model made up is answered at once.
-                let known = crate::tools::knows(&call.name);
+            for (call, known) in calls.into_iter().zip(known_calls) {
+                // A tool the model made up is answered at once.
                 tools.push(ToolCall {
                     summary: crate::tools::summary(&call.name, &call.args),
                     output: (!known)
@@ -720,6 +725,10 @@ impl App {
         }
         if crate::tools::needs_typesafe(&name) {
             self.start_typesafe_call(&sid, &id, &name, &args);
+            return true;
+        }
+        if crate::mcp::is_tool(&name) {
+            self.start_mcp_call(&sid, &id, &name, &args);
             return true;
         }
         let Some(spec) = crate::command::parse(&args) else {
@@ -1471,6 +1480,72 @@ data: [DONE]
         assert_eq!(result.name, "Tool result");
         assert!(result.output.as_deref().unwrap().contains("done-out"));
         let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registered_mcp_server_gives_an_agent_its_tools_and_a_call_runs_at_once() {
+        let script =
+            std::env::temp_dir().join(format!("oido-mcp-test-{}.sh", uuid::Uuid::new_v4()));
+        std::fs::write(&script, crate::mcp::client::tests::fake_script()).unwrap();
+        let tool = "mcp__fake_server__echo";
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    "text/event-stream",
+                    call_stream(tool, serde_json::json!({"text": "ping"})),
+                ),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+
+        // Adding a program runs it, so the first press only asks; the second registers it.
+        app.mcp_set_kind(crate::mcp::Kind::Local);
+        app.mcp.form.name = TextEdit::new("Fake server");
+        app.mcp.form.command = TextEdit::new("sh");
+        app.mcp.form.args = TextEdit::new(script.display().to_string());
+        app.mcp_add();
+        assert!(app.mcp.confirming && app.mcp.servers.is_empty());
+        assert!(app.mcp.command_line().starts_with("sh /"));
+        app.mcp_add();
+        assert!(!app.mcp.confirming && app.mcp.servers.len() == 1);
+        let server = app.mcp.servers[0].clone();
+        assert_eq!(
+            server.status,
+            crate::mcp::Status::Reachable,
+            "{}",
+            server.detail
+        );
+        assert_eq!(app.all_tools().iter().filter(|t| t.name == tool).count(), 1);
+
+        // It is saved: a new launch has the server and its tools without reaching it.
+        let relaunched = db.open();
+        assert_eq!(relaunched.mcp.servers.len(), 1);
+        assert_eq!(relaunched.mcp.servers[0].tools.len(), 1);
+
+        // The agent has to be given the tool; with it, the model's call runs and is answered.
+        app.roster.current_mut().unwrap().tools = vec![tool.into()];
+        app.composer = TextEdit::new("ping it");
+        app.send();
+        let first = seen.recv().unwrap();
+        assert!(
+            first.contains(&format!("\"name\":\"{tool}\"")),
+            "offered: {first}"
+        );
+        let second = seen.recv().unwrap();
+        assert!(second.contains("f1") && second.contains("pong"), "{second}");
+        assert!(!app.awaiting_answer() && app.commands.is_empty() && !app.busy());
+        assert!(matches!(last(&app), Message::Assistant { text, .. } if text == "Hello!"));
+
+        // Turned off, its tools are not offered; removed, it is gone for good.
+        app.mcp_toggle(&server.id);
+        assert!(app.all_tools().iter().all(|t| t.name != tool));
+        app.mcp_remove(&server.id);
+        assert!(app.mcp.servers.is_empty() && db.open().mcp.servers.is_empty());
+        let _ = std::fs::remove_file(script);
     }
 
     #[test]
