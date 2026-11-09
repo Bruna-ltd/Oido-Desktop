@@ -121,6 +121,8 @@ pub struct App {
     pub look: crate::theme::Look,
     /// The Settings page's theme list is open.
     pub theme_open: bool,
+    /// This app's own updates: on their own or not, and where they stand.
+    pub updates: crate::update::Updates,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
 }
@@ -232,6 +234,7 @@ impl App {
             mcp: crate::mcp::Mcp::new(Vec::new()),
             look,
             theme_open: false,
+            updates: crate::update::Updates::new(persist::auto_update(store.as_ref())),
             store,
         };
         app.settle_interrupted_commands();

@@ -1,11 +1,15 @@
 //! The app's settings, in sections. Appearance: Oido's own look, the desktop's Omarchy theme, or
-//! any one Omarchy theme.
+//! any one Omarchy theme. Updates: this version, looking for a newer one, and doing so on its own.
 
 use rune::{Color, El, ScrollSpec, Tx, col, el, icon, row, text};
-use rune_kit::{Kit, Placement, Popover, Select, SelectAppearance, scroll_bar};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Kit, Placement, Popover, Select, SelectAppearance, Switch,
+    scroll_bar,
+};
 
 use crate::app::App;
 use crate::theme::{Appearance, Colors, Look};
+use crate::update::{Status, Updates, VERSION};
 
 const COLUMN: f32 = 760.0;
 
@@ -26,8 +30,68 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .px(24.0)
                 .py(24.0)
                 .gap(24.0)
-                .child(section("Appearance", vec![theme_row(s, k, layer)], k)),
+                .child(section("Appearance", vec![theme_row(s, k, layer)], k))
+                .child(section(
+                    "Updates",
+                    vec![version_row(&s.updates, k), auto_update_row(&s.updates, k)],
+                    k,
+                )),
         )
+}
+
+/// This version and where updates stand, with the one thing to do next: check, or restart.
+fn version_row(u: &Updates, k: &Kit) -> El {
+    let button = |label: &str| Button::new(label).control_size(ControlSize::Small);
+    let control = match &u.status {
+        Status::Ready(_) => button("Restart now")
+            .variant(ButtonVariant::Submit)
+            .on_press_tx(|s: &mut App, tx: &mut Tx| s.restart_to_update(tx))
+            .build(k),
+        _ => button(if u.busy() {
+            "Updating…"
+        } else {
+            "Check for updates"
+        })
+        .variant(ButtonVariant::Outline)
+        .disabled(u.busy() || !u.available())
+        .on_press(|s: &mut App| s.check_for_updates())
+        .build(k),
+    };
+    setting(
+        "version",
+        &format!("Oido {VERSION}"),
+        &status_line(u),
+        control.key("update-action"),
+        k,
+    )
+}
+
+fn auto_update_row(u: &Updates, k: &Kit) -> El {
+    setting(
+        "auto-update",
+        "Update automatically",
+        "Looks for a new version at launch and every few hours, and installs it for the next launch.",
+        Switch::new(u.auto)
+            .label("Update automatically")
+            .hide_label()
+            .disabled(!u.available())
+            .on_toggle(|s: &mut App| s.set_auto_update(!s.updates.auto))
+            .build(k),
+        k,
+    )
+}
+
+/// Where updates stand, in words.
+fn status_line(u: &Updates) -> String {
+    match &u.status {
+        Status::Idle if !u.available() => "Development builds do not update themselves.".to_owned(),
+        Status::Idle => "Updates come from Oido's releases on GitHub.".to_owned(),
+        Status::Checking => "Looking for a new version…".to_owned(),
+        Status::UpToDate => "This is the newest version.".to_owned(),
+        Status::Installing(v) => format!("Installing Oido {v}…"),
+        Status::Ready(v) => format!("Oido {v} is installed. Restart to use it."),
+        Status::Failed(why) => format!("Could not update: {why}."),
+    }
 }
 
 /// A titled group of setting rows on one card, rules between them.

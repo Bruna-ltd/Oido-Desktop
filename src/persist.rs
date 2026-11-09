@@ -14,6 +14,7 @@ const SEEDED: &str = "seeded";
 const SELECTED: &str = "agents.selected";
 const DEFAULT_MODEL: &str = "models.default";
 const APPEARANCE: &str = "appearance";
+const AUTO_UPDATE: &str = "updates.auto";
 
 /// What the app starts with: what the store holds, or on the very first launch the sample data
 /// (written once, so deleting all of it stays deleted).
@@ -38,6 +39,19 @@ pub fn appearance(store: Option<&Store>) -> Appearance {
             None
         })
         .unwrap_or_default()
+}
+
+/// Whether the app updates itself: on unless turned off on the Settings page.
+pub fn auto_update(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return true;
+    };
+    db.setting::<bool>(AUTO_UPDATE)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the update setting: {e}");
+            None
+        })
+        .unwrap_or(true)
 }
 
 fn try_load(db: &Store) -> store::Result<(Roster, Providers)> {
@@ -185,6 +199,11 @@ impl App {
             db.set_setting(APPEARANCE, &appearance)
         });
         self.look.appearance = appearance;
+    }
+
+    pub(crate) fn save_auto_update(&self) {
+        let on = self.updates.auto;
+        self.save("the update setting", |db| db.set_setting(AUTO_UPDATE, &on));
     }
 
     /// Picks the model for the current agent (the composer's picker, and the agent form's).

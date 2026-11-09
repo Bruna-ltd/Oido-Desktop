@@ -234,6 +234,13 @@ pub static SCENES: &[Scene] = &[
         s.theme_open = true;
         s.route = Route::Settings;
     }),
+    // An update installed, waiting for a restart.
+    ("settings-updates", |s| {
+        if let Ok(v) = "0.2.0".parse() {
+            s.updates.status = crate::update::Status::Ready(v);
+        }
+        s.route = Route::Settings;
+    }),
     ("mcp-search", |s| {
         s.mcp.search = rune::TextEdit::new("cloud work");
         s.route = Route::Mcp;
