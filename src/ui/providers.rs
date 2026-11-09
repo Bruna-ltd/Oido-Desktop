@@ -90,7 +90,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(page)
 }
 
-fn section(title: &str, count: usize, rows: Vec<El>, k: &Kit) -> El {
+pub(super) fn section(title: &str, count: usize, rows: Vec<El>, k: &Kit) -> El {
     let c = &k.c;
     let mut group = col()
         .w_full()
@@ -123,7 +123,7 @@ fn section(title: &str, count: usize, rows: Vec<El>, k: &Kit) -> El {
 }
 
 /// The brand tile: the provider's own colour with its initial, like an app icon.
-fn tile(label: &str, color: &str, k: &Kit) -> El {
+pub(super) fn tile(label: &str, color: &str, k: &Kit) -> El {
     let initial = label.chars().next().unwrap_or('?').to_string();
     row()
         .size(36.0, 36.0)
@@ -134,7 +134,7 @@ fn tile(label: &str, color: &str, k: &Kit) -> El {
         .child(text(initial).font(k.ty.ui_medium).color(k.c.white))
 }
 
-fn ghost(label: &str, key: String, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
+pub(super) fn ghost(label: &str, key: String, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
     Button::new(label)
         .variant(ButtonVariant::Ghost)
         .control_size(ControlSize::Small)
@@ -224,7 +224,7 @@ fn default_model(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         )
 }
 
-fn names(label: &str, detail: String, error: Option<&String>, k: &Kit) -> El {
+pub(super) fn names(label: &str, detail: String, error: Option<&String>, k: &Kit) -> El {
     let c = &k.c;
     let mut col_ = col()
         .grow(1.0)
@@ -289,7 +289,7 @@ fn connected_row(s: &App, p: &Provider, k: &Kit) -> El {
     )
 }
 
-fn pill(label: &str, k: &Kit) -> El {
+pub(super) fn pill(label: &str, k: &Kit) -> El {
     row()
         .px(12.0)
         .py(6.0)

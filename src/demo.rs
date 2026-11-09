@@ -222,6 +222,87 @@ pub fn demo_models(app: &mut App) {
 type Scene = (&'static str, fn(&mut App));
 
 pub static SCENES: &[Scene] = &[
+    // The Settings page as this computer's Omarchy themes make it: following the desktop, then in
+    // a light theme.
+    ("settings", |s| {
+        s.look.appearance = crate::theme::Appearance::System;
+        s.theme_open = true;
+        s.route = Route::Settings;
+    }),
+    ("settings-light", |s| {
+        s.look.appearance = crate::theme::Appearance::Omarchy("flexoki-light".into());
+        s.theme_open = true;
+        s.route = Route::Settings;
+    }),
+    ("mcp-search", |s| {
+        s.mcp.search = rune::TextEdit::new("cloud work");
+        s.route = Route::Mcp;
+        crate::ui::wait_for_logos(&["https://docs.mcp.cloudflare.com/mcp"]);
+    }),
+    ("mcp", |s| {
+        use crate::mcp::{Auth, Server, Status, Tool, Transport};
+        let tool = |n: &str, d: &str| Tool {
+            name: n.into(),
+            description: d.into(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+        let server = |name: &str, transport, auth, status, detail: &str, tools| Server {
+            id: name.to_lowercase().replace(' ', "-"),
+            name: name.into(),
+            transport,
+            auth,
+            enabled: true,
+            status,
+            detail: detail.into(),
+            tools,
+        };
+        s.mcp.servers = vec![
+            server(
+                "Context7",
+                Transport::Http {
+                    url: "https://mcp.context7.com/mcp".into(),
+                },
+                Auth::None,
+                Status::Reachable,
+                "",
+                vec![
+                    tool("resolve-library-id", "Find the library a name refers to."),
+                    tool("get-library-docs", "Fetch current docs for a library."),
+                ],
+            ),
+            server(
+                "GitHub",
+                Transport::Http {
+                    url: "https://api.githubcopilot.com/mcp/".into(),
+                },
+                Auth::OAuth,
+                Status::Unreachable,
+                "the server did not accept the sign-in or key. Sign in or add the key again on the MCP page.",
+                vec![],
+            ),
+            server(
+                "Everything",
+                Transport::Stdio {
+                    command: "npx".into(),
+                    args: vec![
+                        "-y".into(),
+                        "@modelcontextprotocol/server-everything".into(),
+                    ],
+                },
+                Auth::None,
+                Status::Reachable,
+                "",
+                vec![tool("echo", "Echoes the message back.")],
+            ),
+        ];
+        crate::ui::wait_for_logos(&[
+            "https://mcp.context7.com/mcp",
+            "https://api.githubcopilot.com/mcp/",
+        ]);
+        s.mcp.open = Some("context7".into());
+        s.mcp.adding = true;
+        s.route = Route::Mcp;
+    }),
     ("empty-chat", |s| {
         load_samples(s);
         s.roster.select(Target::agent("scout"));

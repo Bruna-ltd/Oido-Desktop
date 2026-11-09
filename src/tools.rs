@@ -22,13 +22,13 @@ pub fn registered() -> Vec<ToolSpec> {
         ask(),
         shell(),
         ToolSpec {
-            name: TEACH,
-            description: "Save what you did in this chat as a reusable workflow: fixed steps that can be run again without planning. Use it when the person asks to save or repeat what you just did. A draft is shown to them to confirm or change; nothing runs until they save it.",
+            name: TEACH.into(),
+            description: "Save what you did in this chat as a reusable workflow: fixed steps that can be run again without planning. Use it when the person asks to save or repeat what you just did. A draft is shown to them to confirm or change; nothing runs until they save it.".into(),
             schema: json!({"type": "object", "properties": {}}),
         },
         ToolSpec {
-            name: RUN_WORKFLOW,
-            description: "Run one of your saved workflows by name, with inputs if it takes any, and get its result. Use it when the person asks for something a saved workflow already does.",
+            name: RUN_WORKFLOW.into(),
+            description: "Run one of your saved workflows by name, with inputs if it takes any, and get its result. Use it when the person asks for something a saved workflow already does.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -89,16 +89,16 @@ pub fn needs_typesafe(name: &str) -> bool {
 
 fn file_tool(name: &'static str, description: &'static str, schema: Value) -> ToolSpec {
     ToolSpec {
-        name,
-        description,
+        name: name.into(),
+        description: description.into(),
         schema,
     }
 }
 
 fn shell() -> ToolSpec {
     ToolSpec {
-        name: SHELL,
-        description: "Run a shell command on the person's computer and get its output. It runs at once, with no approval, so keep commands few, focused and easy to read back to the person. It runs with `sh -c` in the agent's working folder (the person's home folder if none is set), cannot read input, and is ended after a time limit. Long output is cut. Do not use it for anything destructive unless they asked for exactly that.",
+        name: SHELL.into(),
+        description: "Run a shell command on the person's computer and get its output. It runs at once, with no approval, so keep commands few, focused and easy to read back to the person. It runs with `sh -c` in the agent's working folder (the person's home folder if none is set), cannot read input, and is ended after a time limit. Long output is cut. Do not use it for anything destructive unless they asked for exactly that.".into(),
         schema: json!({
             "type": "object",
             "properties": {
@@ -113,8 +113,8 @@ fn shell() -> ToolSpec {
 
 fn ask() -> ToolSpec {
     ToolSpec {
-        name: ASK,
-        description: "Ask the person a question and wait for the answer. Use it when you need a decision or a missing detail that you cannot reasonably work out, instead of guessing. Ask one clear question at a time, and offer options when the answer is a choice.",
+        name: ASK.into(),
+        description: "Ask the person a question and wait for the answer. Use it when you need a decision or a missing detail that you cannot reasonably work out, instead of guessing. Ask one clear question at a time, and offer options when the answer is a choice.".into(),
         schema: json!({
             "type": "object",
             "properties": {
@@ -131,19 +131,21 @@ fn ask() -> ToolSpec {
     }
 }
 
-/// The registered tools an agent has chosen, in the register's order. A chosen name that is no
-/// longer registered is ignored, and so are TypeSafe's while TypeSafe is not connected (`typesafe`).
-pub fn offered(chosen: &[String], typesafe: bool) -> Vec<ToolSpec> {
+/// The registered tools an agent has chosen, in the register's order, then MCP servers' (`mcp`, as
+/// [`crate::mcp::specs`] gives them). A chosen name that is no longer registered is ignored, and so
+/// are TypeSafe's while TypeSafe is not connected (`typesafe`).
+pub fn offered(chosen: &[String], typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolSpec> {
     registered()
         .into_iter()
-        .filter(|t| chosen.iter().any(|c| c == t.name) && (typesafe || !needs_typesafe(t.name)))
+        .chain(mcp.iter().cloned())
+        .filter(|t| chosen.contains(&t.name) && (typesafe || !needs_typesafe(&t.name)))
         .collect()
 }
 
-/// A tool that runs in the background and ends later: a command, a workflow, or a question put
-/// to TypeSafe.
+/// A tool that runs in the background and ends later: a command, a workflow, a question put to
+/// TypeSafe, or a call to an MCP server.
 pub fn is_job(name: &str) -> bool {
-    name == SHELL || name == RUN_WORKFLOW || needs_typesafe(name)
+    name == SHELL || name == RUN_WORKFLOW || needs_typesafe(name) || crate::mcp::is_tool(name)
 }
 
 /// Whether a tool waits for you (an answer, or a go-ahead) before its result exists.
@@ -246,12 +248,15 @@ mod tests {
 
     #[test]
     fn an_agent_is_offered_only_the_registered_tools_it_chose() {
-        let names = |chosen: &[&str]| -> Vec<&'static str> {
+        let names = |chosen: &[&str]| -> Vec<String> {
             let chosen: Vec<String> = chosen.iter().map(|c| (*c).to_owned()).collect();
-            offered(&chosen, false).iter().map(|t| t.name).collect()
+            offered(&chosen, false, &[])
+                .into_iter()
+                .map(|t| t.name)
+                .collect()
         };
         assert!(names(&[]).is_empty(), "no tools by default");
-        assert_eq!(names(&[ASK]), [ASK]);
+        assert_eq!(names(&[ASK]), [ASK.to_owned()]);
         assert!(
             names(&["shell.run"]).is_empty(),
             "an unregistered name is ignored"
@@ -262,8 +267,12 @@ mod tests {
     #[test]
     fn typesafe_tools_are_offered_only_while_typesafe_is_connected() {
         let chosen: Vec<String> = vec![ASK.into(), crate::typesafe::YES_NO.into()];
-        let names =
-            |on| -> Vec<&'static str> { offered(&chosen, on).iter().map(|t| t.name).collect() };
+        let names = |on| -> Vec<String> {
+            offered(&chosen, on, &[])
+                .into_iter()
+                .map(|t| t.name)
+                .collect()
+        };
         assert_eq!(names(false), [ASK]);
         assert_eq!(names(true), [ASK, crate::typesafe::YES_NO]);
         assert!(is_job(crate::typesafe::SCORE) && knows(crate::typesafe::CHOOSE));

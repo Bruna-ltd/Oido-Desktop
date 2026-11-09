@@ -88,8 +88,8 @@ fn notifier(sid: String, id: String) -> impl Fn(Note) {
 }
 
 /// The tools a lead agent is given: the ones it chose, and `delegate` while it has a team.
-pub fn tools_for(agent: &Agent, typesafe: bool) -> Vec<ToolSpec> {
-    let mut all = tools::offered(&agent.tools, typesafe);
+pub fn tools_for(agent: &Agent, typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolSpec> {
+    let mut all = tools::offered(&agent.tools, typesafe, mcp);
     if !agent.subagents.is_empty() {
         all.push(spec(&agent.subagents));
     }
@@ -105,8 +105,8 @@ fn spec(team: &[Agent]) -> ToolSpec {
         })
         .collect();
     ToolSpec {
-        name: DELEGATE,
-        description: "Hand a task to one of your team members and get its answer. It starts with nothing but the task, so say everything it needs, and what you want back. It works on its own and cannot ask the person anything. To run several at once, call this several times in one turn.",
+        name: DELEGATE.into(),
+        description: "Hand a task to one of your team members and get its answer. It starts with nothing but the task, so say everything it needs, and what you want back. It works on its own and cannot ask the person anything. To run several at once, call this several times in one turn.".into(),
         schema: json!({
             "type": "object",
             "properties": {
@@ -467,9 +467,9 @@ impl App {
             system: self.system_for(member),
             context: crate::context::now_text(),
             think: crate::run::think_of(self.effort).filter(|_| can_think),
-            tools: tools::offered(&member.tools, false)
+            tools: tools::offered(&member.tools, false, &[])
                 .into_iter()
-                .filter(|t| unattended(t.name))
+                .filter(|t| unattended(&t.name))
                 .collect(),
             prep,
             task,

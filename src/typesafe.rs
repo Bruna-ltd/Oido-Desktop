@@ -37,15 +37,15 @@ pub fn specs() -> Vec<ToolSpec> {
         "items": {"type": "string"},
         "description": "Optional images to judge, as PNG or JPEG files in the working folder (too big is shrunk to fit, too small is refused). They are called `image_1`, `image_2`, and so on: name them in the question."
     });
-    let tool = |name, description, extra: Value, required: &[&str]| {
+    let tool = |name: &str, description: &str, extra: Value, required: &[&str]| {
         let mut props = json!({"content": content, "images": images});
         props
             .as_object_mut()
             .into_iter()
             .for_each(|p| p.extend(extra.as_object().cloned().unwrap_or_default()));
         ToolSpec {
-            name,
-            description,
+            name: name.into(),
+            description: description.into(),
             schema: json!({"type": "object", "properties": props, "required": required}),
         }
     };

@@ -5,7 +5,6 @@ use rune_kit::{Badge, BadgeVariant, Kit};
 
 use crate::app::{App, now};
 use crate::runs::{Run, Status, StepKind};
-use crate::theme;
 
 pub fn screen(s: &App, k: &Kit) -> El {
     if s.runs.is_empty() {
@@ -204,8 +203,8 @@ pub fn tone(kind: StepKind, k: &Kit) -> Color {
     match kind {
         StepKind::System => k.c.text_faint,
         StepKind::User => k.c.text_base,
-        StepKind::Llm => theme::violet(),
-        StepKind::Error => theme::amber(),
+        StepKind::Llm => k.c.info.icon,
+        StepKind::Error => k.c.warning.icon,
     }
 }
 

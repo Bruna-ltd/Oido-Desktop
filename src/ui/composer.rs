@@ -11,7 +11,6 @@ use crate::agents::Agent;
 use crate::app::{App, Effort};
 use crate::models::can_think;
 use crate::providers::ModelStatus;
-use crate::theme;
 
 const IDLE: &str = "Write a message.";
 const BUSY: &str = "Waiting for the reply. Press Stop to cut it short.";
@@ -127,7 +126,7 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
                 .w_full()
                 .px(16.0)
                 .pt(10.0)
-                .child(text(why).font(k.ty.small).color(theme::amber()).wrap()),
+                .child(text(why).font(k.ty.small).color(k.c.warning.icon).wrap()),
         );
     }
     card.child(input).child(
@@ -163,8 +162,8 @@ fn model_pill(s: &App, agent: &Agent, status: &ModelStatus, k: &Kit, layer: &mut
     let c = &k.c;
     let (name, ink) = match status {
         ModelStatus::Ready(m) => (s.providers.model_name(m), c.text_muted),
-        ModelStatus::Choose => ("Choose a model".to_owned(), theme::amber()),
-        ModelStatus::Unavailable { model, .. } => (s.providers.model_name(model), theme::amber()),
+        ModelStatus::Choose => ("Choose a model".to_owned(), k.c.warning.icon),
+        ModelStatus::Unavailable { model, .. } => (s.providers.model_name(model), k.c.warning.icon),
     };
     let pill = k.interactive(
         row()

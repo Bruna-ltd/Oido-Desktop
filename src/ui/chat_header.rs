@@ -11,7 +11,6 @@ use crate::agents::Agent;
 use crate::app::App;
 use crate::model::AgentStatus;
 use crate::providers::ModelStatus;
-use crate::theme;
 
 pub fn build(s: &App, a: &Agent, k: &Kit) -> El {
     col()
@@ -24,13 +23,13 @@ pub fn build(s: &App, a: &Agent, k: &Kit) -> El {
 
 fn title(s: &App, a: &Agent, k: &Kit) -> El {
     let (subtitle, ink) = match a.status {
-        AgentStatus::Running => ("Working…".to_owned(), theme::green()),
-        AgentStatus::Waiting => ("Waiting for your approval".to_owned(), theme::amber()),
+        AgentStatus::Running => ("Working…".to_owned(), k.c.success.icon),
+        AgentStatus::Waiting => ("Waiting for your approval".to_owned(), k.c.warning.icon),
         // Idle: which model it will answer with, or why it cannot.
         AgentStatus::Idle => match s.providers.status(a.model.as_ref()) {
             ModelStatus::Ready(m) => (s.providers.model_name(&m), k.c.text_muted),
-            ModelStatus::Choose => ("Choose a model".to_owned(), theme::amber()),
-            ModelStatus::Unavailable { why, .. } => (why, theme::amber()),
+            ModelStatus::Choose => ("Choose a model".to_owned(), k.c.warning.icon),
+            ModelStatus::Unavailable { why, .. } => (why, k.c.warning.icon),
         },
     };
     row()
@@ -114,7 +113,7 @@ fn tab(i: usize, title: &str, active: bool, running: bool, closable: bool, k: &K
         })
         .on_press(move |s: &mut App| s.select_tab(i));
     if running && active {
-        e = e.child(el().size(6.0, 6.0).radius(3.0).fill(theme::green()));
+        e = e.child(el().size(6.0, 6.0).radius(3.0).fill(k.c.success.icon));
     }
     e = e.child(
         text(title.to_owned())

@@ -9,11 +9,14 @@ mod flow;
 mod folder_picker;
 mod icons;
 mod inspector;
+mod logo;
+mod mcp;
 mod model_picker;
 mod multi_picker;
 mod providers;
 mod rail;
 mod runs;
+mod settings;
 mod sidebar;
 mod tools;
 mod workflows;
@@ -25,10 +28,15 @@ use rune_kit::shell::{self, PaneMotion, SidebarPeek, SidebarToggle, SplitView, T
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit};
 
 use crate::app::{App, Route};
-use crate::theme;
+
+/// Waits for the logos of the servers at `urls` to decode, for a headless picture of the page.
+#[cfg(debug_assertions)]
+pub fn wait_for_logos(urls: &[&str]) {
+    logo::wait_all(urls);
+}
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
-    let k = theme::kit();
+    let k = s.look.kit();
     // Menus, selects and dialogs mount above everything, so each screen adds to this.
     let mut layer = Vec::new();
     let (title, main): (String, El) = match s.route {
@@ -41,6 +49,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Providers => ("Providers".to_owned(), providers::screen(s, &k, &mut layer)),
         Route::Tools => ("Tools".to_owned(), tools::screen(s, &k)),
         Route::Workflows => ("Workflows".to_owned(), workflows::screen(s, &k)),
+        Route::Mcp => ("MCP".to_owned(), mcp::screen(s, &k)),
+        Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
         Route::Soon(name) => (name.to_owned(), soon(name, &k)),
     };
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.

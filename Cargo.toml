@@ -24,6 +24,16 @@ ureq = "3.5.1"
 uuid = { version = "1.29.1", features = ["v4"] }
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-io-crypto-rust"] }
 zeroize = "1.9.1"
+sha2 = "0.11"
+percent-encoding = "2"
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
+
+# Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with one change, a
+# mouse wheel notch scrolls 100 points instead of 40. Drop this section when upstream lets the app
+# set the step, and keep the `rev` above in step with the copy's base when bumping Rune.
+[patch."https://github.com/anomalyco/rune"]
+rune = { path = "../rune/crates/rune" }
+rune-kit = { path = "../rune/crates/rune-kit" }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -36,5 +46,18 @@ unwrap_used = "warn"
 expect_used = "warn"
 dbg_macro = "deny"
 
+# Light optimization of our own code too: the view is rebuilt on every frame.
+#
+# `lto = "off"`: with any optimization rustc otherwise runs ThinLTO across a crate's codegen units,
+# which renames symbols (`foo.llvm.<hash>`). An incremental rebuild can then link a reused object
+# against a recompiled one that names the symbol differently, and the link fails with
+# "undefined hidden symbol". Turning it off costs little speed and keeps rebuilds linking.
+[profile.dev]
+opt-level = 1
+lto = "off"
+
+# Dependencies are optimized more, and without debug info: the UI engine (rune) lays out and draws
+# every frame, and unoptimized it takes 75 to 150 ms a frame, which makes scrolling crawl.
 [profile.dev.package."*"]
+opt-level = 3
 debug = false

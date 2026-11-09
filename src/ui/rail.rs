@@ -49,12 +49,20 @@ static CONFIGURE: [Item; 8] = [
     },
     soon("Channels", &icons::CHANNELS),
     soon("Extensions", &icons::EXTENSIONS),
-    soon("MCP", &icons::MCP),
+    Item {
+        label: "MCP",
+        icon: &icons::MCP,
+        route: Route::Mcp,
+    },
     soon("Skills", &icons::SKILLS),
     soon("Guardrails", &icons::GUARDRAILS),
 ];
 
-static SETTINGS: Item = soon("Settings", &icons::SETTINGS);
+static SETTINGS: Item = Item {
+    label: "Settings",
+    icon: &icons::SETTINGS,
+    route: Route::Settings,
+};
 
 pub const COLLAPSED: f32 = 56.0;
 pub const EXPANDED: f32 = 184.0;

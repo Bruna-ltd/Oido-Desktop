@@ -14,8 +14,10 @@ mod files;
 mod flows;
 mod folders;
 mod listing;
+mod mcp;
 mod model;
 mod models;
+mod omarchy;
 mod persist;
 mod picker;
 mod providers;
@@ -64,5 +66,8 @@ fn main() {
     .chrome(chrome);
     // Worker threads (checking a key, refreshing models) hand their results back through this.
     app::set_handle(app.handle());
+    // The Settings page can follow Omarchy's theme: a switch there reads the themes again.
+    let handle = app.handle();
+    theme::follow_omarchy(move || handle.update(|s: &mut app::App, _| s.look.reload()));
     app.run();
 }

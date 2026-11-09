@@ -456,7 +456,11 @@ fn cost(s: &App, k: &Kit) -> Option<El> {
     Some(
         text(line)
             .font(k.ty.small)
-            .color(if big { theme::amber() } else { k.c.text_muted })
+            .color(if big {
+                k.c.warning.icon
+            } else {
+                k.c.text_muted
+            })
             .wrap(),
     )
 }
@@ -510,9 +514,10 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 placeholder: "Add tools",
                 noun: ("tool", "tools"),
                 none: "No tools are registered.",
-                items: crate::tools::registered()
+                items: s
+                    .all_tools()
                     .iter()
-                    .filter(|t| s.typesafe_connected() || !crate::tools::needs_typesafe(t.name))
+                    .filter(|t| s.typesafe_connected() || !crate::tools::needs_typesafe(&t.name))
                     .map(|t| Item {
                         name: t.name.to_owned(),
                         description: t.description.to_owned(),

@@ -9,7 +9,6 @@ use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, Spi
 use crate::app::App;
 use crate::delegate::{Delegated, Stage};
 use crate::model::ToolCall;
-use crate::theme;
 
 /// Steps shown on a card; older ones are counted.
 const SHOWN: usize = 6;
@@ -61,8 +60,8 @@ pub fn mark(state: State, k: &Kit) -> El {
     let c = &k.c;
     match state {
         State::Running => Spinner::new().size(14.0).build(k),
-        State::Done => icon(&glyphs::CHECK_SMALL, 14.0).color(theme::green()),
-        State::Failed => icon(&glyphs::CIRCLE_X, 14.0).color(theme::amber()),
+        State::Done => icon(&glyphs::CHECK_SMALL, 14.0).color(k.c.success.icon),
+        State::Failed => icon(&glyphs::CIRCLE_X, 14.0).color(k.c.warning.icon),
         State::Pending | State::Stopped => icon(&glyphs::DASH, 14.0).color(c.text_faint),
     }
 }
