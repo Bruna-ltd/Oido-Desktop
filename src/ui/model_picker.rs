@@ -155,16 +155,20 @@ impl<S: 'static> ModelPicker<S> {
         } else {
             popover.build(k, layer)
         };
-        if !(self.clearable && current.is_some()) {
-            return field;
+        // Always wrapped. The popover positions its list against `field`'s own key, so a caller
+        // that keys what this returns (as callers do) must land on the wrapper, never on `field`.
+        let mut out = row().gap(4.0).center_y().child(field);
+        if self.clearable && current.is_some() {
+            out = out.child(
+                IconButton::new(&glyphs::CLOSE)
+                    .variant(IconButtonVariant::GhostMuted)
+                    .label("Clear selection")
+                    .on_press(move |s: &mut S| on_change(s, None))
+                    .build(k)
+                    .key(format!("{key}-clear")),
+            );
         }
-        let clear = IconButton::new(&glyphs::CLOSE)
-            .variant(IconButtonVariant::GhostMuted)
-            .label("Clear selection")
-            .on_press(move |s: &mut S| on_change(s, None))
-            .build(k)
-            .key(format!("{key}-clear"));
-        row().gap(4.0).center_y().child(field).child(clear)
+        out
     }
 }
 
@@ -221,22 +225,42 @@ fn list_body<S: 'static>(
 
     // Pinned to the popup's width: left to size itself it grows to its widest row and spills out.
     let inner = width - 8.0;
-    let mut list = col()
+    // Only the rows on screen are built: OpenRouter alone lists hundreds of models.
+    let built = Rc::new(rows);
+    let list = col()
         .key("rows")
         .w(inner)
         .growth(GrowthSpec::default())
-        .virtualize(ROW)
+        .virtual_rows(
+            built.len(),
+            ROW,
+            {
+                let (key, built) = (key.to_owned(), built.clone());
+                move |_: &S, i| {
+                    std::borrow::Cow::Owned(match &built[i] {
+                        Row::Heading { provider, .. } => format!("{key}-group-{provider}"),
+                        Row::Model { model, .. } => row_key(&key, model),
+                    })
+                }
+            },
+            {
+                let (kit, key, built) = (k.clone(), key.to_owned(), built.clone());
+                let (current, active_model) = (current.cloned(), active_model.clone());
+                let (access, on_change) = (access.clone(), on_change.clone());
+                move |_: &S, i| match &built[i] {
+                    Row::Heading { provider, label } => heading(&kit, &key, provider, label),
+                    Row::Model { model, name, caps } => {
+                        let on = Some(model) == active_model.as_ref();
+                        let chosen = Some(model) == current.as_ref();
+                        model_row(
+                            &kit, &key, model, name, *caps, on, chosen, &access, &on_change,
+                        )
+                    }
+                }
+            },
+        )
         .reveal_selected(true);
-    for row_ in &rows {
-        list = list.child(match row_ {
-            Row::Heading { provider, label } => heading(k, key, provider, label),
-            Row::Model { model, name, caps } => {
-                let on = Some(model) == active_model.as_ref();
-                let chosen = Some(model) == current;
-                model_row(k, key, model, name, *caps, on, chosen, access, on_change)
-            }
-        });
-    }
+    let rows = built;
     let viewport = col()
         .key("viewport")
         .role("listbox")

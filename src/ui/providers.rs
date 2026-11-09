@@ -8,7 +8,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Divider, Kit, TextInput};
 use super::model_picker::ModelPicker;
 
 use crate::app::{App, now};
-use crate::providers::{NEW_SERVER, Provider, Providers};
+use crate::providers::{NEW_SERVER, Provider, Providers, serves_chat};
 
 const PAGE: f32 = 768.0;
 
@@ -163,6 +163,9 @@ fn refresh_button(s: &App, id: &str, k: &Kit) -> El {
 
 /// "42 models" with how long ago they were fetched, or that there are none.
 fn models_line(p: &Providers, id: &str) -> Option<String> {
+    if !serves_chat(id) {
+        return None;
+    }
     let saved = p.models.get(id)?;
     let n = saved.models.len();
     let count = match n {
@@ -281,7 +284,7 @@ fn connected_row(s: &App, p: &Provider, k: &Kit) -> El {
                 s.providers.row_errors.get(&p.id),
                 k,
             ))
-            .child(refresh_button(s, &p.id, k))
+            .children(serves_chat(&p.id).then(|| refresh_button(s, &p.id, k)))
             .child(off),
     )
 }

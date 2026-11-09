@@ -29,10 +29,6 @@ pub fn violet() -> Color {
     oklch(0.74, 0.12, 295.0)
 }
 
-pub fn sky() -> Color {
-    oklch(0.76, 0.10, 235.0)
-}
-
 pub fn avatar_color(hue: f32) -> Color {
     oklch(0.62, 0.12, hue)
 }

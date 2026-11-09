@@ -92,7 +92,7 @@ pub fn rows(groups: &[Group], query: &str) -> Vec<Row> {
 }
 
 /// Case-insensitive subsequence match; runs of consecutive letters and word starts score higher.
-fn score(query: &str, text: &str) -> Option<i32> {
+pub fn score(query: &str, text: &str) -> Option<i32> {
     let needle: Vec<char> = query.chars().collect();
     let (mut n, mut score, mut previous, mut boundary) = (0, 0, false, true);
     for c in text.to_lowercase().chars() {
@@ -289,5 +289,98 @@ mod tests {
             "Home"
         );
         assert_eq!(shifted(&[], None, 1, true), None);
+    }
+}
+
+/// A multi-select picker's search, highlighted row and open flag (skills, tools). Unlike the
+/// model picker it stays open as you choose, since several can be picked.
+#[derive(Clone, Debug, Default)]
+pub struct MultiPicker {
+    pub open: bool,
+    pub search: TextEdit,
+    /// Place in the shown list the keyboard is on.
+    pub active: usize,
+}
+
+impl MultiPicker {
+    pub fn close(&mut self) {
+        self.open = false;
+        self.search.focused = false;
+        self.search.preedit = None;
+    }
+
+    pub fn show(&mut self) {
+        self.open = true;
+        self.search = TextEdit::new("");
+        self.search.focused = true;
+        self.active = 0;
+    }
+}
+
+/// One choice in a multi-select: a skill or a tool.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Item {
+    pub name: String,
+    pub description: String,
+}
+
+/// The items that match `query`, best first: a name that starts with it, then a name that
+/// contains it, then a description that does. All, in order, when the query is empty. Plain text,
+/// not scattered letters: with a long list those match nearly everything.
+pub fn matching<'a>(items: &'a [Item], query: &str) -> Vec<&'a Item> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return items.iter().collect();
+    }
+    let mut hits: Vec<(u8, usize)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let (name, about) = (s.name.to_lowercase(), s.description.to_lowercase());
+            let rank = if name.starts_with(&query) {
+                0
+            } else if name.contains(&query) {
+                1
+            } else if about.contains(&query) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, i))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().map(|(_, i)| &items[i]).collect()
+}
+
+#[cfg(test)]
+mod multi_tests {
+    use super::*;
+
+    #[test]
+    fn searching_finds_by_name_first_then_by_description() {
+        let item = |n: &str, d: &str| Item {
+            name: n.into(),
+            description: d.into(),
+        };
+        let all = [
+            item("copy", "Helps with seo copy"),
+            item("ai-seo", "Search answers"),
+            item("seo-audit", "Checks pages"),
+            item("serverless", "Bring any source"),
+        ];
+        let names = |q| {
+            matching(&all, q)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(""), ["copy", "ai-seo", "seo-audit", "serverless"]);
+        assert_eq!(
+            names("seo"),
+            ["seo-audit", "ai-seo", "copy"],
+            "starts with, then contains, then the description; no scattered letters"
+        );
+        assert!(names("zzz").is_empty());
     }
 }

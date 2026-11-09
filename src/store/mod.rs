@@ -16,7 +16,9 @@ use crate::vault::{self, Vault};
 mod agents;
 mod models;
 mod providers;
+mod runs;
 mod settings;
+mod workflows;
 
 pub use providers::Verified;
 
@@ -88,17 +90,24 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 3] = [
+const MIGRATIONS: [&str; 8] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
+    include_str!("../../db/migrations/004_no_sample_agents.sql"),
+    include_str!("../../db/migrations/005_runs.sql"),
+    include_str!("../../db/migrations/006_agent_workdir.sql"),
+    include_str!("../../db/migrations/007_workflows.sql"),
+    include_str!("../../db/migrations/008_delegation.sql"),
 ];
 
-const QUERY_FILES: [&str; 4] = [
+const QUERY_FILES: [&str; 6] = [
     include_str!("../../db/queries/settings.sql"),
     include_str!("../../db/queries/providers.sql"),
     include_str!("../../db/queries/agents.sql"),
     include_str!("../../db/queries/sessions.sql"),
+    include_str!("../../db/queries/runs.sql"),
+    include_str!("../../db/queries/workflows.sql"),
 ];
 
 pub struct Store {
@@ -195,7 +204,8 @@ fn parse_queries() -> Vec<(&'static str, &'static str)> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::agents::{Agent, seed};
+    use crate::agents::Agent;
+    use crate::demo::sample_agents;
     use crate::model::{AgentStatus, chat};
     use crate::providers;
 
@@ -310,7 +320,7 @@ mod tests {
     #[test]
     fn the_whole_roster_round_trips_with_teams_chats_and_messages() {
         let s = mem();
-        let before: Vec<Agent> = seed().into_iter().map(idle).collect();
+        let before: Vec<Agent> = sample_agents().into_iter().map(idle).collect();
         s.save_roster(&before).unwrap();
         let after = s.load_agents().unwrap();
         assert_eq!(after, before);
@@ -324,15 +334,15 @@ mod tests {
     #[test]
     fn a_team_member_cannot_have_a_team_and_an_agent_with_one_cannot_join_another() {
         let s = mem();
-        s.save_roster(&seed().into_iter().map(idle).collect::<Vec<_>>())
+        s.save_roster(&sample_agents().into_iter().map(idle).collect::<Vec<_>>())
             .unwrap();
-        let mut deep = idle(seed().remove(2));
+        let mut deep = idle(sample_agents().remove(2));
         deep.id = "deep".into();
         assert!(
             s.save_agent(&deep, Some("reviewer"), 0).is_err(),
             "a third level is refused"
         );
-        let mut forge = idle(seed().remove(1));
+        let mut forge = idle(sample_agents().remove(1));
         forge.id = "forge".into();
         assert!(
             s.save_agent(&forge, Some("atlas"), 0).is_err(),
@@ -343,7 +353,7 @@ mod tests {
     #[test]
     fn deleting_an_agent_takes_its_team_chats_and_messages_with_it() {
         let s = mem();
-        s.save_roster(&seed().into_iter().map(idle).collect::<Vec<_>>())
+        s.save_roster(&sample_agents().into_iter().map(idle).collect::<Vec<_>>())
             .unwrap();
         s.delete_agent("forge").unwrap();
         let left = s.load_agents().unwrap();
@@ -366,7 +376,7 @@ mod tests {
     fn messages_are_appended_and_a_changed_one_is_replaced_in_place() {
         use crate::model::Message;
         let s = mem();
-        let mut a = idle(seed().remove(2));
+        let mut a = idle(sample_agents().remove(2));
         a.sessions = vec![chat("One", vec![])];
         let id = a.sessions[0].id.clone();
         s.save_roster(&[a.clone()]).unwrap();
@@ -633,6 +643,86 @@ mod tests {
             "sk-live-real-keyring-1234"
         );
         Vault::forget_os_account(&account);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrating_removes_the_sample_agents_and_their_chats_but_keeps_agents_you_made() {
+        let dir = std::env::temp_dir().join(format!("oido-mig4-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oido.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+            for step in &MIGRATIONS[..3] {
+                conn.execute_batch(step).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO agents (id, parent_id, name) VALUES ('atlas', NULL, 'Atlas');
+                 INSERT INTO agents (id, parent_id, name) VALUES ('fact-checker', 'atlas', 'fact-checker');
+                 INSERT INTO agents (id, parent_id, name) VALUES ('my-own-agent', NULL, 'Billing helper');
+                 INSERT INTO sessions (id, agent_id, title) VALUES ('s-sample', 'atlas', 'Monday brief');
+                 INSERT INTO sessions (id, agent_id, title) VALUES ('s-mine', 'my-own-agent', 'New chat');
+                 INSERT INTO messages (session_id, seq, body) VALUES ('s-sample', 0, '{\"type\":\"user\",\"data\":\"hi\"}');
+                 INSERT INTO messages (session_id, seq, body) VALUES ('s-mine', 0, '{\"type\":\"user\",\"data\":\"real\"}');
+                 INSERT INTO settings (key, value) VALUES ('agents.selected', '{\"id\":\"atlas\",\"parent\":null}');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+        let s = Store::open(&path, Vault::fixed([1; 32])).unwrap();
+        let agents = s.load_agents().unwrap();
+        assert_eq!(
+            agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["Billing helper"],
+            "only the agent you made is left"
+        );
+        assert_eq!(
+            agents[0].sessions[0].messages.len(),
+            1,
+            "with its chat and message"
+        );
+        let orphans: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE agent_id IN ('atlas', 'fact-checker')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "the samples' chats went with them");
+        assert!(
+            s.setting::<crate::agents::Target>("agents.selected")
+                .unwrap()
+                .is_none(),
+            "a selection that pointed at a sample is cleared"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_selection_of_your_own_agent_survives_the_migration() {
+        let dir = std::env::temp_dir().join(format!("oido-mig4b-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oido.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for step in &MIGRATIONS[..3] {
+                conn.execute_batch(step).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO agents (id, name) VALUES ('my-own-agent', 'Billing helper');
+                 INSERT INTO settings (key, value) VALUES ('agents.selected', '{\"id\":\"my-own-agent\",\"parent\":null}');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+        let s = Store::open(&path, Vault::fixed([1; 32])).unwrap();
+        let kept = s
+            .setting::<crate::agents::Target>("agents.selected")
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.id, "my-own-agent");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

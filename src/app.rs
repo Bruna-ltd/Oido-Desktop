@@ -8,10 +8,11 @@ use rune::TextEdit;
 use rune_kit::shell::PaneState;
 
 use crate::agents::{Agent, FormKind, Roster, Target};
-use crate::model::{self, AgentStatus, Approval, Decision, Message, Run, chat};
+use crate::model::{AgentStatus, Approval, Decision, Message, chat};
 use crate::persist;
 use crate::picker::PickerState;
 use crate::providers::{ModelStatus, Providers};
+use crate::runs::{Run, Step};
 use crate::store::Store;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,10 @@ pub enum Route {
     Chat,
     Runs,
     Providers,
+    /// The register of tools agents can be given.
+    Tools,
+    /// Saved workflows and their runs.
+    Workflows,
     /// The create, edit and team-member form (`Roster::editing` says which).
     AgentForm,
     /// A Studio section not built natively yet.
@@ -59,10 +64,42 @@ pub struct App {
     pub inspector: PaneState,
     pub route: Route,
     pub roster: Roster,
+    /// The Runs screen: the newest runs from the database, the open one, and its steps.
     pub runs: Vec<Run>,
     pub run: usize,
+    pub steps: Vec<Step>,
     pub record: usize,
+    /// Replies being written, by chat.
+    pub live: std::collections::HashMap<String, crate::run::Live>,
+    /// Commands running for the shell tool, by chat, with the flag that stops each.
+    pub commands: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Chats whose agent has handed tasks to team members that have not come back yet.
+    pub delegating: std::collections::HashMap<String, crate::delegate::Delegating>,
+    /// Every task handed over this launch, by the call that handed it over, with how it went.
+    pub delegated: std::collections::HashMap<String, crate::delegate::Delegated>,
+    /// Counts seconds while something works, so clocks on screen redraw.
+    pub tick: u64,
+    /// Workflows: the saved ones, drafts learned from chats (by chat), and what is being learned.
+    pub workflows: Vec<crate::workflow::Saved>,
+    pub drafts: std::collections::HashMap<String, crate::workflow::Draft>,
+    pub teaching: std::collections::HashMap<String, crate::flows::Teach>,
+    /// The change asked of the open draft, typed in its card.
+    pub refine: TextEdit,
+    /// The Workflows page: the open workflow, its runs, the open run, the inputs for the next run,
+    /// workflows running from the page (with the flag that stops each), and what to tell you.
+    pub wf_open: Option<String>,
+    pub wf_runs: Vec<crate::workflow::RunRecord>,
+    pub wf_run: usize,
+    pub wf_inputs: Vec<(String, TextEdit)>,
+    pub wf_jobs: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub wf_notice: Option<String>,
+    pub wf_confirm: bool,
     pub composer: TextEdit,
+    /// What was typed in the chats not open, by session id: each tab keeps its own draft.
+    pub parked: std::collections::HashMap<String, TextEdit>,
+    /// The answer being typed to the agent's question, and the options picked for it.
+    pub answer_text: TextEdit,
+    pub picks: Vec<String>,
     pub effort: Effort,
     /// The composer's model picker.
     pub model_picker: PickerState,
@@ -71,6 +108,9 @@ pub struct App {
     /// The right rail shows labels beside its icons.
     pub rail_open: bool,
     pub providers: Providers,
+    /// Skills found in the skills folder, and where it is.
+    pub skills: Vec<crate::skills::Skill>,
+    pub skills_dir: Option<std::path::PathBuf>,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
 }
@@ -81,6 +121,11 @@ static HANDLE: OnceLock<AppHandle<App>> = OnceLock::new();
 
 pub fn set_handle(handle: AppHandle<App>) {
     let _ = HANDLE.set(handle);
+}
+
+/// The running app, if there is one (not in tests or headless runs).
+pub fn handle() -> Option<&'static AppHandle<App>> {
+    HANDLE.get()
 }
 
 /// Seconds since the epoch.
@@ -94,6 +139,16 @@ pub fn init() -> App {
     let store = Store::open_default()
         .map_err(|e| eprintln!("oido: running without saved data: {e}"))
         .ok();
+    if let Some(db) = &store
+        && let Err(e) = db.tidy_runs(now(), crate::runs::KEEP_SECS)
+    {
+        eprintln!("oido: could not tidy old runs: {e}");
+    }
+    if let Some(db) = &store
+        && let Err(e) = db.tidy_workflow_runs(now(), crate::runs::KEEP_SECS)
+    {
+        eprintln!("oido: could not tidy old workflow runs: {e}");
+    }
     App::new(store)
 }
 
@@ -122,23 +177,52 @@ impl App {
 
     pub fn new(store: Option<Store>) -> App {
         let (roster, providers) = persist::load(store.as_ref());
-        App {
+        let skills_dir = crate::skills::dir();
+        let mut app = App {
             sidebar: PaneState::new(264.0).range(180.0, 420.0),
             inspector: PaneState::new(300.0).range(240.0, 460.0),
             route: Route::Chat,
             roster,
-            runs: model::runs(),
+            runs: Vec::new(),
             run: 0,
+            steps: Vec::new(),
             record: 0,
+            live: std::collections::HashMap::new(),
+            commands: std::collections::HashMap::new(),
+            delegating: std::collections::HashMap::new(),
+            delegated: std::collections::HashMap::new(),
+            tick: 0,
+            workflows: Vec::new(),
+            drafts: std::collections::HashMap::new(),
+            teaching: std::collections::HashMap::new(),
+            refine: TextEdit::new(""),
+            wf_open: None,
+            wf_runs: Vec::new(),
+            wf_run: 0,
+            wf_inputs: Vec::new(),
+            wf_jobs: std::collections::HashMap::new(),
+            wf_notice: None,
+            wf_confirm: false,
             composer: TextEdit::new(""),
+            parked: std::collections::HashMap::new(),
+            answer_text: TextEdit::new(""),
+            picks: Vec::new(),
             effort: Effort::Off,
             model_picker: PickerState::default(),
             pinned_closed: false,
             others_closed: false,
             rail_open: false,
             providers,
+            skills: skills_dir
+                .as_deref()
+                .map(crate::skills::discover)
+                .unwrap_or_default(),
+            skills_dir,
             store,
-        }
+        };
+        app.settle_interrupted_commands();
+        app.load_workflows();
+        app
     }
 
     /// Whether the open agent has a model that can answer right now.
@@ -155,8 +239,27 @@ impl App {
         self.roster.current()
     }
 
+    /// Runs a change of which chat is open, parking the composer's text with the chat it was typed
+    /// in and bringing back the new chat's own.
+    fn switching_chat(&mut self, change: impl FnOnce(&mut Self)) {
+        let open = |s: &Self| s.roster.current().map(|a| a.chat().id.clone());
+        let before = open(self);
+        change(self);
+        let after = open(self);
+        if before == after {
+            return;
+        }
+        let draft = std::mem::replace(&mut self.composer, TextEdit::new(""));
+        if let Some(id) = before.filter(|_| !draft.text.is_empty()) {
+            self.parked.insert(id, draft);
+        }
+        if let Some(back) = after.and_then(|id| self.parked.remove(&id)) {
+            self.composer = back;
+        }
+    }
+
     pub fn select_agent(&mut self, t: Target) {
-        self.roster.select(t);
+        self.switching_chat(|s| s.roster.select(t));
         self.route = Route::Chat;
         self.save_selection();
     }
@@ -224,35 +327,19 @@ impl App {
     /// Deletes the confirmed agent. If its form is open, that closes too.
     pub fn confirm_delete(&mut self) {
         if let Some(t) = self.roster.confirm.clone() {
+            if let Some(a) = self.roster.find(&t) {
+                for id in Roster::session_ids(a) {
+                    self.cancel_session(&id);
+                }
+            }
             self.roster.delete(&t);
             self.delete_saved_agent(&t.id);
+            self.load_workflows();
             self.save_selection();
             if self.route == Route::AgentForm {
                 self.cancel_form();
             }
         }
-    }
-
-    pub fn select_run(&mut self, i: usize) {
-        self.run = i;
-        self.record = 0;
-    }
-
-    /// Appends the composer's text as a user message. The agent's reply is the logic layer's job.
-    pub fn send(&mut self) {
-        let text = self.composer.text.trim().to_owned();
-        if text.is_empty() || !self.can_answer() {
-            return;
-        }
-        let Some(agent) = self.roster.current_mut() else {
-            return;
-        };
-        let messages = &mut agent.chat_mut().messages;
-        messages.push(Message::User(text));
-        let seq = messages.len() - 1;
-        self.composer = TextEdit::new("");
-        self.composer.focused = true;
-        self.save_message(seq);
     }
 
     /// Decides the open approval gate of the current agent, if any.
@@ -281,39 +368,51 @@ impl App {
         }
     }
 
-    /// Stops a running agent. The run itself is the logic layer's job.
-    pub fn stop(&mut self) {
-        if let Some(a) = self.roster.current_mut() {
-            a.status = AgentStatus::Idle;
-        }
+    pub fn new_tab(&mut self) {
+        self.switching_chat(Self::open_new_tab);
+        self.composer.focused = true;
     }
 
-    pub fn new_tab(&mut self) {
+    fn open_new_tab(&mut self) {
         let Some(agent) = self.roster.current_mut() else {
             return;
         };
         agent.sessions.push(chat("New chat", Vec::new()));
         agent.active = agent.sessions.len() - 1;
-        self.composer.focused = true;
         self.save_chat();
     }
 
     pub fn select_tab(&mut self, i: usize) {
-        if let Some(a) = self.roster.current_mut() {
-            a.active = i;
-        }
+        self.switching_chat(|s| {
+            if let Some(a) = s.roster.current_mut() {
+                a.active = i;
+            }
+        });
         if let Some(t) = self.roster.selected.clone() {
             self.save_agent_row(&t);
         }
     }
 
     pub fn close_tab(&mut self, i: usize) {
+        let gone = self
+            .roster
+            .current()
+            .and_then(|a| a.sessions.get(i))
+            .map(|c| c.id.clone());
+        self.switching_chat(|s| s.remove_tab(i));
+        if let Some(id) = gone {
+            self.parked.remove(&id);
+        }
+    }
+
+    fn remove_tab(&mut self, i: usize) {
         let Some(agent) = self.roster.current_mut() else {
             return;
         };
         if agent.sessions.len() > 1 {
             let gone = agent.sessions.remove(i);
             agent.active = agent.active.min(agent.sessions.len() - 1);
+            self.cancel_session(&gone.id);
             self.delete_saved_chat(&gone.id);
             if let Some(t) = self.roster.selected.clone() {
                 self.save_agent_row(&t);
@@ -340,31 +439,34 @@ impl App {
 mod tests {
     use super::*;
     use crate::models::ModelRef;
-    use crate::testing::{TempDb, ready};
+    use crate::testing::{TempDb, ready, samples};
 
     #[test]
     fn send_appends_a_user_message_and_clears_the_composer() {
-        let mut app = App::new(None);
+        let mut app = samples();
         ready(&mut app);
         let before = app.current().unwrap().chat().messages.len();
         app.composer = TextEdit::new("  hello  ");
         app.send();
-        assert_eq!(app.current().unwrap().chat().messages.len(), before + 1);
-        assert!(
-            matches!(app.current().unwrap().chat().messages.last(), Some(Message::User(t)) if t == "hello")
+        let messages = &app.current().unwrap().chat().messages;
+        assert_eq!(
+            messages.len(),
+            before + 2,
+            "your message and the reply to it"
         );
+        assert!(matches!(&messages[before], Message::User(t) if t == "hello"));
         assert!(app.composer.text.is_empty());
         app.send();
         assert_eq!(
             app.current().unwrap().chat().messages.len(),
-            before + 1,
+            before + 2,
             "blank input sends nothing"
         );
     }
 
     #[test]
     fn nothing_is_sent_until_the_agent_has_a_model_that_can_answer() {
-        let mut app = App::new(None);
+        let mut app = samples();
         let before = app.current().unwrap().chat().messages.len();
         app.composer = TextEdit::new("hello");
         app.send();
@@ -388,14 +490,14 @@ mod tests {
         app.send();
         assert_eq!(
             app.current().unwrap().chat().messages.len(),
-            before + 1,
+            before + 2,
             "with the default it can"
         );
     }
 
     #[test]
     fn deciding_the_gate_resolves_it_and_frees_the_agent() {
-        let mut app = App::new(None);
+        let mut app = samples();
         assert!(app.current().unwrap().status == AgentStatus::Waiting);
         app.decide(Decision::Approve);
         let decided = app.current().unwrap().chat().messages.iter().any(|m| {
@@ -415,8 +517,42 @@ mod tests {
     }
 
     #[test]
+    fn each_tab_keeps_its_own_draft() {
+        let db = TempDb::new();
+        let mut app = db.open_with_samples();
+        ready(&mut app);
+        let old = app.current().unwrap().active;
+        app.composer = TextEdit::new("first");
+        app.new_tab();
+        let new = app.current().unwrap().active;
+        assert!(app.composer.text.is_empty(), "a new tab starts empty");
+        app.composer = TextEdit::new("second");
+        app.select_tab(old);
+        assert_eq!(app.composer.text, "first");
+        app.select_tab(new);
+        assert_eq!(app.composer.text, "second");
+        app.select_agent(Target::agent("scout"));
+        assert!(
+            app.composer.text.is_empty(),
+            "another agent's chat is its own"
+        );
+        app.select_agent(Target::agent("atlas"));
+        assert_eq!(app.composer.text, "second", "and the open tab was kept");
+        app.select_tab(old);
+        app.close_tab(new);
+        assert_eq!(app.composer.text, "first");
+        app.new_tab();
+        let doomed = app.current().unwrap().active;
+        app.composer = TextEdit::new("doomed");
+        app.select_tab(old);
+        app.close_tab(doomed);
+        assert_eq!(app.composer.text, "first");
+        assert!(app.parked.is_empty(), "a closed tab leaves no draft behind");
+    }
+
+    #[test]
     fn tabs_open_close_and_keep_one() {
-        let mut app = App::new(None);
+        let mut app = samples();
         let before = app.current().unwrap().sessions.len();
         app.new_tab();
         assert_eq!(app.current().unwrap().sessions.len(), before + 1);
@@ -438,7 +574,7 @@ mod tests {
 
     #[test]
     fn start_fresh_marks_the_cut_once_and_keeps_what_was_read() {
-        let mut app = App::new(None);
+        let mut app = samples();
         let before = app.current().unwrap().chat().messages.len();
         app.start_fresh();
         app.start_fresh();
@@ -448,26 +584,83 @@ mod tests {
     }
 
     #[test]
-    fn the_first_launch_starts_with_the_samples_and_later_launches_with_what_was_saved() {
+    fn a_new_install_has_no_agents_and_no_connected_provider() {
         let db = TempDb::new();
-        let first = db.open();
-        let names: Vec<String> = first.roster.list.iter().map(|a| a.name.clone()).collect();
+        let app = db.open();
+        assert!(app.roster.list.is_empty(), "no sample agents");
+        assert!(app.current().is_none() && app.roster.selected.is_none());
         assert!(
-            names.contains(&"Atlas".to_owned()),
-            "sample agents on the very first launch"
-        );
-        assert!(
-            first.providers.list.iter().all(|p| !p.connected),
+            app.providers.list.iter().all(|p| !p.connected),
             "no provider starts connected"
         );
-        drop(first);
-        assert_eq!(db.open().roster.list.len(), names.len());
+        assert!(
+            !app.providers.list.is_empty(),
+            "but the providers you can connect are listed"
+        );
+        drop(app);
+        assert!(
+            db.open().roster.list.is_empty(),
+            "and it stays that way on the next launch"
+        );
+    }
+
+    #[test]
+    fn the_first_agent_is_made_from_the_form_selected_and_kept_across_a_restart() {
+        let db = TempDb::new();
+        let mut app = db.open();
+        app.new_agent();
+        assert!(
+            app.route == Route::AgentForm && !app.roster.can_submit(),
+            "a name is required"
+        );
+        app.roster.form.name = TextEdit::new("Billing helper");
+        app.roster.form.prompt = TextEdit::new("You answer billing questions.");
+        app.submit_form();
+        assert!(app.route == Route::Chat);
+        let made = app.roster.selected.clone().unwrap();
+        assert_eq!(app.current().unwrap().name, "Billing helper");
+        assert_eq!(
+            app.current().unwrap().sessions.len(),
+            1,
+            "it starts with one chat"
+        );
+        drop(app);
+
+        let app = db.open();
+        assert_eq!(app.roster.list.len(), 1, "exactly the agent that was made");
+        assert_eq!(
+            app.roster.find(&made).unwrap().prompt,
+            "You answer billing questions."
+        );
+        assert_eq!(app.roster.selected, Some(made), "and it is the open one");
+    }
+
+    #[test]
+    fn a_team_member_can_be_added_to_the_first_agent_and_deleting_it_leaves_an_empty_app() {
+        let db = TempDb::new();
+        let mut app = db.open();
+        app.new_agent();
+        app.roster.form.name = TextEdit::new("Lead");
+        app.submit_form();
+        let lead = app.roster.selected.clone().unwrap();
+        app.new_member(&lead.id);
+        app.roster.form.name = TextEdit::new("Checker");
+        app.submit_form();
+        assert_eq!(app.roster.find(&lead).unwrap().subagents.len(), 1);
+        app.roster.confirm = Some(lead);
+        app.confirm_delete();
+        assert!(app.roster.list.is_empty() && app.current().is_none());
+        drop(app);
+        assert!(
+            db.open().roster.list.is_empty(),
+            "the team went with its agent, saved"
+        );
     }
 
     #[test]
     fn what_you_change_survives_a_restart() {
         let db = TempDb::new();
-        let mut app = db.open();
+        let mut app = db.open_with_samples();
         ready(&mut app);
         app.composer = TextEdit::new("remember me");
         app.send();
@@ -508,9 +701,9 @@ mod tests {
     }
 
     #[test]
-    fn deleting_everything_stays_deleted_and_does_not_bring_the_samples_back() {
+    fn deleting_every_agent_leaves_none_and_nothing_comes_back() {
         let db = TempDb::new();
-        let mut app = db.open();
+        let mut app = db.open_with_samples();
         let ids: Vec<String> = app.roster.list.iter().map(|a| a.id.clone()).collect();
         for id in ids {
             app.roster.confirm = Some(Target::agent(id));
@@ -523,7 +716,7 @@ mod tests {
     #[test]
     fn an_approval_decided_in_place_is_saved_in_place() {
         let db = TempDb::new();
-        let mut app = db.open();
+        let mut app = db.open_with_samples();
         app.decide(Decision::Reject);
         drop(app);
         let app = db.open();
@@ -545,7 +738,7 @@ mod tests {
     #[test]
     fn closing_a_chat_removes_it_from_the_saved_data_too() {
         let db = TempDb::new();
-        let mut app = db.open();
+        let mut app = db.open_with_samples();
         app.close_tab(1);
         drop(app);
         assert_eq!(db.open().current().unwrap().sessions.len(), 1);

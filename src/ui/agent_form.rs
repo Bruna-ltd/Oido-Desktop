@@ -6,8 +6,9 @@ use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, Dialog, Kit, TextArea, TextInput};
 
 use super::model_picker::ModelPicker;
-use crate::agents::{FormKind, HUES, SKILLS, TEMPLATES, TOOLS, hue_of, initial_of};
+use crate::agents::{FormKind, HUES, TEMPLATES, hue_of, initial_of};
 use crate::app::App;
+use crate::picker::Item;
 use crate::theme;
 
 const PAGE: f32 = 720.0;
@@ -79,6 +80,22 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .key("prompt"),
             k,
         ))
+        .children(member.then(|| {
+            card(
+                "When should it be used?",
+                &format!(
+                    "One line {} reads to decide whether to hand it a task.",
+                    parent_name.as_deref().unwrap_or("its lead")
+                ),
+                TextInput::new(&r.form.description)
+                    .placeholder("e.g. Checks a draft's numbers against their sources.")
+                    .label("When to use")
+                    .on_edit(|s: &mut App| &mut s.roster.form.description)
+                    .build(k)
+                    .key("description"),
+                k,
+            )
+        }))
         .child(card(
             if member { "Which AI should it use?" } else { "Which AI should answer?" },
             &match &parent_name {
@@ -88,7 +105,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             model_select(s, member, k, layer),
             k,
         ))
-        .child(more_options(s, k));
+        .child(more_options(s, k, layer));
     col()
         .key("agent-form")
         .w_full()
@@ -325,7 +342,7 @@ fn model_select(s: &App, member: bool, k: &Kit, layer: &mut Vec<El>) -> El {
 }
 
 /// Optional and technical: closed until asked for, with a one-line summary of what is set.
-fn more_options(s: &App, k: &Kit) -> El {
+fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let f = &s.roster.form;
     let head = k.interactive(
@@ -373,90 +390,142 @@ fn more_options(s: &App, k: &Kit) -> El {
                 .px(20.0)
                 .pb(20.0)
                 .gap(20.0)
-                .child(chips(
-                    "Skills",
-                    "Ready-made know-how you can hand it.",
-                    &SKILLS,
-                    &f.skills,
-                    true,
-                    k,
-                ))
-                .child(chips(
-                    "What it can use (Tools)",
-                    "Only what you pick here. Leave it empty and it can talk, but not act.",
-                    &TOOLS,
-                    &f.tools,
-                    false,
-                    k,
-                )),
+                .child(skills_field(s, k, layer))
+                .child(tools_field(s, k, layer))
+                .child(workdir_field(s, k, layer)),
         );
     }
     out
 }
 
-fn chips(
-    title: &str,
-    hint: &str,
-    all: &[&'static str],
-    on: &[String],
-    skills: bool,
-    k: &Kit,
-) -> El {
+/// The skills block: a title, what it is for, and the multi-select.
+fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let mut r = row().w_full().gap(6.0);
-    let mut rows = col().w_full().gap(6.0);
-    for (i, name) in all.iter().copied().enumerate() {
-        let selected = on.iter().any(|x| x == name);
-        let chip = k.interactive(
-            row()
-                .key(format!("{}-{name}", if skills { "skill" } else { "tool" }))
-                .px(12.0)
-                .py(6.0)
-                .radius(16.0)
-                .fill(if selected {
-                    c.text_base
-                } else {
-                    Color::TRANSPARENT
-                })
-                .border(1.0, if selected { c.text_base } else { c.border_base })
-                .role("checkbox")
-                .checked(selected)
-                .on_press(move |s: &mut App| {
-                    if skills {
-                        s.roster.toggle_skill(name)
-                    } else {
-                        s.roster.toggle_tool(name)
-                    }
-                })
-                .child(text(name).font(k.ty.small).color(if selected {
-                    c.text_inverse
-                } else {
-                    c.text_base
-                })),
-        );
-        r = r.child(chip);
-        if (i + 1) % 4 == 0 || i + 1 == all.len() {
-            rows = rows.child(std::mem::replace(&mut r, row().w_full().gap(6.0)));
-        }
+    let hint = if s.skills.is_empty() {
+        "No skills found. Put them in ~/.agents/skills, one folder each with a SKILL.md."
+    } else {
+        "Ready-made know-how you can hand it. Its text goes to the model with the brief."
+    };
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(text("Skills").font(k.ty.body_medium).color(c.text_base))
+        .child(text(hint).font(k.ty.small).color(c.text_muted))
+        .child(super::multi_picker::build(
+            s,
+            k,
+            layer,
+            super::multi_picker::Spec {
+                key: "skills",
+                title: "Skills",
+                placeholder: "Add skills",
+                noun: ("skill", "skills"),
+                none: "No skills found in ~/.agents/skills.",
+                items: s
+                    .skills
+                    .iter()
+                    .map(|k| Item {
+                        name: k.name.clone(),
+                        description: k.description.clone(),
+                    })
+                    .collect(),
+                chosen: s.roster.form.skills.clone(),
+                get: |s| &s.roster.form.skill_picker,
+                edit: |s| &mut s.roster.form.skill_picker,
+                toggle: |s, name| s.roster.toggle_skill(name),
+            },
+        ))
+        .children(cost(s, k))
+}
+
+/// What the chosen skills add to every message, in words, once there are any. Amber when large.
+fn cost(s: &App, k: &Kit) -> Option<El> {
+    let chosen = &s.roster.form.skills;
+    let tokens = crate::skills::estimate_tokens(&s.skills, chosen);
+    if chosen.is_empty() || tokens == 0 {
+        return None;
     }
+    let big = tokens >= BIG_SKILLS;
+    let mut line = format!(
+        "These add {} to every message.",
+        crate::skills::tokens_label(tokens)
+    );
+    if big {
+        line.push_str(" That is a lot: fewer skills will be cheaper and faster.");
+    }
+    Some(
+        text(line)
+            .font(k.ty.small)
+            .color(if big { theme::amber() } else { k.c.text_muted })
+            .wrap(),
+    )
+}
+
+/// From this many tokens the form warns.
+const BIG_SKILLS: usize = 8_000;
+
+/// The working folder block: where this agent's commands run.
+fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    let c = &k.c;
     col()
         .w_full()
         .gap(8.0)
         .child(
-            col()
-                .gap(2.0)
-                .child(
-                    text(title.to_owned())
-                        .font(k.ty.ui_medium)
-                        .color(c.text_base),
-                )
-                .child(text(hint.to_owned()).font(k.ty.small).color(c.text_muted)),
+            text("Working folder")
+                .font(k.ty.body_medium)
+                .color(c.text_base),
         )
-        .child(rows)
+        .child(
+            text("Where its commands run. If you choose none, that is your home folder.")
+                .font(k.ty.small)
+                .color(c.text_muted),
+        )
+        .child(super::folder_picker::build(s, k, layer))
 }
 
-/// Deleting is irreversible, so it asks: a plain statement, Cancel, and the destructive button
-/// named for what it does.
+/// The tools block: what the agent may use, chosen from the register. Only what is picked here is
+/// offered to the model.
+fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    let c = &k.c;
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            text("What it can use (Tools)")
+                .font(k.ty.body_medium)
+                .color(c.text_base),
+        )
+        .child(
+            text("Only what you pick here. With none, it can talk but not act. The full list is on the Tools page.")
+                .font(k.ty.small)
+                .color(c.text_muted),
+        )
+        .child(super::multi_picker::build(
+            s,
+            k,
+            layer,
+            super::multi_picker::Spec {
+                key: "tools",
+                title: "Tools",
+                placeholder: "Add tools",
+                noun: ("tool", "tools"),
+                none: "No tools are registered.",
+                items: crate::tools::registered()
+                    .iter()
+                    .filter(|t| s.typesafe_connected() || !crate::tools::needs_typesafe(t.name))
+                    .map(|t| Item {
+                        name: t.name.to_owned(),
+                        description: t.description.to_owned(),
+                    })
+                    .collect(),
+                chosen: s.roster.form.tools.clone(),
+                get: |s| &s.roster.form.tool_picker,
+                edit: |s| &mut s.roster.form.tool_picker,
+                toggle: |s, name| s.roster.toggle_tool(name),
+            },
+        ))
+}
+
 pub fn confirm_delete(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(t) = &s.roster.confirm else { return };
     let Some(a) = s.roster.find(t) else { return };

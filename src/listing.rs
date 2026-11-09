@@ -15,6 +15,9 @@ pub enum Wire {
     OpenAi,
     Anthropic,
     Gemini,
+    /// `GET {base}/models` with a Bearer key, answering `{"models":[{"name":..}]}`. Those are
+    /// System One models, not chat models: asking only proves the key works.
+    TypeSafe,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -49,6 +52,7 @@ pub fn endpoint(id: &str, custom: bool, base_url: Option<&str>) -> Option<Endpoi
         "kimi" => (Wire::OpenAi, "https://api.moonshot.ai/v1"),
         "mistral" => (Wire::OpenAi, "https://api.mistral.ai/v1"),
         "anthropic" => (Wire::Anthropic, "https://api.anthropic.com/v1"),
+        "typesafe" => (Wire::TypeSafe, "https://api.typesafe.ai/v1"),
         "gemini" => (
             Wire::Gemini,
             "https://generativelanguage.googleapis.com/v1beta",
@@ -134,7 +138,7 @@ pub struct Request {
 fn page_request(ep: &Endpoint, key: Option<&str>, cursor: Option<&str>) -> Request {
     let mut headers = Vec::new();
     let url = match ep.wire {
-        Wire::OpenAi => {
+        Wire::OpenAi | Wire::TypeSafe => {
             if let Some(k) = key.filter(|k| !k.is_empty()) {
                 headers.push(("Authorization", format!("Bearer {k}")));
             }
@@ -201,6 +205,11 @@ fn parse_page(wire: Wire, body: &str) -> Result<(Vec<RawModel>, Option<String>),
             list("data")?.iter().filter_map(openai_model).collect(),
             None,
         )),
+        Wire::TypeSafe => {
+            // The list must be there for the key to count as checked, but it is not for agents.
+            list("models")?;
+            Ok((Vec::new(), None))
+        }
         Wire::Anthropic => {
             let models = list("data")?
                 .iter()
@@ -316,6 +325,32 @@ mod tests {
             wire,
             base: base.to_owned(),
         }
+    }
+
+    #[test]
+    fn typesafe_is_checked_with_its_key_and_lists_no_chat_models() {
+        let (base, seen) = serve(vec![(
+            200,
+            r#"{"models":[{"name":"jev-latest","description":"d","release_date":"2026-09-15"}]}"#,
+        )]);
+        let ep = at(Wire::TypeSafe, &format!("{base}/v1"));
+        assert_eq!(fetch(&ep, Some("ts-key")), Ok(Vec::new()));
+        let request = seen.recv().unwrap();
+        assert!(request.starts_with("get /v1/models "), "{request}");
+        assert!(
+            request.contains("authorization: bearer ts-key"),
+            "{request}"
+        );
+
+        let (base, _) = serve(vec![(401, "{}")]);
+        assert_eq!(
+            fetch(&at(Wire::TypeSafe, &format!("{base}/v1")), Some("bad")),
+            Err(Error::Rejected)
+        );
+        assert_eq!(
+            endpoint("typesafe", false, None).unwrap().wire,
+            Wire::TypeSafe
+        );
     }
 
     #[test]

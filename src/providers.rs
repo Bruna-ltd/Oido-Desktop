@@ -43,7 +43,16 @@ pub struct Providers {
     pub name: TextEdit,
 }
 
-const BUILT_IN: [(&str, &str, &str); 9] = [
+/// TypeSafe's System One models answer typed questions for tools; they are not chat models. It is
+/// connected like a provider, but its models are never listed for agents (see [`serves_chat`]).
+pub const TYPESAFE: &str = "typesafe";
+
+/// Whether a provider's models can run an agent's chat, and so are listed, refreshed and picked.
+pub fn serves_chat(id: &str) -> bool {
+    id != TYPESAFE
+}
+
+const BUILT_IN: [(&str, &str, &str); 10] = [
     ("openai", "OpenAI", "#10A37F"),
     ("anthropic", "Anthropic", "#CC785C"),
     ("gemini", "Gemini", "#4285F4"),
@@ -53,6 +62,7 @@ const BUILT_IN: [(&str, &str, &str); 9] = [
     ("mistral", "Mistral", "#000000"),
     ("kimi", "Kimi", "#027AFF"),
     ("qwen", "Qwen", "#615CED"),
+    (TYPESAFE, "TypeSafe", "#3B82F6"),
 ];
 
 /// A saved model list is asked for again, when a picker opens, once it is this old (as in core).
@@ -84,19 +94,20 @@ pub fn color_of(id: &str, custom: bool) -> &'static str {
         .map_or(SERVER_COLOR, |&(_, _, color)| color)
 }
 
+fn built_in(&(id, label, color): &(&'static str, &str, &'static str)) -> Provider {
+    Provider {
+        id: id.into(),
+        label: label.into(),
+        color,
+        connected: false,
+        key_masked: None,
+        base_url: None,
+        custom: false,
+    }
+}
+
 pub fn init() -> Providers {
-    let list: Vec<Provider> = BUILT_IN
-        .iter()
-        .map(|&(id, label, color)| Provider {
-            id: id.into(),
-            label: label.into(),
-            color,
-            connected: false,
-            key_masked: None,
-            base_url: None,
-            custom: false,
-        })
-        .collect();
+    let list: Vec<Provider> = BUILT_IN.iter().map(built_in).collect();
     Providers {
         list,
         models: HashMap::new(),
@@ -115,10 +126,18 @@ pub fn init() -> Providers {
 impl Providers {
     /// The saved list with the models fetched for it and the default model.
     pub fn from_saved(
-        list: Vec<Provider>,
+        mut list: Vec<Provider>,
         models: HashMap<String, ProviderModels>,
         default_model: Option<ModelRef>,
     ) -> Providers {
+        // A built-in added since the list was saved is offered too, ahead of the user's servers.
+        let at = list.iter().position(|p| p.custom).unwrap_or(list.len());
+        let missing: Vec<Provider> = BUILT_IN
+            .iter()
+            .filter(|(id, ..)| !list.iter().any(|p| p.id == *id))
+            .map(built_in)
+            .collect();
+        list.splice(at..at, missing);
         Providers {
             list,
             models,
@@ -243,6 +262,9 @@ impl Providers {
 
     /// Whether a connected provider's list is old enough to ask again. Offline, the saved one stays.
     pub fn is_stale(&self, id: &str, now: i64) -> bool {
+        if !serves_chat(id) {
+            return false;
+        }
         match self.models.get(id).and_then(|m| m.fetched_at) {
             Some(at) => now - at > STALE_AFTER_SECS,
             None => true,
@@ -510,6 +532,29 @@ mod tests {
         p.connect("openai");
         p.set_models("openai", vec![model("gpt-4o", "GPT-4o")], 1_000);
         p
+    }
+
+    #[test]
+    fn a_built_in_added_after_the_list_was_saved_still_appears() {
+        let mut saved = init().list;
+        saved.retain(|p| p.id != TYPESAFE);
+        let p = Providers::from_saved(saved, HashMap::new(), None);
+        assert!(p.get(TYPESAFE).is_some_and(|t| !t.connected && !t.custom));
+        assert_eq!(p.list.len(), BUILT_IN.len());
+    }
+
+    #[test]
+    fn typesafe_is_a_provider_that_never_serves_chat_models() {
+        let mut p = init();
+        assert!(p.get(TYPESAFE).is_some_and(|t| !t.connected));
+        p.connect(TYPESAFE);
+        p.set_models(TYPESAFE, Vec::new(), 1_000);
+        assert!(p.groups().is_empty(), "no picker group");
+        assert!(
+            !p.is_stale(TYPESAFE, 1_000_000),
+            "never asked again for chat models"
+        );
+        assert!(p.is_stale("openai", 1_000_000));
     }
 
     #[test]

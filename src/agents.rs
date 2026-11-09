@@ -6,7 +6,7 @@ use crate::models::ModelRef;
 use crate::picker::PickerState;
 use rune::TextEdit;
 
-use crate::model::{AgentStatus, Approval, Message, Session, Stats, ToolCall, chat, new_id};
+use crate::model::{AgentStatus, Session, chat, new_id};
 
 #[derive(Clone, PartialEq, Debug)]
 /// An agent, or one of its team members. A team member is an agent too, but never has a team
@@ -25,12 +25,16 @@ pub struct Agent {
     pub skills: Vec<String>,
     pub tools: Vec<String>,
     pub subagents: Vec<Agent>,
+    /// The folder its commands run in; `None` is the home folder.
+    pub workdir: Option<String>,
+    /// For a team member: when its lead should hand it a task. The lead reads this to choose.
+    pub description: String,
     pub active: usize,
     pub sessions: Vec<Session>,
 }
 
 impl Agent {
-    fn blank(id: String) -> Agent {
+    pub(crate) fn blank(id: String) -> Agent {
         Agent {
             id,
             name: String::new(),
@@ -42,6 +46,8 @@ impl Agent {
             skills: Vec::new(),
             tools: Vec::new(),
             subagents: Vec::new(),
+            workdir: None,
+            description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", Vec::new())],
         }
@@ -92,15 +98,6 @@ pub fn hue_of(name: &str) -> f32 {
         .bytes()
         .fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
     (h % 360) as f32
-}
-
-fn member(id: &str, name: &str, hue: f32, prompt: &str) -> Agent {
-    Agent {
-        name: name.into(),
-        prompt: prompt.into(),
-        hue: Some(hue),
-        ..Agent::blank(id.into())
-    }
 }
 
 /// Which agent is meant: a top-level one, or a team member of `parent`.
@@ -180,25 +177,6 @@ pub const TEMPLATES: [Template; 4] = [
     },
 ];
 
-/// What an agent can be given. Core serves these lists; fixed here until it does.
-pub const SKILLS: [&str; 8] = [
-    "web-research",
-    "summarize",
-    "wiki",
-    "github",
-    "code-review",
-    "tests",
-    "gmail",
-    "calendar",
-];
-pub const TOOLS: [&str; 6] = [
-    "storage.read",
-    "wiki.search",
-    "slack.post",
-    "github.diff",
-    "shell.run",
-    "gmail.list",
-];
 pub const HUES: [f32; 8] = [25.0, 60.0, 150.0, 200.0, 250.0, 295.0, 330.0, 10.0];
 
 /// The create, edit and team-member form. One set of fields, reused by all three.
@@ -209,10 +187,15 @@ pub struct Form {
     pub hue: Option<f32>,
     pub skills: Vec<String>,
     pub tools: Vec<String>,
+    pub workdir: Option<String>,
+    pub description: TextEdit,
+    pub folders: crate::folders::Browser,
     pub template: Option<usize>,
     pub advanced: bool,
     pub picker: bool,
     pub model_picker: PickerState,
+    pub skill_picker: crate::picker::MultiPicker,
+    pub tool_picker: crate::picker::MultiPicker,
 }
 
 impl Form {
@@ -224,10 +207,15 @@ impl Form {
             hue: None,
             skills: Vec::new(),
             tools: Vec::new(),
+            workdir: None,
+            description: TextEdit::new(""),
+            folders: crate::folders::Browser::default(),
             template: None,
             advanced: false,
             picker: false,
             model_picker: PickerState::default(),
+            skill_picker: crate::picker::MultiPicker::default(),
+            tool_picker: crate::picker::MultiPicker::default(),
         }
     }
 
@@ -258,7 +246,7 @@ pub struct Roster {
 
 impl Roster {
     pub fn new() -> Roster {
-        Roster::from_saved(seed(), None)
+        Roster::from_saved(Vec::new(), None)
     }
 
     /// A roster of `list`, with `selected` open if it still exists, else the first agent.
@@ -315,6 +303,60 @@ impl Roster {
     pub fn current_mut(&mut self) -> Option<&mut Agent> {
         let t = self.selected.clone()?;
         self.find_mut(&t)
+    }
+
+    /// An agent or team member by id.
+    pub fn agent_ref(&self, id: &str) -> Option<&Agent> {
+        self.list.iter().find_map(|a| {
+            if a.id == id {
+                Some(a)
+            } else {
+                a.subagents.iter().find(|m| m.id == id)
+            }
+        })
+    }
+
+    /// An agent or team member by id.
+    pub fn agent_mut(&mut self, id: &str) -> Option<&mut Agent> {
+        self.list.iter_mut().find_map(|a| {
+            if a.id == id {
+                Some(a)
+            } else {
+                a.subagents.iter_mut().find(|m| m.id == id)
+            }
+        })
+    }
+
+    pub fn owner_of(&self, session_id: &str) -> Option<&Agent> {
+        let holds = |a: &Agent| a.sessions.iter().any(|s| s.id == session_id);
+        self.list.iter().find_map(|a| {
+            if holds(a) {
+                Some(a)
+            } else {
+                a.subagents.iter().find(|m| holds(m))
+            }
+        })
+    }
+
+    /// The agent, or team member, that holds the chat.
+    pub fn owner_of_mut(&mut self, session_id: &str) -> Option<&mut Agent> {
+        let holds = |a: &Agent| a.sessions.iter().any(|s| s.id == session_id);
+        self.list.iter_mut().find_map(|a| {
+            if holds(a) {
+                Some(a)
+            } else {
+                a.subagents.iter_mut().find(|m| holds(m))
+            }
+        })
+    }
+
+    /// Every chat of an agent and its team.
+    pub fn session_ids(a: &Agent) -> Vec<String> {
+        a.sessions
+            .iter()
+            .chain(a.subagents.iter().flat_map(|m| m.sessions.iter()))
+            .map(|s| s.id.clone())
+            .collect()
     }
 
     pub fn select(&mut self, t: Target) {
@@ -406,7 +448,9 @@ impl Roster {
         form.hue = a.hue;
         form.skills = a.skills.clone();
         form.tools = a.tools.clone();
-        form.advanced = !(a.skills.is_empty() && a.tools.is_empty());
+        form.workdir = a.workdir.clone();
+        form.description = TextEdit::new(a.description.clone());
+        form.advanced = !(a.skills.is_empty() && a.tools.is_empty() && a.workdir.is_none());
         form.name.focused = true;
         self.form = form;
         self.editing = Some(FormKind::Edit(t.clone()));
@@ -415,6 +459,9 @@ impl Roster {
     pub fn close_form(&mut self) {
         self.editing = None;
         self.menu = None;
+        self.form.skill_picker.close();
+        self.form.tool_picker.close();
+        self.form.folders.close();
     }
 
     /// Fills the name and the instructions from a template. Nothing else changes.
@@ -453,6 +500,8 @@ impl Roster {
             a.hue = f.hue;
             a.skills = f.skills.clone();
             a.tools = f.tools.clone();
+            a.workdir = f.workdir.clone();
+            a.description = f.description.text.trim().to_owned();
         };
         let target = match kind {
             FormKind::NewAgent => {
@@ -496,140 +545,16 @@ fn toggle(list: &mut Vec<String>, name: &str) {
     }
 }
 
-pub fn seed() -> Vec<Agent> {
-    vec![
-        Agent {
-            id: "atlas".into(),
-            name: "Atlas".into(),
-            prompt: "You research a topic thoroughly and write short briefings. Cite where each number came from, and say so when you are unsure.".into(),
-            model: None,
-            hue: Some(150.0),
-            pinned: true,
-            status: AgentStatus::Waiting,
-            skills: vec!["web-research".into(), "summarize".into(), "wiki".into()],
-            tools: vec!["storage.read".into(), "wiki.search".into(), "slack.post".into()],
-            subagents: vec![member("fact-checker", "fact-checker", 60.0, "You check every number in a draft against its source before it goes out.")],
-            active: 0,
-            sessions: vec![
-                chat(
-                    "Monday brief",
-                    vec![
-                        Message::User(
-                            "Pull last week's churn numbers and draft the Monday brief.".into(),
-                        ),
-                        Message::Assistant {
-                            text: "I'll read the usage export, then draft the brief. One step needs your sign-off before it posts.".into(),
-                            thought_secs: Some(3.4),
-                            tools: vec![
-                                ToolCall {
-                                    name: "storage.read".into(),
-                                    summary: "exports/usage-week-44.csv".into(),
-                                    output: Some("1,284 rows · 9 columns".into()),
-                                },
-                                ToolCall {
-                                    name: "wiki.search".into(),
-                                    summary: "\"churn definition\"".into(),
-                                    output: Some("Churn = paid orgs with no run in 30 days.".into()),
-                                },
-                            ],
-                            approval: None,
-                            stats: Some(Stats {
-                                model: "claude-sonnet-5-5".into(),
-                                tokens: 2140,
-                                seconds: 6.2,
-                            }),
-                        },
-                        Message::Assistant {
-                            text: "## Monday brief\n\n- **Churn:** 2.1%, down from 2.8%\n- **Active orgs:** 412 (+9)\n- **Watch:** three orgs idle for 25+ days\n\nReady to post this to `#leadership`.".into(),
-                            thought_secs: None,
-                            tools: vec![ToolCall {
-                                name: "slack.post".into(),
-                                summary: "#leadership".into(),
-                                output: None,
-                            }],
-                            approval: Some(Approval {
-                                action: "Post the Monday brief to #leadership".into(),
-                                decision: None,
-                            }),
-                            stats: None,
-                        },
-                    ],
-                ),
-                chat("Churn deep-dive", vec![]),
-            ],
-        },
-        Agent {
-            id: "forge".into(),
-            name: "Forge".into(),
-            prompt: "You review pull requests and run the test suite. Be specific about what to change and why.".into(),
-            model: None,
-            hue: Some(250.0),
-            pinned: true,
-            status: AgentStatus::Running,
-            skills: vec!["github".into(), "code-review".into(), "tests".into()],
-            tools: vec!["github.diff".into(), "shell.run".into()],
-            subagents: vec![member("reviewer", "reviewer", 200.0, "You read a diff for unsafe code and missing tests, and report only what matters.")],
-            active: 0,
-            sessions: vec![chat(
-                "Review PR 482",
-                vec![
-                    Message::User("Review PR 482 and run the test suite.".into()),
-                    Message::Assistant {
-                        text: "Reviewing the diff and running `cargo test` now.".into(),
-                        thought_secs: None,
-                        tools: vec![
-                            ToolCall {
-                                name: "github.diff".into(),
-                                summary: "PR 482".into(),
-                                output: Some("6 files · +212 −48".into()),
-                            },
-                            ToolCall {
-                                name: "shell.run".into(),
-                                summary: "cargo test".into(),
-                                output: None,
-                            },
-                        ],
-                        approval: None,
-                        stats: None,
-                    },
-                ],
-            )],
-        },
-        Agent {
-            id: "scout".into(),
-            name: "Scout".into(),
-            prompt: "You triage the inbox: flag what needs a reply today and summarise the rest.".into(),
-            model: None,
-            hue: Some(30.0),
-            pinned: false,
-            status: AgentStatus::Idle,
-            skills: vec!["gmail".into(), "calendar".into()],
-            tools: vec!["gmail.list".into()],
-            subagents: vec![],
-            active: 0,
-            sessions: vec![chat("New chat", vec![])],
-        },
-        Agent {
-            id: "ledger".into(),
-            name: "Ledger".into(),
-            prompt: "You reconcile invoices against payments and report anything that does not match.".into(),
-            model: None,
-            hue: Some(330.0),
-            pinned: false,
-            status: AgentStatus::Idle,
-            skills: vec!["stripe".into(), "sheets".into()],
-            tools: vec![],
-            subagents: vec![],
-            active: 0,
-            sessions: vec![chat("New chat", vec![])],
-        },
-    ]
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::demo::sample_agents;
+
+    /// A roster with the sample agents: Atlas and Forge pinned, each with a team member.
+    fn roster() -> Roster {
+        Roster::from_saved(sample_agents(), None)
+    }
 
     fn named(r: &mut Roster, name: &str) {
         r.form.name = TextEdit::new(name);
@@ -637,7 +562,7 @@ mod tests {
 
     #[test]
     fn creating_needs_a_name_then_adds_and_selects() {
-        let mut r = Roster::new();
+        let mut r = roster();
         let before = r.list.len();
         r.open_new();
         assert!(!r.can_submit(), "a name is required");
@@ -653,7 +578,7 @@ mod tests {
 
     #[test]
     fn a_template_fills_only_the_name_and_instructions() {
-        let mut r = Roster::new();
+        let mut r = roster();
         r.open_new();
         r.form.model = Some(ModelRef::new("anthropic", "claude-opus-5-5"));
         r.pick_template(2);
@@ -667,7 +592,7 @@ mod tests {
 
     #[test]
     fn team_members_nest_one_level_and_expand_their_parent() {
-        let mut r = Roster::new();
+        let mut r = roster();
         r.collapsed.push("scout".into());
         r.open_member("scout");
         named(&mut r, "triager");
@@ -681,7 +606,7 @@ mod tests {
 
     #[test]
     fn editing_prefills_and_saves_in_place() {
-        let mut r = Roster::new();
+        let mut r = roster();
         let t = Target::member("forge", "reviewer");
         r.open_edit(&t);
         assert_eq!(r.form.name.text, "reviewer");
@@ -696,7 +621,7 @@ mod tests {
 
     #[test]
     fn deleting_the_selected_agent_falls_back_and_removing_a_member_keeps_the_parent() {
-        let mut r = Roster::new();
+        let mut r = roster();
         r.select(Target::member("forge", "reviewer"));
         r.delete(&Target::member("forge", "reviewer"));
         assert!(
@@ -721,7 +646,7 @@ mod tests {
 
     #[test]
     fn pins_apply_to_top_level_agents_and_group_them() {
-        let mut r = Roster::new();
+        let mut r = roster();
         assert_eq!(r.pinned().len(), 2);
         r.toggle_pin("scout");
         assert_eq!(r.pinned().len(), 3);
@@ -731,7 +656,7 @@ mod tests {
 
     #[test]
     fn a_team_member_waiting_on_you_means_the_agent_is() {
-        let mut r = Roster::new();
+        let mut r = roster();
         let forge = r.list.iter_mut().find(|a| a.id == "forge").unwrap();
         forge.status = AgentStatus::Idle;
         forge.subagents[0].status = AgentStatus::Waiting;

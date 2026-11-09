@@ -1,8 +1,9 @@
-//! Right pane of the Runs screen: the selected record's payload.
+//! Right pane of the Runs screen: the selected step's payload.
 
-use rune::{El, col, row, text};
+use rune::{El, col, el, row, text};
 use rune_kit::Kit;
 
+use super::runs::{millis, title, tokens, tone};
 use crate::app::App;
 
 fn field(label: &str, value: &str, k: &Kit) -> El {
@@ -23,9 +24,10 @@ fn field(label: &str, value: &str, k: &Kit) -> El {
 }
 
 pub fn build(s: &App, k: &Kit) -> El {
-    let run = &s.runs[s.run];
-    let rec = &run.records[s.record.min(run.records.len().saturating_sub(1))];
-    col()
+    let (Some(run), Some(step)) = (s.runs.get(s.run), s.steps.get(s.record)) else {
+        return el();
+    };
+    let mut out = col()
         .key("details")
         .w_full()
         .padding(16.0)
@@ -34,12 +36,40 @@ pub fn build(s: &App, k: &Kit) -> El {
             row()
                 .gap(8.0)
                 .child(
-                    text(rec.kind.label())
+                    text(step.kind.label())
                         .font(k.ty.text_xsmall_medium)
-                        .color(super::runs::tone(rec.kind, k)),
+                        .color(tone(step.kind, k)),
                 )
-                .child(text(rec.title).font(k.ty.ui_medium).color(k.c.text_base)),
+                .child(
+                    text(title(step.kind, &step.name))
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base),
+                ),
         )
-        .child(field("Run", run.id, k))
-        .child(field("Detail", rec.detail, k))
+        .child(field(
+            "Model",
+            &format!("{} · {}", run.model.provider, run.model.id),
+            k,
+        ));
+    if let (Some(i), Some(o)) = (step.input_tokens, step.output_tokens) {
+        out = out.child(field("Tokens", &format!("{i} in · {o} out"), k));
+    } else if let Some(t) = tokens(run).filter(|_| step.kind == crate::runs::StepKind::Llm) {
+        out = out.child(field("Tokens", &t.to_string(), k));
+    }
+    if let Some(ms) = step.duration_ms {
+        out = out.child(field("Duration", &millis(ms), k));
+    }
+    for (label, value) in [
+        ("Sent", &step.input),
+        ("Reply", &step.output),
+        ("Thinking", &step.reasoning),
+    ] {
+        if let Some(v) = value.as_deref().filter(|v| !v.is_empty()) {
+            out = out.child(field(label, v, k));
+        }
+    }
+    if step.truncated {
+        out = out.child(field("Note", "Long text is cut short in the record.", k));
+    }
+    out
 }
