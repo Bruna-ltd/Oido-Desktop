@@ -213,16 +213,34 @@ pub struct Request {
     pub tools: Vec<ToolSpec>,
 }
 
+/// The tokens a model call used, as far as the provider has said. Cache reads and writes are
+/// part of `input`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Tokens {
+    pub input: Option<u32>,
+    pub output: Option<u32>,
+    pub cache_read: Option<u32>,
+    pub cache_write: Option<u32>,
+}
+
+impl Tokens {
+    /// Takes what a later usage event says, keeping what it leaves out.
+    pub fn update(&mut self, later: Tokens) {
+        self.input = later.input.or(self.input);
+        self.output = later.output.or(self.output);
+        self.cache_read = later.cache_read.or(self.cache_read);
+        self.cache_write = later.cache_write.or(self.cache_write);
+    }
+}
+
 /// What a stream says as it goes.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Event {
     Text(String),
     /// The model's thinking, when it shares it.
     Reasoning(String),
-    Usage {
-        input: Option<u32>,
-        output: Option<u32>,
-    },
+    /// What the call used so far. Each event says only what it knows; see [`Tokens::update`].
+    Usage(Tokens),
     /// The model wants to use a tool. Sent once its arguments are complete.
     ToolCall(Call),
 }
@@ -320,8 +338,7 @@ pub fn run(
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Completion {
     pub text: String,
-    pub input: u32,
-    pub output: u32,
+    pub tokens: Tokens,
 }
 
 /// Asks and waits for the whole answer. Blocks, so call it from a worker thread.
@@ -334,10 +351,7 @@ pub fn complete(
     let mut done = Completion::default();
     run(ep, key, req, cancel, &mut |ev| match ev {
         Event::Text(t) => done.text.push_str(&t),
-        Event::Usage { input, output } => {
-            done.input = input.unwrap_or(done.input);
-            done.output = output.unwrap_or(done.output);
-        }
+        Event::Usage(t) => done.tokens.update(t),
         Event::Reasoning(_) | Event::ToolCall(_) => {}
     })?;
     Ok(done)
@@ -681,11 +695,15 @@ fn openai_chunk(v: &Value, pending: &mut Pending, emit: &mut dyn FnMut(Event)) -
         }
     }
     if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
-        let n = |k: &str| u.get(k).and_then(Value::as_u64).map(|n| n as u32);
-        emit(Event::Usage {
-            input: n("prompt_tokens"),
-            output: n("completion_tokens"),
-        });
+        let n = |k: &str| u.pointer(k).and_then(Value::as_u64).map(|n| n as u32);
+        emit(Event::Usage(Tokens {
+            input: n("/prompt_tokens"),
+            output: n("/completion_tokens"),
+            // OpenAI and those that copy it; DeepSeek names its own.
+            cache_read: n("/prompt_tokens_details/cached_tokens")
+                .or_else(|| n("/prompt_cache_hit_tokens")),
+            cache_write: None,
+        }));
     }
     choice
         .and_then(|c| c.get("finish_reason"))
@@ -717,10 +735,12 @@ fn anthropic_event(
                 .iter()
                 .filter_map(|k| usage(u, k))
                 .reduce(|a, b| a + b);
-            emit(Event::Usage {
+            emit(Event::Usage(Tokens {
                 input,
-                output: None,
-            });
+                cache_read: usage(u, "cache_read_input_tokens"),
+                cache_write: usage(u, "cache_creation_input_tokens"),
+                ..Tokens::default()
+            }));
         }
         Some("content_block_start") => {
             let block = v.get("content_block");
@@ -771,10 +791,10 @@ fn anthropic_event(
         }
         Some("message_delta") => {
             let output = usage(v.get("usage"), "output_tokens");
-            emit(Event::Usage {
-                input: None,
+            emit(Event::Usage(Tokens {
                 output,
-            });
+                ..Tokens::default()
+            }));
         }
         Some("message_stop") => return Ok(true),
         Some("error") => {
@@ -899,7 +919,7 @@ mod tests {
              data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
              : keep-alive\n\n\
              data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n\
-             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n\
              data: [DONE]\n\n",
         );
         assert_eq!(r, Ok(()));
@@ -909,10 +929,12 @@ mod tests {
                 Event::Reasoning("hm".into()),
                 Event::Text("Hel".into()),
                 Event::Text("lo".into()),
-                Event::Usage {
+                Event::Usage(Tokens {
                     input: Some(7),
-                    output: Some(3)
-                },
+                    output: Some(3),
+                    cache_read: Some(4),
+                    cache_write: None,
+                }),
             ]
         );
     }
@@ -931,7 +953,7 @@ mod tests {
     fn an_anthropic_stream_gives_text_thinking_and_usage_and_an_error_event_is_an_error() {
         let (events, r) = read(
             Api::Anthropic,
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":10}}}\n\n\
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":10,\"cache_creation_input_tokens\":5}}}\n\n\
              data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hm\"}}\n\n\
              data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n\
              data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n\
@@ -940,19 +962,21 @@ mod tests {
         assert_eq!(r, Ok(()));
         assert_eq!(
             events[0],
-            Event::Usage {
-                input: Some(12),
-                output: None
-            }
+            Event::Usage(Tokens {
+                input: Some(17),
+                output: None,
+                cache_read: Some(10),
+                cache_write: Some(5),
+            })
         );
         assert!(events.contains(&Event::Reasoning("hm".into())));
         assert!(events.contains(&Event::Text("Hi".into())));
         assert_eq!(
             events.last(),
-            Some(&Event::Usage {
-                input: None,
-                output: Some(2)
-            })
+            Some(&Event::Usage(Tokens {
+                output: Some(2),
+                ..Tokens::default()
+            }))
         );
 
         let (_, r) = read(

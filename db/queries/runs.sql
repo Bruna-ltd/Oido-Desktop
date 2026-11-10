@@ -4,13 +4,14 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, ?9);
 
 -- name: UpdateRun :exec
 UPDATE runs SET status = ?2, error = ?3, input_tokens = ?4, output_tokens = ?5, duration_ms = ?6, ended_at = ?7,
-                title = ?8
+                title = ?8, cache_read_tokens = ?9, cache_write_tokens = ?10
 WHERE id = ?1;
 
 -- name: InsertStep :exec
 INSERT INTO run_steps (run_id, seq, kind, name, status, input, output, reasoning,
-                       input_tokens, output_tokens, duration_ms, started_at, at_ms, first_ms, truncated)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);
+                       input_tokens, output_tokens, duration_ms, started_at, at_ms, first_ms, truncated,
+                       cache_read_tokens, cache_write_tokens)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17);
 
 -- Newest first. A run's tokens include those of the runs it handed to team members; its counts are
 -- its own model calls and tool uses.
@@ -20,7 +21,9 @@ SELECT id, agent_id, agent_name, session_id, model_provider, model, status, erro
        NULLIF(COALESCE(output_tokens, 0) + COALESCE((SELECT SUM(c.output_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
        duration_ms, started_at, ended_at, parent_run_id, title,
        (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'llm'),
-       (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'tool')
+       (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'tool'),
+       NULLIF(COALESCE(cache_read_tokens, 0) + COALESCE((SELECT SUM(c.cache_read_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
+       NULLIF(COALESCE(cache_write_tokens, 0) + COALESCE((SELECT SUM(c.cache_write_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0)
 FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?1;
 
 -- name: GetRun :one
@@ -29,12 +32,14 @@ SELECT id, agent_id, agent_name, session_id, model_provider, model, status, erro
        NULLIF(COALESCE(output_tokens, 0) + COALESCE((SELECT SUM(c.output_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
        duration_ms, started_at, ended_at, parent_run_id, title,
        (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'llm'),
-       (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'tool')
+       (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'tool'),
+       NULLIF(COALESCE(cache_read_tokens, 0) + COALESCE((SELECT SUM(c.cache_read_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
+       NULLIF(COALESCE(cache_write_tokens, 0) + COALESCE((SELECT SUM(c.cache_write_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0)
 FROM runs WHERE id = ?1;
 
 -- name: ListSteps :many
 SELECT seq, kind, name, status, input, output, reasoning, input_tokens, output_tokens,
-       duration_ms, started_at, at_ms, first_ms, truncated
+       duration_ms, started_at, at_ms, first_ms, truncated, cache_read_tokens, cache_write_tokens
 FROM run_steps WHERE run_id = ?1 ORDER BY seq;
 
 -- Runs older than the cutoff go, with their steps (cascade).

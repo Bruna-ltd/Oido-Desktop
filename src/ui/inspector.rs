@@ -6,6 +6,7 @@ use rune::{El, col, el, row, text};
 use rune_kit::{Kit, Markdown, MarkdownStyle};
 
 use super::runs::{count, millis, status_badge, title, tone};
+use super::usage::money;
 use crate::app::App;
 use crate::runs::{Run, Status, Step, StepKind};
 
@@ -39,7 +40,7 @@ pub fn build(s: &App, k: &Kit) -> El {
         .padding(16.0)
         .gap(16.0)
         .child(head)
-        .child(facts(run, step, k));
+        .child(facts(s, run, step, k));
     for part in parts(step, k) {
         out = out.child(part);
     }
@@ -54,7 +55,7 @@ pub fn build(s: &App, k: &Kit) -> El {
 }
 
 /// The step's numbers, as label and value rows.
-fn facts(run: &Run, step: &Step, k: &Kit) -> El {
+fn facts(s: &App, run: &Run, step: &Step, k: &Kit) -> El {
     let mut rows: Vec<(&str, String)> = Vec::new();
     match step.kind {
         StepKind::Llm => {
@@ -70,6 +71,10 @@ fn facts(run: &Run, step: &Step, k: &Kit) -> El {
                         format!("{:.0} tokens/s", o as f32 * 1000.0 / ms as f32),
                     ));
                 }
+            }
+            if let (Some(_), Some(p)) = (step.input_tokens, s.prices.get(&run.model)) {
+                let cost = p.cost(&crate::usage::Totals::of_call(step));
+                rows.push(("Cost", format!("about {}", money(&cost.into()))));
             }
             if let Some(ms) = step.first_ms {
                 rows.push(("First token", millis(ms)));

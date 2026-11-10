@@ -6,7 +6,7 @@ use rune_kit::{
     Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, glyphs,
 };
 
-use super::{icons, sidebar};
+use super::{icons, sidebar, usage};
 use crate::agents::Agent;
 use crate::app::App;
 use crate::model::AgentStatus;
@@ -47,6 +47,7 @@ fn title(s: &App, a: &Agent, k: &Kit) -> El {
                 .child(text(a.name.clone()).font(k.ty.body_medium).color(k.c.text_base))
                 .child(text(subtitle).font(k.ty.small).color(ink)),
         )
+        .children(spend(s, a, k))
         .child(
             Button::new("Save as workflow")
                 .variant(ButtonVariant::Ghost)
@@ -66,6 +67,22 @@ fn title(s: &App, a: &Agent, k: &Kit) -> El {
                 .build(k)
                 .key("start-fresh"),
         )
+}
+
+/// What this chat has used so far, in tokens and likely cost; nothing before its first reply.
+fn spend(s: &App, a: &Agent, k: &Kit) -> Option<El> {
+    let (t, cost) = s.chat_spend(&a.chat().id)?;
+    let mut said = format!("{} tokens", usage::tokens(t.tokens()));
+    if !cost.unknown() {
+        said = format!("{said} · {}", usage::money(&cost));
+    }
+    Some(
+        text(said)
+            .key("chat-spend")
+            .font(k.ty.small)
+            .color(k.c.text_faint)
+            .help("What this chat has used so far, team members included. The cost is an estimate from current prices; the Usage screen has more."),
+    )
 }
 
 fn tabs(a: &Agent, k: &Kit) -> El {

@@ -1,10 +1,12 @@
 //! Runs and their steps.
 
+use super::usage::Counted;
 use super::{Result, Store};
 use crate::models::ModelRef;
 use crate::runs::{Run, Status, Step, StepKind};
+use crate::usage::{Source, Totals};
 
-const COLUMNS: usize = 17;
+const COLUMNS: usize = 19;
 
 impl Store {
     /// A run begins: saved as running, so one that is cut off can be told from one that finished.
@@ -24,6 +26,8 @@ impl Store {
     }
 
     /// A run moves on: how it stands now, and the steps it took since it was last saved, together.
+    /// Each model call among the steps is counted in the usage totals, in the same transaction, so
+    /// a call is counted exactly when it is recorded.
     pub fn save_run(&self, r: &Run, steps: &[Step]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         self.conn.prepare_cached(self.sql("UpdateRun")?)?.execute((
@@ -35,10 +39,12 @@ impl Store {
             r.duration_ms,
             r.ended_at,
             &r.title,
+            r.cache_read_tokens,
+            r.cache_write_tokens,
         ))?;
         let mut insert = self.conn.prepare_cached(self.sql("InsertStep")?)?;
         for s in steps {
-            insert.execute((
+            insert.execute(rusqlite::params![
                 &r.id,
                 s.seq,
                 s.kind.as_str(),
@@ -54,9 +60,39 @@ impl Store {
                 s.at_ms,
                 s.first_ms,
                 i64::from(s.truncated),
-            ))?;
+                s.cache_read_tokens,
+                s.cache_write_tokens,
+            ])?;
         }
+        self.count_calls(r, steps)?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the model calls among `steps` to the day's totals and the chat's.
+    fn count_calls(&self, r: &Run, steps: &[Step]) -> Result<()> {
+        let mut calls = steps.iter().filter(|s| s.kind == StepKind::Llm).peekable();
+        if calls.peek().is_none() {
+            return Ok(());
+        }
+        let source = if r.parent.is_some() {
+            Source::Member
+        } else if self.is_scheduled_session(&r.session_id)? {
+            Source::Schedule
+        } else {
+            Source::Chat
+        };
+        let who = Counted {
+            model: &r.model,
+            agent_id: &r.agent_id,
+            agent_name: &r.agent_name,
+            source,
+        };
+        for s in calls {
+            let t = Totals::of_call(s);
+            self.add_usage(s.started_at, &who, &t)?;
+            self.add_session_usage(&r.session_id, &r.model, &t)?;
+        }
         Ok(())
     }
 
@@ -85,6 +121,8 @@ impl Store {
                 title: r.get(14)?,
                 calls: r.get(15)?,
                 tools: r.get(16)?,
+                cache_read_tokens: r.get(17)?,
+                cache_write_tokens: r.get(18)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -109,6 +147,8 @@ impl Store {
                 at_ms: r.get(11)?,
                 first_ms: r.get(12)?,
                 truncated: r.get::<_, i64>(13)? != 0,
+                cache_read_tokens: r.get(14)?,
+                cache_write_tokens: r.get(15)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

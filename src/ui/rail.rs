@@ -27,7 +27,11 @@ static OPERATE: [Item; 3] = [
         icon: &icons::SCHEDULED,
         route: Route::Schedules,
     },
-    soon("Usage", &icons::USAGE),
+    Item {
+        label: "Usage",
+        icon: &icons::USAGE,
+        route: Route::Usage,
+    },
     Item {
         label: "Runs",
         icon: &icons::RUNS,

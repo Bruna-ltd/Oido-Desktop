@@ -14,7 +14,10 @@ use crate::app::{App, Route, now};
 use crate::command::{self, Finish};
 use crate::completion::{self, Completion, Endpoint, Request, Turn};
 use crate::model::{Message, new_id};
+use crate::models::ModelRef;
 use crate::providers::ModelStatus;
+use crate::store::Counted;
+use crate::usage::{Source, Totals};
 use crate::workflow::compile::{self, Trace};
 use crate::workflow::definition::{Definition, STEP_TOOLS};
 use crate::workflow::engine::{self, Ending, Env, Outcome, ToolOutcome, Usage};
@@ -128,8 +131,11 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, cancel: &AtomicBool) -> Outc
             (
                 c.text,
                 Usage {
-                    input: c.input,
-                    output: c.output,
+                    calls: 1,
+                    input: c.tokens.input.unwrap_or(0),
+                    output: c.tokens.output.unwrap_or(0),
+                    cache_read: c.tokens.cache_read.unwrap_or(0),
+                    cache_write: c.tokens.cache_write.unwrap_or(0),
                 },
             )
         })
@@ -437,19 +443,39 @@ impl App {
         };
         self.save("the workflow run", |db| db.start_workflow_run(&record));
         let (def, name) = (wf.definition.clone(), wf.name.clone());
+        let model = ModelRef::new(&prep.provider, &prep.model);
+        let agent_name = self
+            .roster
+            .agent_ref(agent_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        let agent_id = agent_id.to_owned();
         self.spawn(
             move || work(&def, &inputs, &prep, &cancel),
             move |app, outcome| {
                 let mut record = record;
-                let finish = app.finish_flow(&mut record, &name, &outcome);
+                let who = Counted {
+                    model: &model,
+                    agent_id: &agent_id,
+                    agent_name: &agent_name,
+                    source: Source::Workflow,
+                };
+                let finish = app.finish_flow(&mut record, &name, &outcome, &who);
                 done(app, &record, finish);
             },
         );
         Ok(())
     }
 
-    /// Records how a run ended, and says it in words for an agent that started it.
-    fn finish_flow(&mut self, record: &mut RunRecord, name: &str, o: &Outcome) -> Finish {
+    /// Records how a run ended, counts its model calls as `who`'s, and says it in words for an
+    /// agent that started it.
+    fn finish_flow(
+        &mut self,
+        record: &mut RunRecord,
+        name: &str,
+        o: &Outcome,
+        who: &Counted,
+    ) -> Finish {
         record.steps = o.steps.clone();
         record.output = o.output.clone();
         record.input_tokens = o.usage.input;
@@ -477,6 +503,18 @@ impl App {
             }
         };
         self.save("the workflow run", |db| db.finish_workflow_run(record));
+        let u = o.usage;
+        if u.calls > 0 {
+            let t = Totals {
+                calls: u.calls.into(),
+                input: u.input.into(),
+                output: u.output.into(),
+                cache_read: u.cache_read.into(),
+                cache_write: u.cache_write.into(),
+                ..Totals::default()
+            };
+            self.save("the usage", |db| db.add_usage(record.started_at, who, &t));
+        }
         if self.route == Route::Workflows {
             self.reload_wf_runs();
         }
