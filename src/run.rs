@@ -24,6 +24,10 @@ const FLUSH: Duration = Duration::from_millis(40);
 /// Chats are named after their first message, up to this many characters.
 const TITLE: usize = 40;
 
+/// The most of a reply's thinking the chat keeps, in bytes: past it, an ellipsis shows where it
+/// stopped. A model can think at great length, and the chat saves it with the reply.
+const THINKING_LIMIT: usize = 64 * 1024;
+
 /// A reply being written: one model call of a run, and what its step needs when it ends.
 pub struct Live {
     run_id: String,
@@ -746,7 +750,7 @@ impl App {
         if !self.is_live(sid, rid) {
             return;
         }
-        let (mut text, mut calls) = (String::new(), Vec::new());
+        let (mut text, mut thinking, mut calls) = (String::new(), String::new(), Vec::new());
         if let Some(live) = self.live.get_mut(sid) {
             if live.first.is_none() && !events.iter().all(|e| matches!(e, Event::Usage(_))) {
                 live.first = Some(live.began.elapsed());
@@ -754,11 +758,12 @@ impl App {
             for ev in events {
                 match ev {
                     Event::Text(t) => text.push_str(&t),
-                    Event::Reasoning(t) => live.reasoning.push_str(&t),
+                    Event::Reasoning(t) => thinking.push_str(&t),
                     Event::ToolCall(call) => calls.push(call),
                     Event::Usage(t) => live.tokens.update(t),
                 }
             }
+            live.reasoning.push_str(&thinking);
             if !text.is_empty() && live.thought.is_none() && !live.reasoning.is_empty() {
                 live.thought = Some(live.began.elapsed());
             }
@@ -766,7 +771,10 @@ impl App {
         // Found before the chat is borrowed: whether a name is an MCP server's tool depends on the app.
         let known_calls: Vec<bool> = calls.iter().map(|c| self.tool_known(&c.name)).collect();
         if let Some(Message::Assistant {
-            text: body, tools, ..
+            text: body,
+            thinking: thought,
+            tools,
+            ..
         }) = self
             .roster
             .owner_of_mut(sid)
@@ -774,6 +782,14 @@ impl App {
             .and_then(|s| s.messages.last_mut())
         {
             body.push_str(&text);
+            let room = THINKING_LIMIT.saturating_sub(thought.len());
+            if room > 0 {
+                let (kept, cut) = crate::runs::clip(&thinking, room);
+                thought.push_str(&kept);
+                if cut {
+                    thought.push_str("\n\n…");
+                }
+            }
             for (call, known) in calls.into_iter().zip(known_calls) {
                 // A tool the model made up is answered at once.
                 tools.push(ToolCall {
@@ -1861,10 +1877,10 @@ mod tests {
         assert_eq!(r.title, "hi there");
         drop(app);
 
-        // After a restart the chat has the reply and the run is still listed.
+        // After a restart the chat has the reply, with its thinking, and the run is still listed.
         let mut app = db.open();
         assert!(
-            matches!(last(&app), Message::Assistant { text, outcome: Outcome::Done, .. } if text == "Hello!")
+            matches!(last(&app), Message::Assistant { text, thinking, outcome: Outcome::Done, .. } if text == "Hello!" && thinking == "hmm")
         );
         app.go(Route::Runs);
         assert_eq!(app.runs.len(), 1);
@@ -1955,6 +1971,42 @@ mod tests {
             panic!("failed");
         };
         assert!(why.contains("no saved key"), "{why}");
+    }
+
+    #[test]
+    fn thinking_streams_into_the_reply_up_to_a_limit() {
+        let db = TempDb::new();
+        let (mut app, _) = app_with_server(&db, vec![]);
+        let agent = app.current().unwrap();
+        let (sid, agent_id) = (agent.chat().id.clone(), agent.id.clone());
+        let model = ModelRef::new("llama-server:box", "llama-3.3-70b");
+        app.roster
+            .current_mut()
+            .unwrap()
+            .chat_mut()
+            .messages
+            .push(Message::reply("", Some("run-1".into()), Outcome::Working));
+        app.live
+            .insert(sid.clone(), Live::new("run-1", &agent_id, model));
+        let thinking = |app: &App| match last(app) {
+            Message::Assistant { thinking, .. } => thinking.clone(),
+            _ => String::new(),
+        };
+
+        app.apply(&sid, "run-1", vec![Event::Reasoning("Read the ".into())]);
+        app.apply(&sid, "run-1", vec![Event::Reasoning("notes.".into())]);
+        assert_eq!(thinking(&app), "Read the notes.");
+
+        let long = "x".repeat(THINKING_LIMIT);
+        app.apply(&sid, "run-1", vec![Event::Reasoning(long.clone())]);
+        app.apply(&sid, "run-1", vec![Event::Reasoning(long)]);
+        let kept = thinking(&app);
+        assert!(kept.ends_with("\n\n…"), "it says where it stopped");
+        assert!(
+            kept.len() <= THINKING_LIMIT + "\n\n…".len(),
+            "{}",
+            kept.len()
+        );
     }
 
     #[test]
@@ -2058,6 +2110,7 @@ mod tests {
     fn tool_calls_and_their_answers_go_back_to_the_model_and_sample_calls_do_not() {
         let asked = Message::Assistant {
             text: "Let me check.".into(),
+            thinking: String::new(),
             thought_secs: None,
             tools: vec![
                 ToolCall {
@@ -2351,6 +2404,7 @@ data: [DONE]
         let mut app = db.open_with_samples();
         let pending = Message::Assistant {
             text: "Running it.".into(),
+            thinking: String::new(),
             thought_secs: None,
             tools: vec![ToolCall {
                 name: "shell".into(),

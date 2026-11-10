@@ -81,6 +81,9 @@ pub enum Message {
     },
     Assistant {
         text: String,
+        /// What the model said while thinking, for the screen only: never sent back to it.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        thinking: String,
         thought_secs: Option<f32>,
         tools: Vec<ToolCall>,
         approval: Option<Approval>,
@@ -98,6 +101,7 @@ impl Message {
     pub fn reply(text: impl Into<String>, run: Option<String>, outcome: Outcome) -> Message {
         Message::Assistant {
             text: text.into(),
+            thinking: String::new(),
             thought_secs: None,
             tools: Vec::new(),
             approval: None,
@@ -127,4 +131,19 @@ pub fn chat(title: &str, messages: Vec<Message>) -> Session {
 /// A fresh opaque id, safe to persist: random, so it never collides with an earlier launch's.
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replies_saved_before_thinking_was_kept_still_load_and_none_is_not_written() {
+        let old = r#"{"type":"assistant","data":{"text":"hi","thought_secs":null,"tools":[],"approval":null,"stats":null}}"#;
+        let m: Message = serde_json::from_str(old).unwrap();
+        assert_eq!(m, Message::reply("hi", None, Outcome::Done));
+        let saved = serde_json::to_string(&m).unwrap();
+        assert!(!saved.contains("thinking"), "{saved}");
+    }
 }

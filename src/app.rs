@@ -100,6 +100,10 @@ pub struct App {
     pub resuming: std::collections::HashSet<String>,
     /// Summaries opened in a chat, by chat and position.
     pub summaries_open: std::collections::HashSet<(String, usize)>,
+    /// Replies whose thinking you opened or closed yourself, by chat and position: open or not.
+    pub thinking_open: std::collections::HashMap<(String, usize), bool>,
+    /// A reply's picture opened large, by its source and alt text.
+    pub viewing: Option<(String, String)>,
     /// Every task handed over this launch, by the call that handed it over, with how it went.
     pub delegated: std::collections::HashMap<String, crate::delegate::Delegated>,
     /// Counts seconds while something works, so clocks on screen redraw.
@@ -259,6 +263,8 @@ impl App {
             summarizing: std::collections::HashMap::new(),
             resuming: std::collections::HashSet::new(),
             summaries_open: std::collections::HashSet::new(),
+            thinking_open: std::collections::HashMap::new(),
+            viewing: None,
             delegated: std::collections::HashMap::new(),
             tick: 0,
             workflows: Vec::new(),

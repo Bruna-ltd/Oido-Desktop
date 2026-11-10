@@ -762,6 +762,7 @@ mod tests {
         };
         let reply = |tools| Message::Assistant {
             text: String::new(),
+            thinking: String::new(),
             thought_secs: None,
             tools,
             approval: None,

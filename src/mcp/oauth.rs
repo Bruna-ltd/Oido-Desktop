@@ -13,7 +13,6 @@
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -69,7 +68,7 @@ struct Endpoints {
 
 /// Signs in to the server at `server_url`: opens the browser and waits for the person to finish.
 pub fn sign_in(server_url: &str, cancel: &AtomicBool) -> Result<Tokens, String> {
-    sign_in_with(server_url, cancel, open_browser)
+    sign_in_with(server_url, cancel, crate::browser::open)
 }
 
 /// [`sign_in`], with how the consent page is shown to the person chosen by the caller.
@@ -343,21 +342,6 @@ fn decode(s: &str) -> String {
 }
 
 // ---- the browser and the way back ---------------------------------------------------------
-
-fn open_browser(url: &str) -> Result<(), String> {
-    let mut child = Command::new("xdg-open")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("the browser could not be opened ({e}): is xdg-open installed?"))?;
-    // Reaped on the side, so it does not linger as a zombie.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
-}
 
 /// Waits for the browser to come back to the loopback port with the code, up to [`WAIT`].
 fn wait_for_code(

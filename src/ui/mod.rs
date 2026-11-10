@@ -43,6 +43,14 @@ pub fn wait_for_pictures(images: &[&crate::prompt::Image]) {
     picture::wait(images);
 }
 
+/// Waits for a picture a reply shows to decode, for a headless picture of the screen.
+#[cfg(debug_assertions)]
+pub fn wait_for_reply_picture(src: &str, folder: &std::path::Path) {
+    if let Some(image) = picture::markdown(src, folder) {
+        let _ = image.wait();
+    }
+}
+
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = s.look.kit();
     // Menus, selects and dialogs mount above everything, so each screen adds to this.

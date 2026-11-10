@@ -45,6 +45,7 @@ pub fn sample_agents() -> Vec<Agent> {
                         ),
                         Message::Assistant {
                             text: "I'll read the usage export, then draft the brief. One step needs your sign-off before it posts.".into(),
+                            thinking: "The brief needs last week's churn. The usage export has it: read `exports/usage-week-44.csv`, then check the wiki for how churn is defined so the number means what the team expects.".into(),
                             thought_secs: Some(3.4),
                             tools: vec![
                                 ToolCall {
@@ -73,6 +74,7 @@ pub fn sample_agents() -> Vec<Agent> {
                         },
                         Message::Assistant {
                             text: "## Monday brief\n\n- **Churn:** 2.1%, down from 2.8%\n- **Active orgs:** 412 (+9)\n- **Watch:** three orgs idle for 25+ days\n\nReady to post this to `#leadership`.".into(),
+                            thinking: String::new(),
                             thought_secs: None,
                             tools: vec![ToolCall {
                                 name: "slack.post".into(),
@@ -113,6 +115,7 @@ pub fn sample_agents() -> Vec<Agent> {
                     Message::User("Review PR 482 and run the test suite.".into()),
                     Message::Assistant {
                         text: "Reviewing the diff and running `cargo test` now.".into(),
+                        thinking: String::new(),
                         thought_secs: None,
                         tools: vec![
                             ToolCall {
@@ -374,6 +377,40 @@ fn demo_usage(app: &mut App) {
 
 type Scene = (&'static str, fn(&mut App));
 
+/// The picture in [`RICH_REPLY`], a line drawn as an SVG `data:` URL.
+const TREND: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='60'%3E%3Cpolyline fill='none' stroke='%2333aaff' stroke-width='3' points='0,50 60,40 120,44 180,20 240,10'/%3E%3C/svg%3E";
+
+/// A reply that uses what the chat draws beyond plain text.
+const RICH_REPLY: &str = r##"Churn last week, by plan:
+
+| Plan | Orgs | Churned | Rate |
+|:-----|-----:|--------:|-----:|
+| Free | 812 | 41 | 5.0% |
+| Team | 361 | 9 | 2.5% |
+| Business | 111 | 1 | 0.9% |
+
+```mermaid
+pie title Churned orgs by plan
+    "Free" : 41
+    "Team" : 9
+    "Business" : 1
+```
+
+```mermaid
+flowchart LR
+    A[Org] --> B{Run in 30 days?}
+    B -->|yes| C[Active]
+    B -->|no| D[Churned]
+```
+
+![trend](<{trend}>)
+
+A web picture waits for you:
+
+![Weekly churn chart](https://example.com/chart.png)
+
+The definition is on the [wiki](https://example.com/wiki/churn)."##;
+
 pub static SCENES: &[Scene] = &[
     // The Settings page as this computer's Omarchy themes make it: following the desktop, then in
     // a light theme.
@@ -511,6 +548,7 @@ pub static SCENES: &[Scene] = &[
                 Message::User("Check my inbox every half hour and flag anything urgent.".into()),
                 Message::Assistant {
                     text: "I've drafted a schedule for that. It starts once you approve it.".into(),
+                    thinking: String::new(),
                     thought_secs: None,
                     tools: vec![ToolCall {
                         name: "schedule".into(),
@@ -650,6 +688,7 @@ pub static SCENES: &[Scene] = &[
                 Message::User("Write the launch announcement.".into()),
                 Message::Assistant {
                     text: "Before I draft it, I need one detail.".into(),
+                    thinking: String::new(),
                     thought_secs: None,
                     tools: vec![ToolCall {
                         name: "ask_user_question".into(),
@@ -680,6 +719,7 @@ pub static SCENES: &[Scene] = &[
             };
             let reply = |tools| Message::Assistant {
                 text: "Let me look.".into(),
+                thinking: String::new(),
                 thought_secs: None,
                 tools,
                 approval: None,
@@ -696,6 +736,7 @@ pub static SCENES: &[Scene] = &[
                 )]),
                 Message::Assistant {
                     text: "Projects is the biggest. I want to check its build folders.".into(),
+                    thinking: String::new(),
                     thought_secs: None,
                     tools: vec![call(
                         "b",
@@ -718,6 +759,57 @@ pub static SCENES: &[Scene] = &[
                 Message::User("Summarise the release notes.".into()),
                 Message::reply("", Some("r1".into()), Outcome::Working),
             ];
+        }
+        s.live.insert("demo".into(), crate::run::Live::demo());
+    }),
+    // A reply with a table, a diagram, a chart, a picture and a link, its thinking opened.
+    ("reply-rich", |s| {
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        if let Some(a) = s.roster.current_mut() {
+            let mut reply = Message::reply(
+                RICH_REPLY.replace("{trend}", TREND),
+                Some("r1".into()),
+                Outcome::Done,
+            );
+            if let Message::Assistant {
+                thinking,
+                thought_secs,
+                ..
+            } = &mut reply
+            {
+                *thinking = "Churn by plan is in the export. A **table** for the numbers, a pie for the split, and a flowchart of how a run is counted.".into();
+                *thought_secs = Some(2.8);
+            }
+            let sid = a.chat().id.clone();
+            a.chat_mut().messages = vec![Message::User("Show me churn by plan.".into()), reply];
+            s.thinking_open.insert((sid.clone(), 1), true);
+            // Decoded before the picture is taken, as the window would redraw once it is.
+            let folder = s.workdir_of(&sid);
+            crate::ui::wait_for_reply_picture(TREND, &folder);
+            crate::ui::wait_for_reply_picture("https://example.com/chart.png", &folder);
+        }
+    }),
+    // The picture in that reply, pressed: opened large over the chat.
+    ("picture-open", |s| {
+        (SCENES
+            .iter()
+            .find(|(name, _)| *name == "reply-rich")
+            .map(|(_, f)| *f)
+            .unwrap_or(|_| {}))(s);
+        s.viewing = Some((TREND.into(), "trend".into()));
+    }),
+    // Thinking out loud, before the first word of the reply.
+    ("reply-thinking", |s| {
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        if let Some(a) = s.roster.current_mut() {
+            let mut reply = Message::reply("", Some("r1".into()), Outcome::Working);
+            if let Message::Assistant { thinking, .. } = &mut reply {
+                *thinking = "The notes are in `docs/releases/`. Read each one, keep only the changes that need action, then group them by area.".into();
+            }
+            a.chat_mut().messages =
+                vec![Message::User("Summarise the release notes.".into()), reply];
         }
         s.live.insert("demo".into(), crate::run::Live::demo());
     }),
@@ -807,6 +899,7 @@ pub static SCENES: &[Scene] = &[
             ));
             a.chat_mut().messages.push(Message::Assistant {
                 text: String::new(),
+                thinking: String::new(),
                 thought_secs: None,
                 tools: vec![
                     call(
@@ -967,6 +1060,7 @@ pub static SCENES: &[Scene] = &[
                 Message::User("Summarise my notes folder.".into()),
                 Message::Assistant {
                     text: "Done: three notes, all short.".into(),
+                    thinking: String::new(),
                     thought_secs: None,
                     tools: vec![],
                     approval: None,

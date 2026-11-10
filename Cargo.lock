@@ -3146,8 +3146,16 @@ version = "0.0.1"
 dependencies = [
  "pulldown-cmark",
  "rune",
+ "rune-mermaid",
  "rune-motion",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "rune-mermaid"
+version = "0.0.1"
+dependencies = [
+ "rune",
 ]
 
 [[package]]

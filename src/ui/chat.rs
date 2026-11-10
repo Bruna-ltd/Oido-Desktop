@@ -2,10 +2,11 @@
 
 use rune::{El, ScrollPos, ScrollSpec, TextStyle, col, el, row, text};
 use rune_kit::{
-    Badge, BadgeVariant, Button, ButtonVariant, Card, Collapsible, ControlSize, IconButton,
+    Badge, BadgeVariant, Button, ButtonVariant, Card, Collapsible, ControlSize, Dialog, IconButton,
     IconButtonVariant, Kit, Markdown, MarkdownStyle, glyphs,
 };
 
+use super::picture::Web;
 use crate::agents::Agent;
 use crate::app::App;
 use crate::model::{Approval, Decision, Message, Outcome, Stats, ToolCall};
@@ -19,6 +20,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(agent) = s.current() else {
         return no_agents(k);
     };
+    viewer(s, k, layer);
     col()
         .key("chat")
         .w_full()
@@ -162,6 +164,7 @@ fn message(s: &App, m: &Message, i: usize, last: bool, k: &Kit) -> El {
         Message::Summary { text, .. } => summary(s, text, i, k),
         Message::Assistant {
             text,
+            thinking,
             thought_secs,
             tools,
             approval,
@@ -172,6 +175,7 @@ fn message(s: &App, m: &Message, i: usize, last: bool, k: &Kit) -> El {
             s,
             &Reply {
                 body: text,
+                thinking,
                 thought: *thought_secs,
                 tools,
                 approval: approval.as_ref(),
@@ -252,6 +256,8 @@ fn user(p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
 /// An assistant message as the transcript shows it.
 struct Reply<'a> {
     body: &'a str,
+    /// What the model said while thinking; empty when it said nothing.
+    thinking: &'a str,
     thought: Option<f32>,
     tools: &'a [ToolCall],
     approval: Option<&'a Approval>,
@@ -283,15 +289,202 @@ fn reply_style(k: &Kit) -> MarkdownStyle {
         .heading_font(4, heading(16.0, 24.0))
 }
 
+/// Reply text as Markdown: diagrams and charts drawn, links opened in the browser, pictures from
+/// the agent's folder, and web pictures once you let them load (see [`super::picture::markdown`]).
+fn markdown(s: &App, body: &str, style: MarkdownStyle, k: &Kit) -> Markdown {
+    let folder = s
+        .current()
+        .map(|a| s.workdir_of(&a.chat().id))
+        .unwrap_or_default();
+    let kit = k.clone();
+    Markdown::new(body)
+        .style(style)
+        .on_link(|_: &mut App, url| crate::browser::open_link(url))
+        .images(move |src| super::picture::markdown(src, &folder))
+        .image_frame(move |shown, f| {
+            if super::picture::is_web(f.src) && super::picture::web(f.src) != Web::Shown {
+                return web_picture(f.src, f.alt, &kit);
+            }
+            let opened = (f.src.to_owned(), f.alt.to_owned());
+            shown.on_press(move |s: &mut App| s.viewing = Some(opened.clone()))
+        })
+}
+
+/// Largest a picture opened large draws, in points; smaller ones draw at their own size.
+const VIEWER: (f32, f32) = (960.0, 600.0);
+
+/// The picture you pressed in a reply, large, over the chat. Esc or a press outside closes it.
+fn viewer(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let Some((src, alt)) = &s.viewing else {
+        return;
+    };
+    let folder = s
+        .current()
+        .map(|a| s.workdir_of(&a.chat().id))
+        .unwrap_or_default();
+    let Some(image) = super::picture::markdown(src, &folder) else {
+        return;
+    };
+    let Some([w, h]) = image.size() else {
+        return;
+    };
+    let (w, h) = super::picture::fit(w, h, VIEWER.0, VIEWER.1);
+    let shown = el()
+        .role("image")
+        .label(if alt.is_empty() {
+            "Picture"
+        } else {
+            alt.as_str()
+        })
+        .size(w, h)
+        .radius(k.radius.md)
+        .pixels(image.pixels());
+    Dialog::new(
+        "picture",
+        if alt.is_empty() {
+            "Picture"
+        } else {
+            alt.as_str()
+        },
+    )
+    .open(true)
+    .width(w.max(240.0) + 32.0)
+    .fit()
+    .child(
+        row()
+            .w_full()
+            .px(16.0)
+            .pb(16.0)
+            .justify_center()
+            .child(shown),
+    )
+    .on_close(|s: &mut App| s.viewing = None)
+    .build(k, layer);
+}
+
+/// A web picture in a reply until it is shown: an offer to load it, naming the site it comes
+/// from. Loading it tells that site you are reading the reply, and whatever the address
+/// was written to carry.
+fn web_picture(url: &str, alt: &str, k: &Kit) -> El {
+    let state = super::picture::web(url);
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(rest))
+        .unwrap_or(url);
+    let what = if alt.is_empty() { "Picture" } else { alt };
+    let (note, ink) = match &state {
+        Web::Failed(why) => (format!("Could not load: {why}"), k.c.warning.icon),
+        _ => (format!("From {host}"), k.c.text_faint),
+    };
+    let address = url.to_owned();
+    let button = Button::new(match state {
+        Web::Loading => "Loading…",
+        Web::Failed(_) => "Try again",
+        _ => "Load",
+    })
+    .variant(ButtonVariant::Outline)
+    .control_size(ControlSize::Small)
+    .disabled(state == Web::Loading)
+    .on_press(move |s: &mut App| super::picture::load(s, &address))
+    .build(k);
+    row()
+        .w_full()
+        .px(12.0)
+        .py(10.0)
+        .gap(10.0)
+        .center_y()
+        .radius(k.radius.md)
+        .border(1.0, k.c.border_muted)
+        .help(url.to_owned())
+        .child(rune::icon(&glyphs::FILE_IMAGE, 16.0).color(k.c.text_muted))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text(what.to_owned())
+                        .font(k.ty.body)
+                        .color(k.c.text_base)
+                        .truncate(),
+                )
+                .child(text(note).font(k.ty.small).color(ink).wrap()),
+        )
+        .child(button)
+}
+
+/// Thinking set a step back from the reply: smaller and muted.
+fn thinking_style(k: &Kit) -> MarkdownStyle {
+    let body = TextStyle {
+        size: 14.0,
+        line_height: 22.0,
+        ..k.ty.body
+    };
+    MarkdownStyle::from_kit(k)
+        .text(k.c.text_muted)
+        .body_font(body)
+}
+
+/// What the model said while thinking, folded under one line. Open while it thinks, closed once
+/// the reply starts, unless you opened or closed it yourself.
+fn thinking(s: &App, r: &Reply, i: usize, k: &Kit) -> Option<El> {
+    if r.thinking.is_empty() {
+        return None;
+    }
+    let sid = s.current()?.chat().id.clone();
+    let now = *r.outcome == Outcome::Working && r.body.is_empty();
+    let title = if now {
+        let waited = s
+            .writing_secs()
+            .map(|n| format!(" {}", super::flow::clock(std::time::Duration::from_secs(n))))
+            .unwrap_or_default();
+        format!("Thinking…{waited}")
+    } else if let Some(secs) = r.thought {
+        format!("Thought for {secs:.1}s")
+    } else {
+        "Thought".to_owned()
+    };
+    let open = s
+        .thinking_open
+        .get(&(sid.clone(), i))
+        .copied()
+        .unwrap_or(now);
+    let mut c = Collapsible::new(title, open)
+        .ghost()
+        .on_toggle(move |s: &mut App| s.toggle_thinking(&sid, i, open));
+    if open {
+        c = c.child(
+            row()
+                .w_full()
+                .gap(12.0)
+                .child(el().w(2.0).h_full().radius(1.0).fill(k.c.border_muted))
+                .child(
+                    col().grow(1.0).min_w(0.0).child(
+                        markdown(s, r.thinking, thinking_style(k), k)
+                            .streaming(now)
+                            .build(k)
+                            .key("thinking"),
+                    ),
+                ),
+        );
+    }
+    Some(c.build(k))
+}
+
 fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
     let c = &k.c;
     let mut out = col().key(format!("m{i}")).w_full().gap(10.0);
-    if let Some(secs) = r.thought {
-        out = out.child(
-            text(format!("Thought for {secs:.1}s"))
-                .font(k.ty.small)
-                .color(c.text_faint),
-        );
+    match thinking(s, r, i, k) {
+        Some(folded) => out = out.child(folded),
+        None => {
+            if let Some(secs) = r.thought {
+                out = out.child(
+                    text(format!("Thought for {secs:.1}s"))
+                        .font(k.ty.small)
+                        .color(c.text_faint),
+                );
+            }
+        }
     }
     // Other tools show what they did before the reply; a question comes after it, as its end.
     out = out.children(
@@ -308,7 +501,7 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
                 }
             }),
     );
-    if *r.outcome == Outcome::Working && r.body.is_empty() {
+    if *r.outcome == Outcome::Working && r.body.is_empty() && r.thinking.is_empty() {
         let waited = s
             .writing_secs()
             .map(|n| format!(" {}", super::flow::clock(std::time::Duration::from_secs(n))))
@@ -319,7 +512,12 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
                 .color(c.text_faint),
         );
     } else if !r.body.is_empty() {
-        out = out.child(Markdown::new(r.body).style(reply_style(k)).build(k));
+        out = out.child(
+            markdown(s, r.body, reply_style(k), k)
+                .streaming(*r.outcome == Outcome::Working)
+                .build(k)
+                .key("reply"),
+        );
     }
     out = out.children(
         r.tools
@@ -942,7 +1140,7 @@ fn summary(s: &App, body: &str, i: usize, k: &Kit) -> El {
                 .radius(k.radius.md)
                 .fill(k.c.layer_01)
                 .border(1.0, k.c.border_muted)
-                .child(Markdown::new(body).style(reply_style(k)).build(k)),
+                .child(markdown(s, body, reply_style(k), k).build(k)),
         );
     }
     col().key(format!("m{i}")).w_full().child(c.build(k))

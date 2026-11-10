@@ -3,6 +3,7 @@
 
 mod agents;
 mod app;
+mod browser;
 mod command;
 mod completion;
 mod composer;

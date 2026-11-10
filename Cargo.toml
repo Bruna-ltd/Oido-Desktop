@@ -15,8 +15,8 @@ getrandom = "0.4.3"
 keyring-core = "1.0.1"
 # Rune is pre-release: pin a rev of `dev` (never rewritten) and bump it deliberately.
 rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b" }
-# Components and app shell (sidebar, split view, toolbar). `markdown` renders agent replies.
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown"] }
+# Components and app shell (sidebar, split view, toolbar). `markdown` renders agent replies; `mermaid` draws their diagrams and charts.
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown", "mermaid"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
