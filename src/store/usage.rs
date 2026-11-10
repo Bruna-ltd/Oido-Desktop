@@ -1,4 +1,4 @@
-//! Usage totals and model prices.
+//! Usage totals, model prices and the catalog's context limits.
 
 use std::collections::HashMap;
 
@@ -6,7 +6,9 @@ use rusqlite::{OptionalExtension, Row as SqlRow};
 
 use super::{Result, Store};
 use crate::models::ModelRef;
+use crate::pricing::Catalog;
 use crate::usage::{Price, Prices, Row, Source, Totals};
+use crate::window::Limits;
 
 /// Who a model call was for, as it is counted.
 pub struct Counted<'a> {
@@ -138,17 +140,43 @@ impl Store {
         Ok(prices)
     }
 
-    /// Puts the catalog's prices in place of the last fetch's, all at once.
-    pub fn replace_catalog_prices(&self, prices: &[(ModelRef, Price)], now: i64) -> Result<()> {
+    /// Puts the catalog's prices and context limits in place of the last fetch's, all at once.
+    pub fn replace_catalog(&self, catalog: &Catalog, now: i64) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         self.conn
             .prepare_cached(self.sql("DeleteCatalogPrices")?)?
             .execute([])?;
-        for (model, p) in prices {
+        for (model, p) in &catalog.prices {
             self.put_price(model, "catalog", p, now)?;
+        }
+        self.conn
+            .prepare_cached(self.sql("DeleteLimits")?)?
+            .execute([])?;
+        let mut put = self.conn.prepare_cached(self.sql("PutLimit")?)?;
+        for (model, n) in &catalog.limits {
+            put.execute((&model.provider, &model.id, i64::from(*n)))?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The catalog's context limits, as last fetched.
+    pub fn limits(&self) -> Result<Limits> {
+        let mut stmt = self.conn.prepare_cached(self.sql("ListLimits")?)?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                ModelRef::new(r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Limits::default();
+        for row in rows {
+            let (model, n) = row?;
+            if let Ok(n) = u32::try_from(n) {
+                out.catalog.insert(model, n);
+            }
+        }
+        Ok(out)
     }
 
     /// Your price for `model`, or `None` to go back to the catalog's.
@@ -422,15 +450,42 @@ mod tests {
         }
     }
 
+    fn catalog(prices: Vec<(ModelRef, Price)>) -> Catalog {
+        Catalog {
+            prices,
+            limits: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_new_fetch_replaces_the_context_limits_too() {
+        let db = store();
+        let (a, b) = (ModelRef::new("openai", "a"), ModelRef::new("openai", "b"));
+        let with = |limits| Catalog {
+            prices: vec![(a.clone(), price(1.0))],
+            limits,
+        };
+        db.replace_catalog(&with(vec![(a.clone(), 128_000), (b.clone(), 8_000)]), 10)
+            .unwrap();
+        db.replace_catalog(&with(vec![(a.clone(), 200_000)]), 20)
+            .unwrap();
+        let got = db.limits().unwrap();
+        assert_eq!(got.catalog.get(&a), Some(&200_000));
+        assert_eq!(got.catalog.get(&b), None, "gone from the new catalog");
+    }
+
     #[test]
     fn a_new_fetch_replaces_the_catalog_and_your_price_stays_and_wins() {
         let db = store();
         let (a, b) = (ModelRef::new("openai", "a"), ModelRef::new("openai", "b"));
         assert_eq!(db.catalog_fetched_at().unwrap(), None);
-        db.replace_catalog_prices(&[(a.clone(), price(1.0)), (b.clone(), price(2.0))], 10)
-            .unwrap();
+        db.replace_catalog(
+            &catalog(vec![(a.clone(), price(1.0)), (b.clone(), price(2.0))]),
+            10,
+        )
+        .unwrap();
         db.set_manual_price(&a, Some(&price(9.0)), 11).unwrap();
-        db.replace_catalog_prices(&[(a.clone(), price(3.0))], 20)
+        db.replace_catalog(&catalog(vec![(a.clone(), price(3.0))]), 20)
             .unwrap();
 
         let p = db.prices().unwrap();

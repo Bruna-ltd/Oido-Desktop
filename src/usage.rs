@@ -23,14 +23,17 @@ pub enum Source {
     Workflow,
     /// A team member, on a task its lead handed over.
     Member,
+    /// Summarizing a chat's older messages to make room (see `docs/context.md`).
+    Compaction,
 }
 
 impl Source {
-    pub const ALL: [Source; 4] = [
+    pub const ALL: [Source; 5] = [
         Source::Chat,
         Source::Schedule,
         Source::Workflow,
         Source::Member,
+        Source::Compaction,
     ];
 
     /// The stored name back to a source; an unknown one reads as a chat.
@@ -47,6 +50,7 @@ impl Source {
             Source::Schedule => "schedule",
             Source::Workflow => "workflow",
             Source::Member => "member",
+            Source::Compaction => "compaction",
         }
     }
 }

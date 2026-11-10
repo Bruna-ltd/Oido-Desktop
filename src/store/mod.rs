@@ -94,7 +94,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 13] = [
+const MIGRATIONS: [&str; 14] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -108,6 +108,7 @@ const MIGRATIONS: [&str; 13] = [
     include_str!("../../db/migrations/011_run_trace.sql"),
     include_str!("../../db/migrations/012_usage.sql"),
     include_str!("../../db/migrations/013_dense_chat_positions.sql"),
+    include_str!("../../db/migrations/014_context.sql"),
 ];
 
 const QUERY_FILES: [&str; 9] = [
@@ -667,6 +668,50 @@ mod tests {
         assert_eq!(
             steps[2].at_ms, None,
             "old steps have no timing within the run"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrating_keeps_the_usage_history_and_lets_summaries_be_counted() {
+        let dir = std::env::temp_dir().join(format!("oido-mig14-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oido.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..13] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO usage_daily (day, provider, model, agent_id, agent_name, source, calls, input_tokens)
+                 VALUES ('2026-11-01', 'openai', 'gpt-x', 'a', 'Atlas', 'chat', 3, 900);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 13).unwrap();
+        }
+        let s = Store::open(&path, Vault::fixed([1; 32])).unwrap();
+        let model = crate::models::ModelRef::new("openai", "gpt-x");
+        let who = |source| super::usage::Counted {
+            model: &model,
+            agent_id: "a",
+            agent_name: "Atlas",
+            source,
+        };
+        let one = crate::usage::Totals {
+            calls: 1,
+            ..crate::usage::Totals::default()
+        };
+        s.add_usage(4_102_444_800, &who(crate::usage::Source::Compaction), &one)
+            .unwrap();
+        let rows = s.usage(None).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.day == "2026-11-01" && r.totals.calls == 3 && r.totals.input == 900),
+            "the history is kept: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.source == crate::usage::Source::Compaction)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

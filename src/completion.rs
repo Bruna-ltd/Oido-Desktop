@@ -275,7 +275,7 @@ impl Error {
             }
             Self::RateLimited(m) => format!("{who} is limiting requests: {m}"),
             Self::TooLong => {
-                "This chat is too long for the model. Press Start fresh, then send it again."
+                "This chat is too long for the model, even with older parts trimmed and summarized. Shorten your last message, or press Start fresh."
                     .to_owned()
             }
             Self::Provider(status, m) if m.is_empty() => {
@@ -556,9 +556,11 @@ fn anthropic_body(req: &Request) -> Value {
 fn refusal(status: u16, body: &str) -> Error {
     let message = error_message(body);
     let lower = message.to_lowercase();
-    const TOO_LONG: [&str; 7] = [
+    const TOO_LONG: [&str; 8] = [
         "context length",
         "context window",
+        // llama-server: "the request exceeds the available context size".
+        "context size",
         "maximum context",
         "too long",
         "too many tokens",
@@ -1011,6 +1013,14 @@ mod tests {
                 r#"{"error":{"message":"This model's maximum context length is 8192 tokens"}}"#
             ),
             Error::TooLong
+        );
+        assert_eq!(
+            refusal(
+                400,
+                r#"{"error":{"code":400,"message":"the request exceeds the available context size, try increasing it","type":"exceed_context_size_error"}}"#
+            ),
+            Error::TooLong,
+            "llama-server"
         );
         assert_eq!(
             refusal(404, r#"{"error":"no such model"}"#),

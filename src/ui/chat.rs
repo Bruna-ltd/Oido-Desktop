@@ -2,8 +2,8 @@
 
 use rune::{El, ScrollPos, ScrollSpec, TextStyle, col, el, row, text};
 use rune_kit::{
-    Badge, BadgeVariant, Button, ButtonVariant, Card, ControlSize, IconButton, IconButtonVariant,
-    Kit, Markdown, MarkdownStyle, glyphs,
+    Badge, BadgeVariant, Button, ButtonVariant, Card, Collapsible, ControlSize, IconButton,
+    IconButtonVariant, Kit, Markdown, MarkdownStyle, glyphs,
 };
 
 use crate::agents::Agent;
@@ -159,6 +159,7 @@ fn message(s: &App, m: &Message, i: usize, last: bool, k: &Kit) -> El {
     match m {
         Message::User(p) => user(p, i, k),
         Message::Divider(label) => divider(label, i, k),
+        Message::Summary { text, .. } => summary(s, text, i, k),
         Message::Assistant {
             text,
             thought_secs,
@@ -919,6 +920,32 @@ fn gate(a: &Approval, k: &Kit) -> El {
         .child(body)
         .build(k)
         .key("gate")
+}
+
+/// Where older messages were summarized to make room: a marker that opens to the summary. The
+/// messages above it stay on screen.
+fn summary(s: &App, body: &str, i: usize, k: &Kit) -> El {
+    let Some(sid) = s.current().map(|a| a.chat().id.clone()) else {
+        return el();
+    };
+    let open = s.summaries_open.contains(&(sid.clone(), i));
+    let mut c = Collapsible::new("Earlier messages summarized to make room", open)
+        .ghost()
+        .on_toggle(move |s: &mut App| s.toggle_summary(&sid, i));
+    if open {
+        // Set apart from the replies: a note about the chat, not something the agent said.
+        c = c.child(
+            col()
+                .w_full()
+                .px(14.0)
+                .py(10.0)
+                .radius(k.radius.md)
+                .fill(k.c.layer_01)
+                .border(1.0, k.c.border_muted)
+                .child(Markdown::new(body).style(reply_style(k)).build(k)),
+        );
+    }
+    col().key(format!("m{i}")).w_full().child(c.build(k))
 }
 
 fn divider(label: &str, i: usize, k: &Kit) -> El {

@@ -21,7 +21,7 @@ pub(crate) mod schedules;
 mod settings;
 mod sidebar;
 mod tools;
-mod usage;
+pub(crate) mod usage;
 mod workflows;
 
 use std::time::Duration;

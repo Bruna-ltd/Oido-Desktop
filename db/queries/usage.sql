@@ -63,6 +63,15 @@ ON CONFLICT (provider, model, origin) DO UPDATE SET
 -- name: DeleteCatalogPrices :exec
 DELETE FROM model_prices WHERE origin = 'catalog';
 
+-- name: ListLimits :many
+SELECT provider, model, context FROM model_limits;
+
+-- name: DeleteLimits :exec
+DELETE FROM model_limits;
+
+-- name: PutLimit :exec
+INSERT OR REPLACE INTO model_limits (provider, model, context) VALUES (?1, ?2, ?3);
+
 -- name: DeleteManualPrice :exec
 DELETE FROM model_prices WHERE provider = ?1 AND model = ?2 AND origin = 'manual';
 

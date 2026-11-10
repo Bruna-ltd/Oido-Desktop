@@ -518,6 +518,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             caps: Default::default(),
+            context: None,
         }
     }
 

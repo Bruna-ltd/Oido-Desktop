@@ -95,6 +95,13 @@ pub struct App {
     pub commands: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Chats whose agent has handed tasks to team members that have not come back yet.
     pub delegating: std::collections::HashMap<String, crate::delegate::Delegating>,
+    /// Chats whose older messages are being summarized to make room, with the flag that stops each.
+    pub summarizing:
+        std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Chats that carry on in the same run once their summary is written.
+    pub resuming: std::collections::HashSet<String>,
+    /// Summaries opened in a chat, by chat and position.
+    pub summaries_open: std::collections::HashSet<(String, usize)>,
     /// Every task handed over this launch, by the call that handed it over, with how it went.
     pub delegated: std::collections::HashMap<String, crate::delegate::Delegated>,
     /// Counts seconds while something works, so clocks on screen redraw.
@@ -152,6 +159,8 @@ pub struct App {
     /// being fetched.
     pub prices: crate::usage::Prices,
     pub prices_fetching: bool,
+    /// The catalog's context limits, fetched with the prices.
+    pub limits: crate::window::Limits,
     /// The Usage screen.
     pub usage: crate::usage::Page,
     /// Each chat's tokens by model, as saved, for the cost in its header.
@@ -249,6 +258,9 @@ impl App {
             traces: std::collections::HashMap::new(),
             commands: std::collections::HashMap::new(),
             delegating: std::collections::HashMap::new(),
+            summarizing: std::collections::HashMap::new(),
+            resuming: std::collections::HashSet::new(),
+            summaries_open: std::collections::HashSet::new(),
             delegated: std::collections::HashMap::new(),
             tick: 0,
             workflows: Vec::new(),
@@ -290,6 +302,7 @@ impl App {
             run_schedules: persist::run_schedules(store.as_ref()),
             prices: crate::usage::Prices::default(),
             prices_fetching: false,
+            limits: crate::window::Limits::default(),
             usage: crate::usage::Page::default(),
             chat_usage: std::collections::HashMap::new(),
             agent_spend: Vec::new(),

@@ -82,13 +82,18 @@ impl Store {
         } else {
             Source::Chat
         };
-        let who = Counted {
-            model: &r.model,
-            agent_id: &r.agent_id,
-            agent_name: &r.agent_name,
-            source,
-        };
         for s in calls {
+            let who = Counted {
+                model: &r.model,
+                agent_id: &r.agent_id,
+                agent_name: &r.agent_name,
+                // A summary written to make room is counted apart, whatever the run was for.
+                source: if s.name == crate::window::SUMMARY_STEP {
+                    Source::Compaction
+                } else {
+                    source
+                },
+            };
             let t = Totals::of_call(s);
             self.add_usage(s.started_at, &who, &t)?;
             self.add_session_usage(&r.session_id, &r.model, &t)?;

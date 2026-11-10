@@ -55,7 +55,7 @@ pub fn trace_of(messages: &[Message]) -> (String, Vec<Trace>) {
                     }
                 }
             }
-            Message::Divider(_) => {}
+            Message::Divider(_) | Message::Summary { .. } => {}
         }
     }
     (request.join("\n\n"), trace)

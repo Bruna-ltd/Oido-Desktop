@@ -10,9 +10,11 @@ use crate::models::{Caps, ModelInfo, RawModel, finish};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Wire {
-    /// `GET {base}/models` with a Bearer key: OpenAI and everything that copies it, and servers
-    /// such as llama.cpp.
+    /// `GET {base}/models` with a Bearer key: OpenAI and everything that copies it.
     OpenAi,
+    /// Your own server, listed as [`Wire::OpenAi`] is. It is also asked what context it runs with,
+    /// as llama-server says at `/props`.
+    Server,
     Anthropic,
     Gemini,
     /// `GET {base}/models` with a Bearer key, answering `{"models":[{"name":..}]}`. Those are
@@ -36,7 +38,7 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 pub fn endpoint(id: &str, custom: bool, base_url: Option<&str>) -> Option<Endpoint> {
     if custom {
         return base_url.map(|b| Endpoint {
-            wire: Wire::OpenAi,
+            wire: Wire::Server,
             base: b.trim_end_matches('/').to_owned(),
         });
     }
@@ -113,7 +115,46 @@ pub fn fetch(ep: &Endpoint, key: Option<&str>) -> Result<Vec<ModelInfo>, Error> 
             None => break,
         }
     }
+    if ep.wire == Wire::Server {
+        // What the server runs with beats what the list says the model was trained for.
+        if let Some(n) = server_context(&agent, ep, key) {
+            for r in &mut raws {
+                r.context = Some(n);
+            }
+        }
+    }
     Ok(finish_all(raws))
+}
+
+/// The context llama-server gives each request, from `/props` at the server's root (beside `/v1`).
+/// `None` for a server that has no such page or does not say.
+fn server_context(agent: &ureq::Agent, ep: &Endpoint, key: Option<&str>) -> Option<u32> {
+    let root = ep
+        .base
+        .rsplit_once('/')
+        .filter(|(_, last)| {
+            last.len() > 1
+                && last.starts_with(['v', 'V'])
+                && last[1..].bytes().all(|b| b.is_ascii_digit())
+        })
+        .map_or(ep.base.as_str(), |(root, _)| root);
+    let req = Request {
+        url: format!("{root}/props"),
+        headers: key
+            .filter(|k| !k.is_empty())
+            .map(|k| vec![("Authorization", format!("Bearer {k}"))])
+            .unwrap_or_default(),
+    };
+    let body = get(agent, Wire::Server, &req).ok()?;
+    parse_props(&body)
+}
+
+fn parse_props(body: &str) -> Option<u32> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    v.pointer("/default_generation_settings/n_ctx")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0)
 }
 
 /// Applies the catalog and the chat filter, drops repeats, and orders by name.
@@ -138,7 +179,7 @@ pub struct Request {
 fn page_request(ep: &Endpoint, key: Option<&str>, cursor: Option<&str>) -> Request {
     let mut headers = Vec::new();
     let url = match ep.wire {
-        Wire::OpenAi | Wire::TypeSafe => {
+        Wire::OpenAi | Wire::Server | Wire::TypeSafe => {
             if let Some(k) = key.filter(|k| !k.is_empty()) {
                 headers.push(("Authorization", format!("Bearer {k}")));
             }
@@ -201,7 +242,7 @@ fn parse_page(wire: Wire, body: &str) -> Result<(Vec<RawModel>, Option<String>),
             .ok_or_else(|| Error::Unexpected(format!("no \"{key}\" list")))
     };
     match wire {
-        Wire::OpenAi => Ok((
+        Wire::OpenAi | Wire::Server => Ok((
             list("data")?.iter().filter_map(openai_model).collect(),
             None,
         )),
@@ -242,6 +283,7 @@ fn parse_page(wire: Wire, body: &str) -> Result<(Vec<RawModel>, Option<String>),
                         id: id.strip_prefix("models/").unwrap_or(&id).to_owned(),
                         name: str_of(m, "displayName"),
                         chat,
+                        context: count_of(m, &["inputTokenLimit"]),
                         ..RawModel::default()
                     })
                 })
@@ -252,8 +294,8 @@ fn parse_page(wire: Wire, body: &str) -> Result<(Vec<RawModel>, Option<String>),
     }
 }
 
-/// OpenAI's entry is just an id. OpenRouter's adds a name and what each model takes in and
-/// supports, which is declared, so it is believed.
+/// OpenAI's entry is just an id. OpenRouter's adds a name, its context and what each model takes
+/// in and supports, which is declared, so it is believed. vLLM and Mistral name their context too.
 fn openai_model(m: &Value) -> Option<RawModel> {
     let strings = |v: Option<&Value>| -> Option<Vec<String>> {
         v.and_then(Value::as_array).map(|a| {
@@ -280,11 +322,22 @@ fn openai_model(m: &Value) -> Option<RawModel> {
         name: str_of(m, "name"),
         caps,
         chat: None,
+        context: count_of(
+            m,
+            &["context_length", "max_model_len", "max_context_length"],
+        ),
     })
 }
 
 fn str_of(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// The first of `keys` that holds a positive whole number that fits in a `u32`.
+fn count_of(v: &Value, keys: &[&str]) -> Option<u32> {
+    keys.iter()
+        .filter_map(|k| v.get(*k).and_then(Value::as_u64))
+        .find_map(|n| u32::try_from(n).ok().filter(|n| *n > 0))
 }
 
 /// Percent-encodes everything but the unreserved characters, for a cursor in a query string.
@@ -511,6 +564,56 @@ mod tests {
         let request = seen.recv().unwrap();
         assert!(request.starts_with("get /v1/models "), "{request}");
         assert!(request.contains("authorization: bearer sk-test-123"));
+    }
+
+    #[test]
+    fn a_server_is_asked_the_context_it_runs_with_which_beats_the_list() {
+        let (base, seen) = serve(vec![
+            (
+                200,
+                r#"{"data":[{"id":"qwen","max_model_len":131072},{"id":"llama"}]}"#,
+            ),
+            (200, r#"{"default_generation_settings":{"n_ctx":8192}}"#),
+        ]);
+        let models = fetch(&at(Wire::Server, &format!("{base}/v1")), Some("sk-s")).unwrap();
+        assert!(models.iter().all(|m| m.context == Some(8192)), "{models:?}");
+        let _ = seen.recv().unwrap();
+        let props = seen.recv().unwrap();
+        assert!(props.starts_with("get /props "), "at the root: {props}");
+        assert!(props.contains("authorization: bearer sk-s"));
+
+        let (base, _) = serve(vec![(
+            200,
+            r#"{"data":[{"id":"qwen","max_model_len":131072}]}"#,
+        )]);
+        let models = fetch(&at(Wire::Server, &format!("{base}/v1")), None).unwrap();
+        assert_eq!(
+            models[0].context,
+            Some(131_072),
+            "no /props: the list's word stands"
+        );
+    }
+
+    #[test]
+    fn each_list_shape_declares_its_context_under_its_own_name() {
+        let openai = r#"{"data":[
+            {"id":"a","context_length":200000},
+            {"id":"b","max_context_length":32000},
+            {"id":"c","context_length":0},
+            {"id":"d"}]}"#;
+        let got: Vec<_> = parse_page(Wire::OpenAi, openai)
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.context)
+            .collect();
+        assert_eq!(got, vec![Some(200_000), Some(32_000), None, None]);
+        let gemini = r#"{"models":[{"name":"models/gemini-x","inputTokenLimit":1048576}]}"#;
+        assert_eq!(
+            parse_page(Wire::Gemini, gemini).unwrap().0[0].context,
+            Some(1_048_576)
+        );
+        assert_eq!(parse_props(r#"{"default_generation_settings":{}}"#), None);
     }
 
     #[test]

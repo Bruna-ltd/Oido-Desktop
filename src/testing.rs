@@ -114,6 +114,7 @@ pub fn ready(app: &mut App) {
             id: "claude-test".into(),
             name: "Claude Test".into(),
             caps: Default::default(),
+            context: None,
         }],
         1,
     );
@@ -127,8 +128,11 @@ pub fn samples() -> App {
     app
 }
 
+/// What [`app_with_server`]'s server says it runs with at `/props`.
+pub const SERVER_CONTEXT: u32 = 32_768;
+
 /// The sample agents on a database file, with a server connected that answers `replies` after
-/// listing its models, and the open agent using that server's model.
+/// listing its models and its context, and the open agent using that server's model.
 pub fn app_with_server(
     db: &TempDb,
     replies: Vec<(u16, &'static str, &'static str)>,
@@ -141,6 +145,11 @@ pub fn app_with_server(
         "application/json",
         r#"{"data":[{"id":"llama-3.3-70b"}]}"#,
     )];
+    all.push((
+        200,
+        "application/json",
+        r#"{"default_generation_settings":{"n_ctx":32768}}"#,
+    ));
     all.extend(replies);
     let (base, seen) = serve_as(all);
     app.providers.toggle(NEW_SERVER);
@@ -149,6 +158,7 @@ pub fn app_with_server(
     app.providers.key = rune::TextEdit::new("sk-box");
     app.save_server(NEW_SERVER);
     let _ = seen.recv().expect("the server saw the model list request");
+    let _ = seen.recv().expect("the server saw the context request");
     app.set_model(Some(ModelRef::new("llama-server:box", "llama-3.3-70b")));
     (app, seen)
 }

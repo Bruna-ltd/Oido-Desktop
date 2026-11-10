@@ -47,6 +47,7 @@ fn title(s: &App, a: &Agent, k: &Kit) -> El {
                 .child(text(a.name.clone()).font(k.ty.body_medium).color(k.c.text_base))
                 .child(text(subtitle).font(k.ty.small).color(ink)),
         )
+        .children(fill(s, a, k))
         .children(spend(s, a, k))
         .child(
             Button::new("Save as workflow")
@@ -67,6 +68,40 @@ fn title(s: &App, a: &Agent, k: &Kit) -> El {
                 .build(k)
                 .key("start-fresh"),
         )
+}
+
+/// How full the chat is against the model's context limit; amber when nearly full. Nothing before
+/// its first reply or after "Start fresh".
+fn fill(s: &App, a: &Agent, k: &Kit) -> Option<El> {
+    let f = s.chat_fill(a)?;
+    let used = usage::tokens(u64::from(f.used));
+    let (said, help) = match (f.share(), f.limit) {
+        (Some(share), Some(limit)) => (
+            format!("{:.0}% context", (share * 100.0).min(999.0)),
+            format!(
+                "This chat fills {used} of the {} tokens the model takes at once. Past 90%, older tool results and pictures are left out of what it is sent; the chat keeps them.",
+                usage::tokens(u64::from(limit))
+            ),
+        ),
+        _ => (
+            format!("{used} context"),
+            format!(
+                "This chat holds about {used} tokens. How many the model takes at once is not known."
+            ),
+        ),
+    };
+    let ink = if f.near() {
+        k.c.warning.icon
+    } else {
+        k.c.text_faint
+    };
+    Some(
+        text(said)
+            .key("chat-fill")
+            .font(k.ty.small)
+            .color(ink)
+            .help(help),
+    )
 }
 
 /// What this chat has used so far, in tokens and likely cost; nothing before its first reply.

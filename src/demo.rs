@@ -65,6 +65,8 @@ pub fn sample_agents() -> Vec<Agent> {
                                 model: "claude-sonnet-5-5".into(),
                                 tokens: 2140,
                                 seconds: 6.2,
+                                context: Some(18_400),
+                                trimmed: None,
                             }),
  run: None,
  outcome: Outcome::Done,
@@ -558,15 +560,23 @@ pub static SCENES: &[Scene] = &[
                 cache_read: 30_000,
                 ..crate::usage::Totals::default()
             };
-            s.chat_usage
-                .insert(sid, vec![(ModelRef::new("anthropic", "claude-sonnet-4-6"), t)]);
+            s.chat_usage.insert(
+                sid,
+                vec![(ModelRef::new("anthropic", "claude-sonnet-4-6"), t)],
+            );
         }
     }),
     ("usage-agent", |s| {
         load_samples(s);
         demo_usage(s);
         s.edit_agent(&Target::agent("atlas"));
-        s.agent_spend = s.usage.rows.iter().filter(|r| r.agent_id == "atlas").cloned().collect();
+        s.agent_spend = s
+            .usage
+            .rows
+            .iter()
+            .filter(|r| r.agent_id == "atlas")
+            .cloned()
+            .collect();
     }),
     ("settings-usage", |s| {
         s.usage.confirm_clear = true;
@@ -575,6 +585,48 @@ pub static SCENES: &[Scene] = &[
     ("runs", |s| {
         demo_runs(s);
         s.route = Route::Runs;
+    }),
+    ("context", |s| {
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        let model = s
+            .roster
+            .current()
+            .and_then(|a| match s.providers.status(a.model.as_ref()) {
+                crate::providers::ModelStatus::Ready(m) => Some(m),
+                _ => None,
+            });
+        if let Some(m) = model {
+            s.limits.catalog.insert(m, 200_000);
+        }
+        let mut answered = Message::reply(
+            "The three changes that matter: the new sync engine, the dropped Python 3.9 support, and the config file moving to `~/.config/app`.",
+            Some("r1".into()),
+            Outcome::Done,
+        );
+        if let Message::Assistant { stats, .. } = &mut answered {
+            *stats = Some(Stats {
+                model: "GPT-5".into(),
+                tokens: 412,
+                seconds: 4.8,
+                context: Some(171_300),
+                trimmed: Some(22_000),
+            });
+        }
+        if let Some(a) = s.roster.current_mut() {
+            let sid = a.chat().id.clone();
+            a.chat_mut().messages = vec![
+                Message::User("Read every release note since 2.0.".into()),
+                Message::reply("Done: 41 notes read.", Some("r0".into()), Outcome::Done),
+                Message::Summary {
+                    text: "You asked for the release notes since 2.0. All 41 were read with the shell tool from `docs/releases/`.\n\n- **Decided:** report only changes that need action.\n- **Open:** a one-page summary for the team.".into(),
+                    keeps: 0,
+                },
+                Message::User("Which ones need action?".into()),
+                answered,
+            ];
+            s.summaries_open.insert((sid, 2));
+        }
     }),
     ("reply-failed", |s| {
         load_samples(s);

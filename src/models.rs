@@ -34,6 +34,8 @@ pub struct ModelInfo {
     /// What the picker shows: the provider's own name, else the catalog's, else the id.
     pub name: String,
     pub caps: Caps,
+    /// How many tokens it takes at once, as its provider declared; `None` when it did not say.
+    pub context: Option<u32>,
 }
 
 /// One entry of a provider's list as parsed, before the catalog and the chat filter.
@@ -45,6 +47,8 @@ pub struct RawModel {
     pub caps: Caps,
     /// Whether the list says the model can chat: `Some` when it states so (Gemini's methods).
     pub chat: Option<bool>,
+    /// The context limit the list declared.
+    pub context: Option<u32>,
 }
 
 /// Completes a listed model, or drops it if it is not one an agent can chat with.
@@ -77,6 +81,7 @@ pub fn finish(raw: RawModel) -> Option<ModelInfo> {
         id: raw.id,
         name,
         caps,
+        context: raw.context,
     })
 }
 
@@ -331,7 +336,7 @@ mod tests {
                 vision: Some(false),
                 ..Caps::default()
             },
-            chat: None,
+            ..RawModel::default()
         })
         .unwrap();
         assert_eq!(m.name, "GPT-4o (custom)");

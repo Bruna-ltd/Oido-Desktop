@@ -617,6 +617,7 @@ fn source_name(s: Source) -> &'static str {
         Source::Schedule => "Schedules",
         Source::Workflow => "Workflows",
         Source::Member => "Team members",
+        Source::Compaction => "Summaries",
     }
 }
 

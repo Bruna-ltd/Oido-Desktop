@@ -39,6 +39,7 @@ mod ui;
 mod update;
 mod usage;
 mod vault;
+mod window;
 mod workflow;
 
 use app::App;

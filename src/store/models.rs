@@ -23,6 +23,9 @@ impl Store {
                             reasoning: flag(r.get(4)?),
                             tools: flag(r.get(5)?),
                         },
+                        context: r
+                            .get::<_, Option<i64>>(6)?
+                            .and_then(|n| u32::try_from(n).ok()),
                     },
                 ))
             })?;
@@ -68,6 +71,7 @@ impl Store {
                 m.caps.reasoning.map(i64::from),
                 m.caps.tools.map(i64::from),
                 i as i64,
+                m.context.map(i64::from),
             ))?;
         }
         self.conn

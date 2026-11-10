@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use crate::app::{App, Effort, Route};
-use crate::completion::{self, Call, Endpoint, Error, Event, Request, Role, Think, Tokens, Turn};
+use crate::completion::{
+    self, Call, Completion, Endpoint, Error, Event, Request, Role, Think, Tokens, Turn,
+};
 use crate::model::{AgentStatus, Message, Outcome, Session, Stats, ToolCall, new_id};
 use crate::models::ModelRef;
 use crate::providers::ModelStatus;
@@ -37,18 +39,35 @@ pub struct Live {
     /// How long until the first of the reply (a word, a thought, a tool call) arrived.
     first: Option<Duration>,
     tokens: Tokens,
+    /// What was sent, as sent: kept so a call refused as too long can go again, trimmed.
+    request: Option<Request>,
+    /// The tokens, estimated, trimmed from what was sent.
+    trimmed: u32,
+    /// Whether this is that second go, which trims all it can.
+    retried: bool,
 }
 
 /// The messages the model sees: everything since the last divider that was answered in full, with
-/// the tools it called and what came back. Replies that were stopped or failed are left out, so two
-/// messages of yours in a row become one. Calls with no id are sample data and are not sent.
+/// the tools it called and what came back. After a summary, the summary goes first, then the
+/// messages it kept, then what came after it. Replies that were stopped or failed are left out, so
+/// two messages of yours in a row become one. Calls with no id are sample data and are not sent.
 pub fn build_turns(messages: &[Message]) -> Vec<Turn> {
-    let start = messages
+    let last = messages
         .iter()
-        .rposition(|m| matches!(m, Message::Divider(_)))
-        .map_or(0, |i| i + 1);
+        .rposition(|m| matches!(m, Message::Divider(_) | Message::Summary { .. }));
     let mut turns: Vec<Turn> = Vec::new();
-    for m in &messages[start..] {
+    let sent: Vec<&Message> = match last.map(|i| (i, &messages[i])) {
+        Some((i, Message::Summary { text, keeps })) => {
+            turns.push(Turn::user(crate::window::summary_turn(text)));
+            messages[i.saturating_sub(*keeps)..i]
+                .iter()
+                .chain(&messages[i + 1..])
+                .collect()
+        }
+        Some((i, _)) => messages[i + 1..].iter().collect(),
+        None => messages.iter().collect(),
+    };
+    for m in sent {
         match m {
             Message::User(p) => {
                 let text = p.for_model();
@@ -155,6 +174,9 @@ impl Live {
             thought: None,
             first: None,
             tokens: Tokens::default(),
+            request: None,
+            trimmed: 0,
+            retried: false,
         }
     }
 
@@ -166,9 +188,13 @@ impl Live {
 }
 
 impl App {
-    /// Whether the agent is writing a reply in any chat.
+    /// Whether the agent is writing a reply, or a summary to make room for one, in any chat.
     pub(crate) fn writing(&self, agent_id: &str) -> bool {
         self.live.values().any(|l| l.agent_id == agent_id)
+            || self
+                .summarizing
+                .keys()
+                .any(|sid| self.roster.owner_of(sid).is_some_and(|a| a.id == agent_id))
     }
 
     /// Seconds the open chat's reply has been in progress.
@@ -187,6 +213,7 @@ impl App {
         self.live.contains_key(sid)
             || self.commands.contains_key(sid)
             || self.delegating.contains_key(sid)
+            || self.summarizing.contains_key(sid)
     }
 
     /// Puts your message in chat `sid`, which need not be the open one, and starts the reply.
@@ -269,18 +296,17 @@ impl App {
     /// Starts a run that answers the last message of a chat, which need not be the open one (a
     /// command can finish after you have gone to another chat).
     fn begin_in(&mut self, sid: &str) {
+        if self.busy_in(sid) {
+            return;
+        }
+        // Back from writing a summary: the same run carries on.
+        let resumed = self.resuming.remove(sid);
         let Some(agent) = self.roster.owner_of(sid) else {
             return;
         };
         let Some(chat) = agent.sessions.iter().find(|s| s.id == sid) else {
             return;
         };
-        if self.live.contains_key(sid)
-            || self.commands.contains_key(sid)
-            || self.delegating.contains_key(sid)
-        {
-            return;
-        }
         let ModelStatus::Ready(model) = self.providers.status(agent.model.as_ref()) else {
             return;
         };
@@ -322,8 +348,7 @@ impl App {
             }
         });
         // What tools gave back carries the run on; something you said starts a new one.
-        let carries_on = !asked
-            && trailing.iter().all(|t| t.role == Role::Tool)
+        let carries_on = (resumed || !asked && trailing.iter().all(|t| t.role == Role::Tool))
             && self.traces.contains_key(&sid);
         let (brief, skills) = self.brief_of(agent);
         let system = Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty());
@@ -332,7 +357,7 @@ impl App {
             .model_info(&model)
             .is_none_or(|i| crate::models::can_think(&i.caps));
         let context = crate::context::now_text();
-        let request = Request {
+        let mut request = Request {
             model: model.id.clone(),
             system,
             context: Some(context.clone()),
@@ -344,6 +369,34 @@ impl App {
                 &crate::mcp::specs(&self.mcp.servers),
             ),
         };
+        // Older tool results and pictures are trimmed from what is sent when it would come near the
+        // model's limit; the chat keeps them. If that is not enough, the older messages are
+        // summarized first, and then this goes on; if there is nothing left to summarize and it
+        // still cannot fit, it fails here rather than at the provider.
+        let limit = self.context_limit(&model);
+        let fitted = crate::window::fit(
+            &mut request,
+            limit,
+            crate::window::measured(&chat.messages),
+            false,
+        );
+        let summary = fitted
+            .over(limit)
+            .then(|| crate::window::summary_cut(&chat.messages))
+            .flatten()
+            .map(|cut| {
+                let ask = crate::window::summary_request(&model.id, &chat.messages[..cut], limit);
+                (cut, ask)
+            });
+        let refuse = (summary.is_none() && fitted.too_big(limit)).then(|| {
+            let tokens = |n: u32| crate::ui::usage::tokens(u64::from(n));
+            format!(
+                "This chat is too long for {}, even with older parts trimmed and summarized: it would be sent about {} tokens and takes {}. Shorten your last message, or press Start fresh.",
+                self.providers.model_name(&model),
+                tokens(fitted.size),
+                tokens(limit.unwrap_or(0)),
+            )
+        });
         let agent_id = agent.id.clone();
         let mut setup = Vec::new();
         if !carries_on {
@@ -376,13 +429,20 @@ impl App {
         }
         let run = trace.run.clone();
         let mut live = Live::new(&run.id, &agent_id, model.clone());
-        live.sent = transcript(&turns);
+        live.sent = transcript(&request.turns);
+        live.trimmed = fitted.trimmed;
+        live.request = Some(request.clone());
         let cancel = Arc::clone(&live.cancel);
         let target = self.target_for(&model.provider);
         if !carries_on {
             self.save("the run", |db| db.start_run(&run));
         }
         self.save_run(&run, &setup);
+        if let Some((cut, ask)) = summary
+            && self.summarize(&sid, &model, cut, ask)
+        {
+            return;
+        }
         if let Some(agent) = self.roster.agent_mut(&agent_id) {
             agent.status = AgentStatus::Running;
             if let Some(chat) = agent.sessions.iter_mut().find(|s| s.id == sid) {
@@ -392,10 +452,195 @@ impl App {
         }
         self.live.insert(sid.clone(), live);
         self.beat();
-        match target {
-            Ok((endpoint, key)) => self.stream(sid, run.id, endpoint, key, request, cancel),
-            Err(why) => self.settle(&sid, &run.id, Err(Error::Setup(why))),
+        match (refuse, target) {
+            (Some(why), _) | (None, Err(why)) => self.settle(&sid, &run.id, Err(Error::Setup(why))),
+            (None, Ok((endpoint, key))) => {
+                self.stream(sid, run.id, endpoint, key, request, cancel);
+            }
         }
+    }
+
+    /// Writes a summary of chat `sid`'s messages before `cut` in the background, then carries on
+    /// with the same run (see `docs/context.md`). Returns false, changing nothing, when the model
+    /// cannot be asked.
+    fn summarize(&mut self, sid: &str, model: &ModelRef, cut: usize, ask: Request) -> bool {
+        let Ok((endpoint, key)) = self.target_for(&model.provider) else {
+            return false;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.summarizing.insert(sid.to_owned(), Arc::clone(&cancel));
+        if let Some(agent) = self.roster.owner_of_mut(sid) {
+            agent.status = AgentStatus::Running;
+        }
+        self.beat();
+        let (sid, who) = (sid.to_owned(), self.providers.label_of(&model.provider));
+        let (sent, began) = (transcript(&ask.turns), Instant::now());
+        self.spawn(
+            move || {
+                completion::complete(&endpoint, key.as_deref().map(String::as_str), &ask, &cancel)
+            },
+            move |app, got| app.summarized(&sid, cut, &sent, began, &who, got),
+        );
+        true
+    }
+
+    /// The summary came back: it goes in the chat and the run carries on, or the reply fails
+    /// saying why. Nothing happens if it was stopped meanwhile.
+    fn summarized(
+        &mut self,
+        sid: &str,
+        cut: usize,
+        sent: &str,
+        began: Instant,
+        who: &str,
+        got: Result<Completion, Error>,
+    ) {
+        if self.summarizing.remove(sid).is_none() {
+            return;
+        }
+        let (text, tokens, failure) = match got {
+            Ok(c) if !c.text.trim().is_empty() => (c.text.trim().to_owned(), c.tokens, None),
+            Ok(c) => (
+                String::new(),
+                c.tokens,
+                Some(format!("{who} sent back an empty summary.")),
+            ),
+            Err(e) => (String::new(), Tokens::default(), Some(e.describe(who))),
+        };
+        let status = if failure.is_some() {
+            Status::Error
+        } else {
+            Status::Ok
+        };
+        let steps = self
+            .traces
+            .get_mut(sid)
+            .map(|t| {
+                let mut steps = t.reply(&Reply {
+                    sent,
+                    text: &text,
+                    reasoning: "",
+                    calls: &[],
+                    failure: failure.as_deref(),
+                    status,
+                    tokens,
+                    began,
+                    first: None,
+                });
+                if let Some(call) = steps.first_mut() {
+                    call.name = crate::window::SUMMARY_STEP.to_owned();
+                }
+                steps
+            })
+            .unwrap_or_default();
+        self.record(sid, &steps);
+        let run = self.traces.get(sid).map(|t| t.run.id.clone());
+        let message = match &failure {
+            None => Message::Summary { text, keeps: 0 },
+            Some(why) => Message::reply(
+                "",
+                run,
+                Outcome::Failed(format!(
+                    "Could not summarize the earlier messages to make room: {why}"
+                )),
+            ),
+        };
+        let mut saved = None;
+        if let Some(chat) = self
+            .roster
+            .owner_of_mut(sid)
+            .and_then(|a| a.sessions.iter_mut().find(|s| s.id == sid))
+        {
+            let mut message = message;
+            if let Message::Summary { keeps, .. } = &mut message {
+                *keeps = chat.messages.len().saturating_sub(cut);
+            }
+            chat.messages.push(message);
+            let seq = chat.messages.len() - 1;
+            saved = Some((chat.id.clone(), seq, chat.messages[seq].clone()));
+        }
+        if let Some((id, seq, m)) = saved {
+            self.save("the summary", |db| db.put_message(&id, seq, &m));
+        }
+        if failure.is_none() {
+            self.resuming.insert(sid.to_owned());
+            self.begin_in(sid);
+            return;
+        }
+        if let Some(agent) = self.roster.owner_of(sid).map(|a| a.id.clone())
+            && !self.writing(&agent)
+            && let Some(a) = self.roster.agent_mut(&agent)
+        {
+            a.status = AgentStatus::Idle;
+        }
+        self.send_queued(sid);
+        self.fire_settled(sid, Status::Error, failure.as_deref());
+    }
+
+    /// The provider refused the call as too long even trimmed: the reply being written is put
+    /// aside, the older messages summarized, and the run carries on after. Returns false, changing
+    /// nothing, when there is nothing to summarize.
+    fn summarize_refused(&mut self, sid: &str) -> bool {
+        let Some(live) = self.live.get(sid) else {
+            return false;
+        };
+        let model = live.model.clone();
+        let Some(messages) = self
+            .roster
+            .owner_of(sid)
+            .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
+            .map(|s| &s.messages)
+        else {
+            return false;
+        };
+        let writing = matches!(
+            messages.last(),
+            Some(Message::Assistant {
+                outcome: Outcome::Working,
+                ..
+            })
+        );
+        let before = &messages[..messages.len() - usize::from(writing)];
+        let Some(cut) = crate::window::summary_cut(before) else {
+            return false;
+        };
+        let ask =
+            crate::window::summary_request(&model.id, &before[..cut], self.context_limit(&model));
+        if self.target_for(&model.provider).is_err() {
+            return false;
+        }
+        let Some(live) = self.live.remove(sid) else {
+            return false;
+        };
+        let steps = self
+            .traces
+            .get_mut(sid)
+            .map(|t| {
+                t.reply(&Reply {
+                    sent: &live.sent,
+                    text: "",
+                    reasoning: &live.reasoning,
+                    calls: &[],
+                    failure: Some(
+                        "Too long for the model, even trimmed. The earlier messages are summarized, then it goes again.",
+                    ),
+                    status: Status::Error,
+                    tokens: live.tokens,
+                    began: live.began,
+                    first: live.first,
+                })
+            })
+            .unwrap_or_default();
+        self.record(sid, &steps);
+        if writing
+            && let Some(chat) = self
+                .roster
+                .owner_of_mut(sid)
+                .and_then(|a| a.sessions.iter_mut().find(|s| s.id == sid))
+        {
+            chat.messages.pop();
+        }
+        self.summarize(sid, &model, cut, ask)
     }
 
     /// The brief an agent is given, and each of its skills still in the folder with its
@@ -549,6 +794,10 @@ impl App {
         if !self.is_live(sid, rid) {
             return;
         }
+        if result == Err(Error::TooLong) && (self.retry_trimmed(sid) || self.summarize_refused(sid))
+        {
+            return;
+        }
         let Some(live) = self.live.remove(sid) else {
             return;
         };
@@ -583,6 +832,11 @@ impl App {
             model: model_name,
             tokens: live.tokens.output.unwrap_or(0),
             seconds: elapsed.as_secs_f32(),
+            context: live
+                .tokens
+                .input
+                .map(|i| i.saturating_add(live.tokens.output.unwrap_or(0))),
+            trimmed: (live.trimmed > 0).then_some(live.trimmed),
         });
         let thought = live.thought.map(|d| d.as_secs_f32());
 
@@ -646,8 +900,84 @@ impl App {
         self.fire_settled(sid, status, failure.as_deref());
     }
 
+    /// The provider refused the call as too long: it goes again at once with all the older tool
+    /// results and pictures trimmed, the refusal recorded in the run. Once only, and only when there
+    /// is something to trim; otherwise returns false and the reply fails.
+    fn retry_trimmed(&mut self, sid: &str) -> bool {
+        let Some(live) = self.live.get(sid).filter(|l| !l.retried) else {
+            return false;
+        };
+        let (Some(mut request), model) = (live.request.clone(), live.model.clone()) else {
+            return false;
+        };
+        let Some(messages) = self
+            .roster
+            .owner_of(sid)
+            .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
+            .map(|s| &s.messages)
+        else {
+            return false;
+        };
+        // From the chat again: what went before may already have been trimmed less.
+        request.turns = build_turns(messages);
+        let trimmed = crate::window::fit(&mut request, None, None, true).trimmed;
+        if trimmed == 0 {
+            return false;
+        }
+        let Ok((endpoint, key)) = self.target_for(&model.provider) else {
+            return false;
+        };
+        let Some(live) = self.live.get_mut(sid) else {
+            return false;
+        };
+        let refused = Reply {
+            sent: &live.sent,
+            text: "",
+            reasoning: &live.reasoning,
+            calls: &[],
+            failure: Some(
+                "Too long for the model. Sent again with the older tool results and pictures trimmed.",
+            ),
+            status: Status::Error,
+            tokens: live.tokens,
+            began: live.began,
+            first: live.first,
+        };
+        let steps = self
+            .traces
+            .get_mut(sid)
+            .map(|t| t.reply(&refused))
+            .unwrap_or_default();
+        live.sent = transcript(&request.turns);
+        live.trimmed = trimmed;
+        live.retried = true;
+        live.request = Some(request.clone());
+        (live.began, live.first, live.thought) = (Instant::now(), None, None);
+        live.tokens = Tokens::default();
+        live.reasoning.clear();
+        let (rid, cancel) = (live.run_id.clone(), Arc::clone(&live.cancel));
+        self.record(sid, &steps);
+        self.stream(sid.to_owned(), rid, endpoint, key, request, cancel);
+        true
+    }
+
     /// Ends the chat's reply as stopped, if it has one being written.
     pub(crate) fn cancel_session(&mut self, sid: &str) {
+        self.resuming.remove(sid);
+        if let Some(flag) = self.summarizing.remove(sid) {
+            flag.store(true, Ordering::Relaxed);
+            if let Some(t) = self.traces.get_mut(sid) {
+                t.stop();
+                let run = t.run.clone();
+                self.save_run(&run, &[]);
+            }
+            if let Some(agent) = self.roster.owner_of(sid).map(|a| a.id.clone())
+                && !self.writing(&agent)
+                && let Some(a) = self.roster.agent_mut(&agent)
+            {
+                a.status = AgentStatus::Idle;
+            }
+        }
         if let Some(flag) = self.commands.get(sid) {
             flag.store(true, Ordering::Relaxed);
         }
@@ -1143,6 +1473,312 @@ mod tests {
         app.current().unwrap().chat().messages.last().unwrap()
     }
 
+    /// A chat whose first reply ran a tool that gave back `output`, with two exchanges after it,
+    /// so that result is older than the turns always sent whole.
+    fn chat_with_old_result(output: String) -> Vec<Message> {
+        let mut ran = reply("Let me look.", Outcome::Done);
+        if let Message::Assistant { tools, .. } = &mut ran {
+            tools.push(ToolCall {
+                name: "shell".into(),
+                summary: "cat big.log".into(),
+                output: Some(output),
+                id: "c1".into(),
+                args: r#"{"command":"cat big.log"}"#.into(),
+            });
+        }
+        vec![
+            user("read the log"),
+            ran,
+            user("and?"),
+            reply("It is long.", Outcome::Done),
+            user("go on"),
+            reply("Still reading.", Outcome::Done),
+        ]
+    }
+
+    #[test]
+    fn a_chat_near_the_models_limit_sends_old_tool_results_trimmed_and_keeps_them() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(&db, vec![(200, "text/event-stream", STREAM)]);
+        app.effort = Effort::Off;
+        // About 30k tokens against the server's 32k: past 90%.
+        let big = "log line\n".repeat(13_400);
+        app.roster.current_mut().unwrap().chat_mut().messages = chat_with_old_result(big.clone());
+        app.composer.edit = TextEdit::new("sum it up");
+        app.send();
+
+        let request = seen.recv().unwrap();
+        assert!(!request.contains("log line"), "the old result is not sent");
+        assert!(request.contains("(output removed to save room: 118 kb)"));
+        assert!(
+            request.contains("cat big.log"),
+            "the call stays, so the model knows it ran it"
+        );
+        let Message::Assistant { stats, outcome, .. } = last(&app) else {
+            panic!("a reply");
+        };
+        assert_eq!(outcome, &Outcome::Done);
+        assert!(stats.as_ref().unwrap().trimmed.unwrap() > 25_000);
+        let kept = app.current().unwrap().chat().messages.iter().any(|m| {
+            matches!(m, Message::Assistant { tools, .. }
+                if tools.iter().any(|t| t.output.as_deref() == Some(big.as_str())))
+        });
+        assert!(kept, "the chat keeps the whole result");
+    }
+
+    #[test]
+    fn a_call_refused_as_too_long_goes_again_trimmed_and_the_refusal_is_in_the_run() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    400,
+                    "application/json",
+                    r#"{"error":{"message":"the request exceeds the available context size, try increasing it"}}"#,
+                ),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        app.effort = Effort::Off;
+        // Small enough that nothing is trimmed up front: the server's word decides.
+        app.roster.current_mut().unwrap().chat_mut().messages =
+            chat_with_old_result("x".repeat(4_000));
+        app.composer.edit = TextEdit::new("sum it up");
+        app.send();
+
+        let first = seen.recv().unwrap();
+        let second = seen.recv().unwrap();
+        assert!(first.contains(&"x".repeat(4_000)), "sent whole at first");
+        assert!(!second.contains(&"x".repeat(4_000)));
+        assert!(second.contains("(output removed to save room: 4 kb)"));
+
+        let Message::Assistant { text, outcome, .. } = last(&app) else {
+            panic!("a reply");
+        };
+        assert_eq!((text.as_str(), outcome), ("Hello!", &Outcome::Done));
+        app.go(Route::Runs);
+        assert_eq!(app.runs[0].status, Status::Ok);
+        assert_eq!(app.runs[0].calls, 2);
+        let kinds: Vec<_> = app.steps.iter().map(|s| s.kind).collect();
+        assert!(
+            kinds.ends_with(&[StepKind::Llm, StepKind::Error, StepKind::Llm]),
+            "{kinds:?}"
+        );
+    }
+
+    /// `n` exchanges of yours and the agent's, each of yours `size` bytes, numbered from 1.
+    fn long_talk(n: usize, size: usize) -> Vec<Message> {
+        (1..=n)
+            .flat_map(|i| {
+                [
+                    user(&format!("message {i}: {}", "w".repeat(size))),
+                    reply(&format!("answer {i}"), Outcome::Done),
+                ]
+            })
+            .collect()
+    }
+
+    fn summaries(app: &App) -> Vec<(String, usize)> {
+        app.current()
+            .unwrap()
+            .chat()
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Summary { text, keeps } => Some((text.clone(), *keeps)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chat_too_long_even_trimmed_is_summarized_first_and_carries_on_in_the_same_run() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    crate::testing::EVENTS,
+                    crate::testing::text_stream("They talked about w."),
+                ),
+                (200, crate::testing::EVENTS, STREAM),
+            ],
+        );
+        app.effort = Effort::Off;
+        // About 36k tokens of plain words against the server's 32k: nothing to trim.
+        app.roster.current_mut().unwrap().chat_mut().messages = long_talk(6, 24_000);
+        app.composer.edit = TextEdit::new("so?");
+        app.send();
+
+        let asked = seen.recv().unwrap();
+        assert!(
+            asked.contains("you condense a conversation"),
+            "the summary call first"
+        );
+        assert!(asked.contains("message 1:") && !asked.contains("so?"));
+        let sent = seen.recv().unwrap();
+        assert!(sent.contains("a summary of the earlier part of this conversation"));
+        assert!(sent.contains("they talked about w."));
+        assert!(!sent.contains("message 1:"), "what it covers is not sent");
+        assert!(
+            sent.contains("message 6:") && sent.contains("so?"),
+            "the latest go whole"
+        );
+
+        assert_eq!(
+            summaries(&app),
+            vec![("They talked about w.".to_owned(), 4)]
+        );
+        let Message::Assistant { text, outcome, .. } = last(&app) else {
+            panic!("a reply");
+        };
+        assert_eq!((text.as_str(), outcome), ("Hello!", &Outcome::Done));
+        assert_eq!(app.current().unwrap().status, AgentStatus::Idle);
+        assert!(!app.busy());
+
+        app.go(Route::Runs);
+        assert_eq!(app.runs.len(), 1, "one run");
+        assert_eq!(app.runs[0].status, Status::Ok);
+        let calls: Vec<&str> = app
+            .steps
+            .iter()
+            .filter(|s| s.kind == StepKind::Llm)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(calls, [crate::window::SUMMARY_STEP, ""]);
+        let rows = app.store.as_ref().unwrap().usage(None).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.source == crate::usage::Source::Compaction && r.totals.calls == 1),
+            "counted apart: {rows:?}"
+        );
+
+        drop(app);
+        let app = db.open();
+        let chat = app.roster.owner_of(&app.roster.list[0].sessions[0].id);
+        assert!(chat.is_some());
+        let kept = app.roster.list.iter().flat_map(|a| &a.sessions).any(|s| {
+            s.messages
+                .iter()
+                .any(|m| matches!(m, Message::Summary { keeps: 4, .. }))
+        });
+        assert!(kept, "the summary is saved");
+    }
+
+    #[test]
+    fn a_call_refused_even_trimmed_is_summarized_and_goes_again() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    400,
+                    "application/json",
+                    r#"{"error":{"message":"prompt is too long"}}"#,
+                ),
+                (
+                    200,
+                    crate::testing::EVENTS,
+                    crate::testing::text_stream("Short."),
+                ),
+                (200, crate::testing::EVENTS, STREAM),
+            ],
+        );
+        app.effort = Effort::Off;
+        app.roster.current_mut().unwrap().chat_mut().messages = long_talk(3, 10);
+        app.composer.edit = TextEdit::new("now");
+        app.send();
+
+        let first = seen.recv().unwrap();
+        let summary = seen.recv().unwrap();
+        let again = seen.recv().unwrap();
+        assert!(first.contains("message 1:"));
+        assert!(summary.contains("you condense a conversation"));
+        assert!(!again.contains("message 1:") && again.contains("short."));
+        assert_eq!(summaries(&app), vec![("Short.".to_owned(), 4)]);
+        let Message::Assistant { text, outcome, .. } = last(&app) else {
+            panic!("a reply");
+        };
+        assert_eq!((text.as_str(), outcome), ("Hello!", &Outcome::Done));
+        let working = app.current().unwrap().chat().messages.iter().any(|m| {
+            matches!(
+                m,
+                Message::Assistant {
+                    outcome: Outcome::Working,
+                    ..
+                }
+            )
+        });
+        assert!(!working, "the refused reply was put aside");
+        app.go(Route::Runs);
+        assert_eq!((app.runs.len(), app.runs[0].status), (1, Status::Ok));
+        let kinds: Vec<_> = app.steps.iter().map(|s| s.kind).collect();
+        assert!(
+            kinds.ends_with(&[StepKind::Llm, StepKind::Error, StepKind::Llm, StepKind::Llm]),
+            "{kinds:?}"
+        );
+    }
+
+    #[test]
+    fn a_summary_that_fails_fails_the_reply_saying_why() {
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(
+            &db,
+            vec![(500, "application/json", r#"{"error":{"message":"down"}}"#)],
+        );
+        app.roster.current_mut().unwrap().chat_mut().messages = long_talk(6, 24_000);
+        app.composer.edit = TextEdit::new("so?");
+        app.send();
+        let Message::Assistant { outcome, .. } = last(&app) else {
+            panic!("a reply");
+        };
+        assert!(
+            matches!(outcome, Outcome::Failed(why) if why.starts_with("Could not summarize")),
+            "{outcome:?}"
+        );
+        assert!(summaries(&app).is_empty());
+        assert_eq!(app.current().unwrap().status, AgentStatus::Idle);
+        assert!(!app.busy());
+    }
+
+    #[test]
+    fn one_message_too_big_for_the_model_fails_before_it_is_sent_with_the_sizes() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(&db, vec![]);
+        app.composer.edit = TextEdit::new("w".repeat(160_000));
+        app.send();
+        let Message::Assistant { outcome, .. } = last(&app) else {
+            panic!("a reply");
+        };
+        assert!(
+            matches!(outcome, Outcome::Failed(why) if why.contains("would be sent about 40.") && why.contains("tokens and takes 32.8k")),
+            "{outcome:?}"
+        );
+        assert!(seen.try_recv().is_err(), "nothing was sent");
+    }
+
+    #[test]
+    fn a_refusal_with_nothing_to_trim_fails_as_before() {
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(
+            &db,
+            vec![(
+                400,
+                "application/json",
+                r#"{"error":{"message":"maximum context length exceeded"}}"#,
+            )],
+        );
+        app.composer.edit = TextEdit::new("hi");
+        app.send();
+        let Message::Assistant { outcome, .. } = last(&app) else {
+            panic!("a reply");
+        };
+        assert!(matches!(outcome, Outcome::Failed(why) if why.contains("too long")));
+        assert!(summaries(&app).is_empty(), "nothing to summarize either");
+    }
+
     #[test]
     fn a_message_starts_a_run_and_the_streamed_reply_is_written_saved_and_recorded() {
         let db = TempDb::new();
@@ -1179,6 +1815,19 @@ mod tests {
         assert_eq!((text.as_str(), outcome), ("Hello!", &Outcome::Done));
         assert!(run.is_some() && thought_secs.is_some());
         assert_eq!(stats.as_ref().unwrap().tokens, 4);
+        assert_eq!(
+            stats.as_ref().unwrap().context,
+            Some(13),
+            "all 9 sent and the 4 written"
+        );
+        assert_eq!(
+            app.chat_fill(app.current().unwrap()),
+            Some(crate::window::Fill {
+                used: 13,
+                limit: Some(crate::testing::SERVER_CONTEXT)
+            }),
+            "against what the server runs with"
+        );
         assert!(!app.busy() && app.live.is_empty());
         assert_eq!(app.current().unwrap().status, AgentStatus::Idle);
 

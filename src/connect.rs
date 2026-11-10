@@ -511,9 +511,15 @@ mod tests {
     fn refreshing_replaces_the_list_and_a_failure_keeps_the_old_one_and_says_so_on_the_row() {
         let db = TempDb::new();
         let mut app = db.open();
-        let (base, seen) = serve(vec![(200, LIST), (200, LIST_2), (401, "{}")]);
+        let (base, seen) = serve(vec![
+            (200, LIST),
+            (404, "{}"),
+            (200, LIST_2),
+            (404, "{}"),
+            (401, "{}"),
+        ]);
         add_server(&mut app, "Box", &format!("{base}/v1"), "sk-box");
-        let _ = seen.recv().unwrap();
+        let _ = (seen.recv().unwrap(), seen.recv().unwrap());
 
         app.refresh_models("llama-server:box");
         assert!(
@@ -522,6 +528,7 @@ mod tests {
                 .contains("authorization: bearer sk-box"),
             "a refresh uses the saved key"
         );
+        let _ = seen.recv().unwrap();
         assert_eq!(
             ids(&app, "llama-server:box"),
             vec!["llama-3.3-70b", "mistral-small"]

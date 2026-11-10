@@ -42,6 +42,14 @@ pub struct Stats {
     pub model: String,
     pub tokens: u32,
     pub seconds: f32,
+    /// The tokens the model had in view by the end of the call, as the provider counted them:
+    /// everything sent (cached or not) and the reply. How full the chat was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
+    /// The tokens, estimated, trimmed from what the call sent to make it fit; `None` if it went
+    /// whole. See `docs/context.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trimmed: Option<u32>,
 }
 
 /// How a reply ended. `Working` is the reply as it is being written and is never saved.
@@ -64,6 +72,13 @@ pub enum Message {
     User(crate::prompt::Prompt),
     /// "Start fresh": the agent forgets everything above, the screen keeps it.
     Divider(String),
+    /// Older messages written in brief to make room (see `docs/context.md`). The model is sent
+    /// this in place of everything above it, then the `keeps` messages right above it word for
+    /// word, then what follows. The screen keeps them all.
+    Summary {
+        text: String,
+        keeps: usize,
+    },
     Assistant {
         text: String,
         thought_secs: Option<f32>,

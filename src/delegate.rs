@@ -21,6 +21,7 @@ use crate::model::{AgentStatus, Message, ToolCall, new_id};
 use crate::models::{self, ModelRef};
 use crate::runs::{Reply, Run, Setup, Status, Step, Trace};
 use crate::tools::{self, DELEGATE};
+use crate::window;
 
 /// The most times a team member may call the model for one task before it is cut off.
 const MAX_ROUNDS: usize = 20;
@@ -156,6 +157,8 @@ struct Job {
     think: Option<completion::Think>,
     tools: Vec<ToolSpec>,
     task: String,
+    /// The model's context limit, when known.
+    limit: Option<u32>,
     /// Stops this task.
     cancel: Arc<AtomicBool>,
 }
@@ -217,12 +220,14 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
     });
     let mut turns = vec![Turn::user(job.task.clone())];
     let key = job.prep.key.as_deref().map(String::as_str);
+    // The last call's count, and whether the next goes again after a too-long refusal.
+    let (mut measured, mut retry) = (None, false);
     let end = 'rounds: {
         for _ in 0..MAX_ROUNDS {
             if job.cancel.load(Ordering::Relaxed) {
                 break 'rounds End::Stopped;
             }
-            let request = Request {
+            let mut request = Request {
                 model: job.prep.model.clone(),
                 system: job.system.clone(),
                 context: Some(job.context.clone()),
@@ -230,6 +235,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 turns: turns.clone(),
                 tools: job.tools.clone(),
             };
+            let trimmed = window::fit(&mut request, job.limit, measured, retry).trimmed;
             tell(Note::Model);
             let round = Instant::now();
             let (mut text, mut reasoning, mut calls) = (String::new(), String::new(), Vec::new());
@@ -262,9 +268,16 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 output: used.output.unwrap_or(0),
             });
 
+            // Refused as too long: once, it goes again with all it can trim trimmed.
+            let again =
+                result == Err(completion::Error::TooLong) && !retry && window::trimmable(&turns);
             let (status, failure) = match &result {
                 Ok(()) => (Status::Ok, None),
                 Err(completion::Error::Cancelled) => (Status::Cancelled, None),
+                Err(_) if again => (
+                    Status::Error,
+                    Some("Too long for the model. Sent again with the older tool results and pictures trimmed.".to_owned()),
+                ),
                 Err(e) => (Status::Error, Some(e.describe(&job.prep.who))),
             };
             let called: Vec<ToolCall> = calls
@@ -278,7 +291,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 })
                 .collect();
             steps.extend(trace.reply(&Reply {
-                sent: &crate::run::transcript(&turns),
+                sent: &crate::run::transcript(&request.turns),
                 text: &text,
                 reasoning: &reasoning,
                 calls: &called,
@@ -288,11 +301,20 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 began: round,
                 first,
             }));
+            if again {
+                retry = true;
+                continue;
+            }
+            retry = false;
             match (status, failure) {
                 (Status::Cancelled, _) => break 'rounds End::Stopped,
                 (_, Some(why)) => break 'rounds End::Failed(why),
                 _ => {}
             }
+            measured = used.input.map(|input| window::Measured {
+                context: input.saturating_add(used.output.unwrap_or(0)),
+                trimmed,
+            });
             if calls.is_empty() {
                 break 'rounds if text.trim().is_empty() {
                     End::Failed(format!("{} sent back an empty reply.", job.prep.who))
@@ -451,6 +473,7 @@ impl App {
                 .into_iter()
                 .filter(|t| unattended(&t.name))
                 .collect(),
+            limit: self.context_limit(&ModelRef::new(&prep.provider, &prep.model)),
             prep,
             task,
             cancel: Arc::new(AtomicBool::new(false)),

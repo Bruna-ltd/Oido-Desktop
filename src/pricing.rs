@@ -1,6 +1,6 @@
-//! Model prices from models.dev, a public catalog: fetched in the background at most once a day and
-//! kept in the database, so cost shows offline. Only the built-in providers are looked up; a local
-//! or custom server's models have no catalog price and take the one you set.
+//! Model prices and context limits from models.dev, a public catalog: fetched in the background at
+//! most once a day and kept in the database, so cost shows offline. Only the built-in providers are
+//! looked up; a local or custom server's models have no catalog price and take the one you set.
 
 use std::time::Duration;
 
@@ -34,20 +34,28 @@ const CATALOG_IDS: [(&str, &str); 9] = [
     ("qwen", "alibaba"),
 ];
 
-/// The prices in a models.dev catalog, under our provider ids. A model with no input or output
-/// price is left out. Prices that change with the length of the context are not modelled: the base
-/// price is used.
+/// What the catalog says about models, under our provider ids.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Catalog {
+    pub prices: Vec<(ModelRef, Price)>,
+    /// How many tokens each model takes at once.
+    pub limits: Vec<(ModelRef, u32)>,
+}
+
+/// The prices and context limits in a models.dev catalog. A model with no input or output price
+/// has no price, and one with no context limit has no limit. Prices that change with the length of
+/// the context are not modelled: the base price is used.
 ///
 /// # Errors
 ///
 /// The text is not a catalog, in words.
-pub fn parse(json: &str) -> Result<Vec<(ModelRef, Price)>, String> {
+pub fn parse(json: &str) -> Result<Catalog, String> {
     let all: Value =
         serde_json::from_str(json).map_err(|e| format!("the price list is not valid: {e}"))?;
     if !all.is_object() {
         return Err("the price list is not a catalog".to_owned());
     }
-    let mut out = Vec::new();
+    let mut out = Catalog::default();
     for (ours, theirs) in CATALOG_IDS {
         let Some(models) = all
             .pointer(&format!("/{theirs}/models"))
@@ -61,8 +69,16 @@ pub fn parse(json: &str) -> Result<Vec<(ModelRef, Price)>, String> {
                     .and_then(Value::as_f64)
                     .filter(|p| p.is_finite() && *p >= 0.0)
             };
+            if let Some(n) = m
+                .pointer("/limit/context")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0)
+            {
+                out.limits.push((ModelRef::new(ours, id.as_str()), n));
+            }
             if let (Some(input), Some(output)) = (cost("input"), cost("output")) {
-                out.push((
+                out.prices.push((
                     ModelRef::new(ours, id.as_str()),
                     Price {
                         input,
@@ -99,7 +115,7 @@ pub fn base_id(id: &str) -> Option<&str> {
 }
 
 /// Fetches the catalog. Blocks, so call it from a worker thread.
-fn fetch() -> Result<Vec<(ModelRef, Price)>, String> {
+fn fetch() -> Result<Catalog, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .user_agent(format!("oido-desktop/{VERSION}"))
@@ -118,7 +134,7 @@ fn fetch() -> Result<Vec<(ModelRef, Price)>, String> {
 }
 
 impl App {
-    /// Reads the saved prices.
+    /// Reads the saved prices and context limits.
     pub(crate) fn load_prices(&mut self) {
         let Some(db) = &self.store else {
             return;
@@ -126,6 +142,10 @@ impl App {
         match db.prices() {
             Ok(p) => self.prices = p,
             Err(e) => eprintln!("oido: could not read model prices: {e}"),
+        }
+        match db.limits() {
+            Ok(l) => self.limits = l,
+            Err(e) => eprintln!("oido: could not read model context limits: {e}"),
         }
     }
 
@@ -147,10 +167,8 @@ impl App {
         self.spawn(fetch, |app, got| {
             app.prices_fetching = false;
             match got {
-                Ok(prices) if !prices.is_empty() => {
-                    app.save("the model prices", |db| {
-                        db.replace_catalog_prices(&prices, now())
-                    });
+                Ok(catalog) if !catalog.prices.is_empty() => {
+                    app.save("the model prices", |db| db.replace_catalog(&catalog, now()));
                     app.load_prices();
                 }
                 Ok(_) => eprintln!("oido: the price list had no prices; keeping the last ones"),
@@ -178,7 +196,7 @@ mod tests {
             }},
             "someone-else": {"models": {"m": {"cost": {"input": 1, "output": 1}}}}
         }"#;
-        let mut got = parse(json).unwrap();
+        let mut got = parse(json).unwrap().prices;
         got.sort_by(|a, b| a.0.id.cmp(&b.0.id));
         assert_eq!(
             got,
@@ -205,6 +223,27 @@ mod tests {
         );
         assert!(parse("[]").is_err());
         assert!(parse("not json").is_err());
+    }
+
+    #[test]
+    fn context_limits_are_read_whether_or_not_the_model_has_a_price() {
+        let json = r#"{
+            "openai": {"models": {
+                "gpt-x": {"cost": {"input": 1, "output": 2}, "limit": {"context": 400000, "output": 128000}},
+                "gpt-free": {"limit": {"context": 128000}},
+                "gpt-zero": {"limit": {"context": 0}},
+                "gpt-none": {"cost": {"input": 1, "output": 2}}
+            }}
+        }"#;
+        let mut got = parse(json).unwrap().limits;
+        got.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+        assert_eq!(
+            got,
+            vec![
+                (ModelRef::new("openai", "gpt-free"), 128_000),
+                (ModelRef::new("openai", "gpt-x"), 400_000),
+            ]
+        );
     }
 
     #[test]
