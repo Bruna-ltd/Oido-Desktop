@@ -20,8 +20,6 @@ pub enum Route {
     Chat,
     Runs,
     Providers,
-    /// The register of tools agents can be given.
-    Tools,
     /// Saved workflows and their runs.
     Workflows,
     /// Schedules: prompts and workflows fired on a timing, and how their fires went.

@@ -39,7 +39,7 @@ static OPERATE: [Item; 3] = [
     },
 ];
 
-static CONFIGURE: [Item; 8] = [
+static CONFIGURE: [Item; 6] = [
     Item {
         label: "Providers",
         icon: &icons::PROVIDERS,
@@ -50,11 +50,6 @@ static CONFIGURE: [Item; 8] = [
         icon: &icons::WORKFLOWS,
         route: Route::Workflows,
     },
-    Item {
-        label: "Tools",
-        icon: &icons::TOOLS,
-        route: Route::Tools,
-    },
     soon("Channels", &icons::CHANNELS),
     soon("Extensions", &icons::EXTENSIONS),
     Item {
@@ -62,7 +57,6 @@ static CONFIGURE: [Item; 8] = [
         icon: &icons::MCP,
         route: Route::Mcp,
     },
-    soon("Skills", &icons::SKILLS),
     soon("Guardrails", &icons::GUARDRAILS),
 ];
 

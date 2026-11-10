@@ -735,13 +735,6 @@ pub static SCENES: &[Scene] = &[
         s.edit_agent(&Target::agent("atlas"));
         s.roster.form.advanced = true;
     }),
-    ("tools", |s| {
-        load_samples(s);
-        if let Some(a) = s.roster.agent_mut("atlas") {
-            a.tools = vec![crate::tools::ASK.into()];
-        }
-        s.route = Route::Tools;
-    }),
     ("tools-open", |s| {
         load_samples(s);
         s.edit_agent(&Target::agent("atlas"));
