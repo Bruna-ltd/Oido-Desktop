@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::app::{App, Effort, Route};
 use crate::completion::{self, Call, Endpoint, Error, Event, Request, Role, Think, Tokens, Turn};
-use crate::model::{AgentStatus, Message, Outcome, Stats, ToolCall, new_id};
+use crate::model::{AgentStatus, Message, Outcome, Session, Stats, ToolCall, new_id};
 use crate::models::ModelRef;
 use crate::providers::ModelStatus;
 use crate::runs::{Reply, Run, Setup, Status, Trace};
@@ -206,14 +206,20 @@ impl App {
                 text => title_of(text),
             };
         }
-        chat.messages.push(Message::User(prompt));
-        let seq = chat.messages.len() - 1;
-        let chat = chat.clone();
-        self.save("the message", |db| {
-            db.put_message(sid, seq, &chat.messages[seq])
+        let message = Message::User(prompt);
+        let seq = chat.messages.len();
+        // Only the chat's row is saved with its new name, so its messages need not come along.
+        let named = naming.then(|| Session {
+            id: chat.id.clone(),
+            title: chat.title.clone(),
+            messages: Vec::new(),
         });
-        if naming {
-            self.save("the chat", |db| db.save_session(&agent_id, &chat, position));
+        chat.messages.push(message.clone());
+        self.save("the message", |db| db.put_message(sid, seq, &message));
+        if let Some(named) = named {
+            self.save("the chat", |db| {
+                db.save_session(&agent_id, &named, position)
+            });
         }
         self.begin_in(sid);
     }

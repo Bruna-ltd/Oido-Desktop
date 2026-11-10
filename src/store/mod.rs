@@ -94,7 +94,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 12] = [
+const MIGRATIONS: [&str; 13] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -107,6 +107,7 @@ const MIGRATIONS: [&str; 12] = [
     include_str!("../../db/migrations/010_schedules.sql"),
     include_str!("../../db/migrations/011_run_trace.sql"),
     include_str!("../../db/migrations/012_usage.sql"),
+    include_str!("../../db/migrations/013_dense_chat_positions.sql"),
 ];
 
 const QUERY_FILES: [&str; 9] = [
@@ -667,6 +668,44 @@ mod tests {
             steps[2].at_ms, None,
             "old steps have no timing within the run"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrating_closes_the_gaps_closed_chats_left_keeping_the_tabs_in_order() {
+        let dir = std::env::temp_dir().join(format!("oido-mig13-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oido.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..12] {
+                conn.execute_batch(sql).unwrap();
+            }
+            // Four tabs, the first two closed (gap at 0 and 1), then a new one saved at its index
+            // 2, tying with c. The open tab, index 2, is d.
+            conn.execute_batch(
+                "INSERT INTO agents (id, name, active_session) VALUES ('a', 'Atlas', 2);
+                 INSERT INTO sessions (id, agent_id, position) VALUES ('c', 'a', 2), ('d', 'a', 3), ('e', 'a', 2);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 12).unwrap();
+        }
+        let s = Store::open(&path, Vault::fixed([1; 32])).unwrap();
+        let ids = |s: &Store| -> Vec<String> {
+            s.load_agents().unwrap()[0]
+                .sessions
+                .iter()
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        let before = ids(&s);
+        assert_eq!(before, ["c", "e", "d"], "the order they loaded in is kept");
+        let agent = &s.load_agents().unwrap()[0];
+        assert_eq!(agent.chat().id, "d", "and so is the open tab");
+        // A new chat saved at its index now lands after the others.
+        s.save_session("a", &chat("f", vec![]), 3).unwrap();
+        assert_eq!(ids(&s).len(), 4);
+        assert_eq!(&ids(&s)[..3], before, "a new chat does not cut in");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

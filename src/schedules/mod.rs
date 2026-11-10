@@ -141,7 +141,7 @@ impl App {
             agent.active -= 1;
         }
         agent.active = agent.active.min(agent.sessions.len() - 1);
-        self.delete_saved_chat(sid);
+        self.delete_saved_chat(&t, sid);
         self.save_agent_row(&t);
     }
 

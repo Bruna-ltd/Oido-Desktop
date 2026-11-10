@@ -17,16 +17,22 @@ const APPEARANCE: &str = "appearance";
 const AUTO_UPDATE: &str = "updates.auto";
 pub const RUN_SCHEDULES: &str = "schedules.run";
 
-/// What the app starts with: what the store holds, or on the very first launch the sample data
-/// (written once, so deleting all of it stays deleted).
-pub fn load(store: Option<&Store>) -> (Roster, Providers) {
+/// What the app starts with: what the store holds, or on the very first launch the built-in
+/// providers (written once, so deleting all of it stays deleted).
+///
+/// When the saved data cannot be read, the store is handed back as `None`: the app runs without
+/// saving, since every save from the empty state it starts with would overwrite what is there.
+pub fn load(store: Option<Store>) -> (Option<Store>, Roster, Providers) {
     let Some(db) = store else {
-        return (Roster::new(), providers::init());
+        return (None, Roster::new(), providers::init());
     };
-    try_load(db).unwrap_or_else(|e| {
-        eprintln!("oido: could not read saved data, starting with samples: {e}");
-        (Roster::new(), providers::init())
-    })
+    match try_load(&db) {
+        Ok((roster, providers)) => (Some(db), roster, providers),
+        Err(e) => {
+            eprintln!("oido: could not read saved data, running without saving so it is kept: {e}");
+            (None, Roster::new(), providers::init())
+        }
+    }
 }
 
 /// The appearance chosen on the Settings page; Oido's own when none was, or it cannot be read.
@@ -172,8 +178,11 @@ impl App {
         self.save_agent_row(&t);
     }
 
-    pub(crate) fn delete_saved_chat(&self, id: &str) {
-        self.save("the chat", |db| db.delete_session(id));
+    /// Chat `id`, already removed from `t`'s chats: deleted, with the chats left renumbered.
+    pub(crate) fn delete_saved_chat(&self, t: &Target, id: &str) {
+        if let Some(a) = self.roster.find(t) {
+            self.save("the chat", |db| db.remove_session(id, &a.id, &a.sessions));
+        }
     }
 
     pub(crate) fn save_providers(&self) {

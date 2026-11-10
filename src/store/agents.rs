@@ -51,69 +51,50 @@ impl Store {
         let mut made_up: Vec<(String, Session)> = Vec::new();
         {
             let mut stmt = self.conn.prepare_cached(self.sql("ListAgents")?)?;
+            // The row as an agent, but for what needs more than a column read: its skills and
+            // tools (JSON), its chats, and which one is open.
             let rows = stmt.query_map([], |r| {
-                let id: String = r.get(0)?;
-                let parent: Option<String> = r.get(1)?;
-                let skills: String = r.get(7)?;
-                let tools: String = r.get(8)?;
-                let active: i64 = r.get(9)?;
-                Ok((
-                    parent,
-                    id,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get::<_, i64>(6)? != 0,
-                    skills,
-                    tools,
-                    active,
-                    r.get::<_, Option<String>>(10)?,
-                    r.get::<_, Option<String>>(11)?,
-                    r.get::<_, String>(12)?,
-                ))
-            })?;
-            for row in rows {
-                let (
-                    parent,
-                    id,
-                    name,
-                    prompt,
-                    model,
-                    hue,
-                    pinned,
-                    skills,
-                    tools,
-                    active,
-                    provider,
-                    workdir,
-                    description,
-                ) = row?;
-                let mut chats = sessions.remove(&id).unwrap_or_default();
-                if chats.is_empty() {
-                    let first = chat("New chat", Vec::new());
-                    made_up.push((id.clone(), first.clone()));
-                    chats.push(first);
-                }
+                let provider: Option<String> = r.get(10)?;
+                let model: Option<String> = r.get(4)?;
                 let agent = Agent {
-                    active: (active.max(0) as usize).min(chats.len() - 1),
-                    sessions: chats,
-                    id,
-                    name,
-                    prompt,
+                    id: r.get(0)?,
+                    name: r.get(2)?,
+                    prompt: r.get(3)?,
                     // A model is a provider and an id together; half of one is no model.
                     model: provider
                         .zip(model)
                         .map(|(provider, id)| ModelRef { provider, id }),
-                    hue,
-                    pinned,
+                    hue: r.get(5)?,
+                    pinned: r.get::<_, i64>(6)? != 0,
                     status: AgentStatus::Idle,
-                    skills: serde_json::from_str(&skills)?,
-                    tools: serde_json::from_str(&tools)?,
+                    skills: Vec::new(),
+                    tools: Vec::new(),
                     subagents: Vec::new(),
-                    workdir,
-                    description,
+                    workdir: r.get(11)?,
+                    description: r.get(12)?,
+                    active: 0,
+                    sessions: Vec::new(),
                 };
+                Ok((
+                    r.get::<_, Option<String>>(1)?,
+                    agent,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, i64>(9)?,
+                ))
+            })?;
+            for row in rows {
+                let (parent, mut agent, skills, tools, active) = row?;
+                agent.skills = serde_json::from_str(&skills)?;
+                agent.tools = serde_json::from_str(&tools)?;
+                let mut chats = sessions.remove(&agent.id).unwrap_or_default();
+                if chats.is_empty() {
+                    let first = chat("New chat", Vec::new());
+                    made_up.push((agent.id.clone(), first.clone()));
+                    chats.push(first);
+                }
+                agent.active = (active.max(0) as usize).min(chats.len() - 1);
+                agent.sessions = chats;
                 match parent {
                     None => top.push(agent),
                     Some(p) => members.push((p, agent)),
@@ -206,6 +187,19 @@ impl Store {
         self.conn
             .prepare_cached(self.sql("DeleteSession")?)?
             .execute([id])?;
+        Ok(())
+    }
+
+    /// Removes chat `id` and renumbers the agent's chats left, `rest`, in one step. Chats keep
+    /// positions 0..n: a new one is saved at the end by its index, and the open one is
+    /// remembered by its index, so a gap would reorder the tabs.
+    pub fn remove_session(&self, id: &str, agent_id: &str, rest: &[Session]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.delete_session(id)?;
+        for (i, s) in rest.iter().enumerate() {
+            self.save_session(agent_id, s, i)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

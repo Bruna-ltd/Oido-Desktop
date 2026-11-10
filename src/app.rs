@@ -233,7 +233,7 @@ impl App {
     }
 
     pub fn new(store: Option<Store>) -> App {
-        let (roster, providers) = persist::load(store.as_ref());
+        let (store, roster, providers) = persist::load(store);
         let look = crate::theme::Look::load(persist::appearance(store.as_ref()));
         let skills_dir = crate::skills::dir();
         let mut app = App {
@@ -513,8 +513,8 @@ impl App {
             let gone = agent.sessions.remove(i);
             agent.active = agent.active.min(agent.sessions.len() - 1);
             self.cancel_session(&gone.id);
-            self.delete_saved_chat(&gone.id);
             if let Some(t) = self.roster.selected.clone() {
+                self.delete_saved_chat(&t, &gone.id);
                 self.save_agent_row(&t);
             }
         }
@@ -848,6 +848,63 @@ mod tests {
         app.close_tab(1);
         drop(app);
         assert_eq!(db.open().current().unwrap().sessions.len(), 1);
+    }
+
+    #[test]
+    fn tabs_come_back_in_their_order_with_the_same_one_open_after_closing_some() {
+        let db = TempDb::new();
+        let mut app = db.open_with_samples();
+        for _ in 0..3 {
+            app.new_tab();
+        }
+        for _ in 0..2 {
+            app.select_tab(0);
+            app.close_tab(0);
+        }
+        // Before, this was saved at a position an older tab still held, and came back before it.
+        app.new_tab();
+        let ids = |a: &Agent| a.sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        let t = app.roster.selected.clone().unwrap();
+        let (order, open) = {
+            let a = app.current().unwrap();
+            (ids(a), a.chat().id.clone())
+        };
+        drop(app);
+        let back = db.open();
+        let a = back.roster.find(&t).unwrap();
+        assert_eq!(ids(a), order, "the tabs' order");
+        assert_eq!(a.chat().id, open, "the open tab");
+    }
+
+    #[test]
+    fn saved_data_that_cannot_be_read_is_left_alone_not_overwritten() {
+        let db = TempDb::new();
+        let app = db.open_with_samples();
+        let agents = app.roster.list.len();
+        let sid = app.current().unwrap().chat().id.clone();
+        drop(app);
+        let raw = || rusqlite::Connection::open(&db.0).unwrap();
+        // A kind of message this build does not know, as a newer one could write.
+        raw()
+            .execute(
+                "INSERT INTO messages (session_id, seq, body) VALUES (?1, 999, '{\"type\":\"later\"}')",
+                [&sid],
+            )
+            .unwrap();
+        let mut app = db.open();
+        assert!(app.store.is_none(), "it runs without saving");
+        assert!(app.roster.list.is_empty());
+        app.save_providers();
+        app.new_agent();
+        app.roster.form.name = TextEdit::new("Stray");
+        app.submit_form();
+        drop(app);
+        raw()
+            .execute("DELETE FROM messages WHERE seq = 999", [])
+            .unwrap();
+        let back = db.open();
+        assert_eq!(back.roster.list.len(), agents, "every agent is still there");
+        assert!(back.roster.list.iter().all(|a| a.name != "Stray"));
     }
 
     #[test]
