@@ -5,8 +5,10 @@
 use rune::{Color, El, ScrollSpec, col, el, row, text};
 use rune_kit::{Badge, BadgeVariant, Kit};
 
+use super::usage::money;
 use crate::app::{App, now};
 use crate::runs::{Run, Status, Step, StepKind};
+use crate::usage::{Price, Totals, run_cost};
 
 /// The width of a step's timing bar.
 const TRACK: f32 = 120.0;
@@ -96,7 +98,7 @@ fn run_row(s: &App, i: usize, r: &Run, k: &Kit) -> El {
         );
     }
     e = e.child(
-        text(summary(r))
+        text(summary(s, r))
             .font(k.ty.small)
             .color(c.text_faint)
             .truncate(),
@@ -112,14 +114,18 @@ pub fn status_badge(s: Status) -> Badge {
     })
 }
 
-/// "5 min ago · 1.2s · 1.3k tokens · 2 calls · 3 tools".
-fn summary(r: &Run) -> String {
+/// "5 min ago · 1.2s · 1.3k tokens · $0.02 · 2 calls · 3 tools".
+fn summary(s: &App, r: &Run) -> String {
     let mut parts = vec![ago(now() - r.started_at)];
     if let Some(ms) = r.duration_ms {
         parts.push(millis(ms));
     }
     if let Some(t) = tokens(r) {
         parts.push(format!("{} tokens", count(t)));
+        let cost = run_cost(r, &s.runs, &s.prices);
+        if !cost.unknown() {
+            parts.push(money(&cost));
+        }
     }
     if r.calls > 1 {
         parts.push(format!("{} calls", r.calls));
@@ -176,7 +182,7 @@ fn ledger(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        .child(header(run, k));
+        .child(header(s, run, k));
     if !setup.is_empty() {
         out = out.child(section("Setup", "sent with every model call", k));
         out = out.children(setup.into_iter().map(|(i, st)| step_row(s, run, i, st, k)));
@@ -193,7 +199,7 @@ fn ledger(s: &App, k: &Kit) -> El {
 }
 
 /// What the run was, and its totals.
-fn header(run: &Run, k: &Kit) -> El {
+fn header(s: &App, run: &Run, k: &Kit) -> El {
     let c = &k.c;
     let title = if run.title.is_empty() {
         run.agent_name.clone()
@@ -211,6 +217,10 @@ fn header(run: &Run, k: &Kit) -> El {
     }
     if let (Some(i), Some(o)) = (run.input_tokens, run.output_tokens) {
         chips.push(format!("{} in · {} out", count(i), count(o)));
+        let cost = run_cost(run, &s.runs, &s.prices);
+        if !cost.unknown() {
+            chips.push(format!("about {}", money(&cost)));
+        }
     }
     chips.push(match run.calls {
         1 => "1 model call".to_owned(),
@@ -325,7 +335,7 @@ fn step_row(s: &App, run: &Run, i: usize, step: &Step, k: &Kit) -> El {
         e = e.child(bar(run, step, k));
     }
     e = e.child(
-        text(meta(step))
+        text(meta(step, s.prices.get(&run.model)))
             .font(k.ty.small)
             .color(c.text_faint)
             .w(96.0)
@@ -386,9 +396,9 @@ fn preview(step: &Step) -> Option<String> {
     Some(line.chars().take(120).collect())
 }
 
-/// Beside the bar: how long it took, and for a model call the tokens in and out; for setup, about
-/// how many tokens it adds to every call.
-fn meta(step: &Step) -> String {
+/// Beside the bar: how long it took, and for a model call the tokens in and out and, at `price`,
+/// what it cost; for setup, about how many tokens it adds to every call.
+fn meta(step: &Step, price: Option<&Price>) -> String {
     if step.kind.is_setup() {
         let bytes = step.output.as_deref().map_or(0, str::len);
         return format!("≈{} tok", count((bytes / 4) as u32));
@@ -396,6 +406,9 @@ fn meta(step: &Step) -> String {
     let mut parts = Vec::new();
     if let (Some(i), Some(o)) = (step.input_tokens, step.output_tokens) {
         parts.push(format!("{}→{}", count(i), count(o)));
+        if let (StepKind::Llm, Some(p)) = (step.kind, price) {
+            parts.push(money(&p.cost(&Totals::of_call(step)).into()));
+        }
     }
     if let Some(ms) = step.duration_ms {
         parts.push(millis(ms));
@@ -450,9 +463,16 @@ mod tests {
         let mut call = Step::new(1, StepKind::Llm, 0);
         (call.input_tokens, call.output_tokens, call.duration_ms) =
             (Some(1200), Some(40), Some(820));
-        assert_eq!(meta(&call), "1.2k→40 820ms");
+        assert_eq!(meta(&call, None), "1.2k→40 820ms");
+        let price = crate::usage::Price {
+            input: 10.0,
+            output: 10.0,
+            cache_read: None,
+            cache_write: None,
+        };
+        assert_eq!(meta(&call, Some(&price)), "1.2k→40 $0.01 820ms");
         let mut brief = Step::new(2, StepKind::System, 0);
         brief.output = Some("x".repeat(4000));
-        assert_eq!(meta(&brief), "≈1.0k tok");
+        assert_eq!(meta(&brief, None), "≈1.0k tok");
     }
 }

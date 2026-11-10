@@ -3,7 +3,7 @@
 
 use rune::{Color, El, ScrollSpec, TextStyle, col, row, text};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Button, ButtonVariant, Dialog, Kit, TextArea, TextInput};
+use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Kit, TextArea, TextInput};
 
 use super::model_picker::ModelPicker;
 use crate::agents::{FormKind, HUES, TEMPLATES, hue_of, initial_of};
@@ -106,6 +106,9 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             k,
         ))
         .child(more_options(s, k, layer));
+    if let FormKind::Edit(t) = &kind {
+        page = page.child(spend(s, &t.id, k));
+    }
     col()
         .key("agent-form")
         .w_full()
@@ -304,6 +307,56 @@ fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
                 ),
         )
         .child(body)
+}
+
+/// What the agent used over the last 30 days, and a way to see it in full on Usage.
+fn spend(s: &App, agent_id: &str, k: &Kit) -> El {
+    use crate::usage::{Filters, Range, report, today};
+    let filters = Filters {
+        agent: Some(agent_id.to_owned()),
+        ..Filters::default()
+    };
+    let r = report(&s.agent_spend, &s.prices, &filters, Range::Month, today());
+    let said = if r.totals.calls == 0 {
+        "Nothing in the last 30 days.".to_owned()
+    } else {
+        format!(
+            "{} over {} model calls, {} tokens.",
+            if r.cost.unknown() {
+                "No price known".to_owned()
+            } else {
+                format!("About {}", super::usage::money(&r.cost))
+            },
+            r.totals.calls,
+            super::usage::tokens(r.totals.tokens())
+        )
+    };
+    let id = agent_id.to_owned();
+    card(
+        "What has it cost?",
+        "Its model calls in the last 30 days, at current prices.",
+        row()
+            .key("agent-spend")
+            .w_full()
+            .gap(12.0)
+            .center_y()
+            .child(
+                text(said)
+                    .font(k.ty.body)
+                    .color(k.c.text_base)
+                    .grow(1.0)
+                    .wrap(),
+            )
+            .child(
+                Button::new("See usage")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.usage_of_agent(&id))
+                    .build(k)
+                    .key("agent-spend-usage"),
+            ),
+        k,
+    )
 }
 
 fn model_select(s: &App, member: bool, k: &Kit, layer: &mut Vec<El>) -> El {

@@ -15,10 +15,27 @@ use crate::runs::clip;
 /// How much of a step's result is kept in the record.
 const KEEP: usize = 4000;
 
+/// What one or more model calls used. Cache reads and writes are part of `input`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Usage {
+    #[serde(default)]
+    pub calls: u32,
     pub input: u32,
     pub output: u32,
+    #[serde(default)]
+    pub cache_read: u32,
+    #[serde(default)]
+    pub cache_write: u32,
+}
+
+impl Usage {
+    pub fn add(&mut self, more: Usage) {
+        self.calls += more.calls;
+        self.input += more.input;
+        self.output += more.output;
+        self.cache_read += more.cache_read;
+        self.cache_write += more.cache_write;
+    }
 }
 
 /// What running a tool gave: its result as a value later steps can reach into, or why it failed.
@@ -236,8 +253,7 @@ pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
 fn run_step(step: &Step, scope: &Scope, env: &Env, usage: &mut Usage) -> Result<Value, String> {
     let mut ask = |system: &str, message: &str| -> Result<String, String> {
         let (text, used) = (env.model)(system, message)?;
-        usage.input += used.input;
-        usage.output += used.output;
+        usage.add(used);
         Ok(text)
     };
     match step.kind.as_str() {
@@ -317,8 +333,11 @@ mod tests {
             Ok((
                 model(m),
                 Usage {
+                    calls: 1,
                     input: 10,
                     output: 5,
+                    cache_read: 4,
+                    cache_write: 0,
                 },
             ))
         };
@@ -375,8 +394,11 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
+                calls: 2,
                 input: 20,
-                output: 10
+                output: 10,
+                cache_read: 8,
+                cache_write: 0,
             }
         );
         assert_eq!(

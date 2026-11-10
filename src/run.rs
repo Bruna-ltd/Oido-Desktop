@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use crate::app::{App, Effort, Route};
-use crate::completion::{self, Call, Endpoint, Error, Event, Request, Role, Think, Turn};
+use crate::completion::{self, Call, Endpoint, Error, Event, Request, Role, Think, Tokens, Turn};
 use crate::model::{AgentStatus, Message, Outcome, Stats, ToolCall, new_id};
 use crate::models::ModelRef;
 use crate::providers::ModelStatus;
@@ -36,8 +36,7 @@ pub struct Live {
     thought: Option<Duration>,
     /// How long until the first of the reply (a word, a thought, a tool call) arrived.
     first: Option<Duration>,
-    input_tokens: Option<u32>,
-    output_tokens: Option<u32>,
+    tokens: Tokens,
 }
 
 /// The messages the model sees: everything since the last divider that was answered in full, with
@@ -155,8 +154,7 @@ impl Live {
             reasoning: String::new(),
             thought: None,
             first: None,
-            input_tokens: None,
-            output_tokens: None,
+            tokens: Tokens::default(),
         }
     }
 
@@ -361,7 +359,7 @@ impl App {
             // The chat's run before this one is over, whatever it was waiting for.
             if let Some(mut old) = self.traces.insert(sid.clone(), trace) {
                 old.stop();
-                self.save("the run", |db| db.save_run(&old.run, &[]));
+                self.save_run(&old.run, &[]);
             }
         }
         let Some(trace) = self.traces.get_mut(&sid) else {
@@ -378,7 +376,7 @@ impl App {
         if !carries_on {
             self.save("the run", |db| db.start_run(&run));
         }
-        self.save("the run", |db| db.save_run(&run, &setup));
+        self.save_run(&run, &setup);
         if let Some(agent) = self.roster.agent_mut(&agent_id) {
             agent.status = AgentStatus::Running;
             if let Some(chat) = agent.sessions.iter_mut().find(|s| s.id == sid) {
@@ -409,7 +407,7 @@ impl App {
         let Some(run) = self.traces.get(sid).map(|t| t.run.clone()) else {
             return;
         };
-        self.save("the run", |db| db.save_run(&run, steps));
+        self.save_run(&run, steps);
         if self.route == Route::Runs {
             self.reload_runs();
         }
@@ -499,7 +497,7 @@ impl App {
         }
         let (mut text, mut calls) = (String::new(), Vec::new());
         if let Some(live) = self.live.get_mut(sid) {
-            if live.first.is_none() && !events.iter().all(|e| matches!(e, Event::Usage { .. })) {
+            if live.first.is_none() && !events.iter().all(|e| matches!(e, Event::Usage(_))) {
                 live.first = Some(live.began.elapsed());
             }
             for ev in events {
@@ -507,10 +505,7 @@ impl App {
                     Event::Text(t) => text.push_str(&t),
                     Event::Reasoning(t) => live.reasoning.push_str(&t),
                     Event::ToolCall(call) => calls.push(call),
-                    Event::Usage { input, output } => {
-                        live.input_tokens = input.or(live.input_tokens);
-                        live.output_tokens = output.or(live.output_tokens);
-                    }
+                    Event::Usage(t) => live.tokens.update(t),
                 }
             }
             if !text.is_empty() && live.thought.is_none() && !live.reasoning.is_empty() {
@@ -580,7 +575,7 @@ impl App {
         };
         let stats = (status == Status::Ok).then(|| Stats {
             model: model_name,
-            tokens: live.output_tokens.unwrap_or(0),
+            tokens: live.tokens.output.unwrap_or(0),
             seconds: elapsed.as_secs_f32(),
         });
         let thought = live.thought.map(|d| d.as_secs_f32());
@@ -616,8 +611,7 @@ impl App {
                 calls: &called,
                 failure: failure.as_deref(),
                 status,
-                input_tokens: live.input_tokens,
-                output_tokens: live.output_tokens,
+                tokens: live.tokens,
                 began: live.began,
                 first: live.first,
             })
@@ -1022,6 +1016,9 @@ impl App {
         if route == Route::Schedules {
             self.open_schedules();
         }
+        if route == Route::Usage {
+            self.open_usage();
+        }
     }
 
     /// Reads the newest runs again, keeping the open one open if it is still there.
@@ -1131,7 +1128,7 @@ mod tests {
     const STREAM: &str = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n\
         data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
         data: {\"choices\":[{\"delta\":{\"content\":\"lo!\"},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\n\
+        data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\n\
         data: [DONE]\n\n";
 
     use crate::testing::app_with_server;
@@ -1216,6 +1213,27 @@ mod tests {
         );
         app.go(Route::Runs);
         assert_eq!(app.runs.len(), 1);
+
+        // The call is counted on the Usage screen, cache and all, and in the chat's total.
+        app.go(Route::Usage);
+        let rows = &app.usage.rows;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].source, crate::usage::Source::Chat);
+        assert_eq!(
+            rows[0].model,
+            ModelRef::new("llama-server:box", "llama-3.3-70b")
+        );
+        let t = rows[0].totals;
+        assert_eq!((t.calls, t.input, t.output, t.cache_read), (1, 9, 4, 6));
+        assert_eq!(t.first_ms_count, 1);
+        let sid = app.current().unwrap().chat().id.clone();
+        let chat = app.store.as_ref().unwrap().session_usage(&sid).unwrap();
+        assert_eq!(chat.len(), 1);
+        assert_eq!((chat[0].1.input, chat[0].1.cache_read), (9, 6));
+        // The header has a total after a restart.
+        let (t, cost) = app.chat_spend(&sid).unwrap();
+        assert_eq!(t.tokens(), 13);
+        assert!(cost.unknown(), "a local model has no price");
     }
 
     #[test]

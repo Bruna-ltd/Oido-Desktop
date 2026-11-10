@@ -44,6 +44,7 @@ the user cannot write to (a package manager's) reports why it cannot.
 | Schema and queries | `db/migrations/*.sql` and `db/queries/*.sql`, run by `src/store` |
 | Provider API keys | sealed in the database (XChaCha20-Poly1305); the key that opens them is in the OS keyring |
 | Runs | each message you send is a run, lasting until the agent stops or waits on you: its setup (the brief, each skill, the context, the tools offered), then every model call (messages sent, reply, thinking, tokens, time to first token) and every tool call (arguments, result, time), drawn on a timeline on the Runs screen. Kept 30 days, then deleted at startup; chats are never touched. Keys are never recorded |
+| Usage | every model call is added to daily totals (by model, agent and source) and to its chat's total as it is recorded; kept after runs expire, until cleared in Settings. Cost is estimated when shown, from [models.dev](https://models.dev) prices (fetched at most daily, kept in the database) or a price you set on the Usage screen. See `docs/usage.md` |
 | Workflows | saved in the database with the agent that learned them (deleted with it); drafts wait in their chat; runs are kept 30 days |
 | Model lists | fetched from each provider when it is connected, saved in the database, refreshed when stale |
 
@@ -62,6 +63,7 @@ system keyring is unavailable, no key is stored.
   1568 px and sent as image parts). `src/composer.rs`: the message box's logic: `/` commands, `@` files
   from the working folder, ↑/↓ through what you sent, attaching (button, drop, paste), and a message
   sent while the agent answers waiting until the reply ends.
+  `src/usage.rs`: usage totals, cost, and the Usage screen's report; `src/pricing.rs`: model prices from models.dev.
   `src/context.rs`: what the agent is told about the moment (the date and time), sent after its brief.
   `src/tools.rs`: the tools every agent is given (`ask_user_question`, `shell`, `read_file`, `write_file`, `edit_file`, `teach_workflow`, `run_workflow`).
   `src/workflow/`: workflows (definition and checks, references, the engine, learning one from a chat);

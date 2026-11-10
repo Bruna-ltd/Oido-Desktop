@@ -305,6 +305,71 @@ fn demo_schedules(app: &mut App) {
     ];
 }
 
+/// Thirty days of usage across three models (one with no price), three agents and every source.
+fn demo_usage(app: &mut App) {
+    use crate::usage::{Price, Row, Source, Totals, day_name, today};
+    demo_models(app);
+    let price = |input, output, cache_read| Price {
+        input,
+        output,
+        cache_read: Some(cache_read),
+        cache_write: None,
+    };
+    let sonnet = ModelRef::new("anthropic", "claude-sonnet-4-6");
+    let mini = ModelRef::new("openai", "gpt-4o-mini");
+    let local = ModelRef::new("llama-server:box", "qwen3-coder-30b");
+    app.prices
+        .catalog
+        .insert(sonnet.clone(), price(3.0, 15.0, 0.3));
+    app.prices
+        .catalog
+        .insert(mini.clone(), price(0.15, 0.6, 0.075));
+    let mut rows = Vec::new();
+    for back in 0..30u64 {
+        let day = day_name(today() - chrono::Days::new(back));
+        // A working week: quieter weekends, a busy stretch ten days ago.
+        let load = match back % 7 {
+            5 | 6 => 1,
+            _ => 3,
+        } + u64::from((8..13).contains(&back)) * 4;
+        let mut add = |model: &ModelRef, agent: &str, name: &str, source, calls: u64| {
+            let input = calls * 6_000;
+            rows.push(Row {
+                day: day.clone(),
+                model: model.clone(),
+                agent_id: agent.into(),
+                agent_name: name.into(),
+                source,
+                totals: Totals {
+                    calls,
+                    errors: u64::from(calls > 12),
+                    input,
+                    output: calls * 450,
+                    cache_read: input * 3 / 5,
+                    cache_write: input / 20,
+                    first_ms_total: calls * 700,
+                    first_ms_count: calls,
+                },
+            });
+        };
+        add(&sonnet, "atlas", "Atlas", Source::Chat, load * 4);
+        add(
+            &sonnet,
+            "fact-checker",
+            "Fact checker",
+            Source::Member,
+            load,
+        );
+        add(&mini, "scout", "Scout", Source::Schedule, 6);
+        if back % 3 == 0 {
+            add(&mini, "scout", "Scout", Source::Workflow, 2);
+            add(&local, "forge", "Forge", Source::Chat, load * 2);
+        }
+    }
+    rows.sort_by(|a, b| a.day.cmp(&b.day));
+    app.usage.rows = rows;
+}
+
 type Scene = (&'static str, fn(&mut App));
 
 pub static SCENES: &[Scene] = &[
@@ -465,6 +530,47 @@ pub static SCENES: &[Scene] = &[
                 schedule: x,
             }];
         }
+    }),
+    ("usage", |s| {
+        demo_usage(s);
+        s.route = Route::Usage;
+    }),
+    // A model with no price, its price form open and a mistake in it.
+    ("usage-price", |s| {
+        demo_usage(s);
+        s.route = Route::Usage;
+        s.usage.filters.agent = Some("forge".into());
+        s.toggle_price_form(&ModelRef::new("llama-server:box", "qwen3-coder-30b"));
+        let f = s.usage.price_mut();
+        f.input = TextEdit::new("0.2");
+        f.output = TextEdit::new("abc");
+        s.save_price();
+    }),
+    // Cost where it also shows: Atlas's chat header, its form, and Settings asking before clearing.
+    ("usage-chat", |s| {
+        load_samples(s);
+        demo_usage(s);
+        s.roster.select(Target::agent("atlas"));
+        if let Some(sid) = s.roster.current().map(|a| a.chat().id.clone()) {
+            let t = crate::usage::Totals {
+                input: 48_000,
+                output: 3_100,
+                cache_read: 30_000,
+                ..crate::usage::Totals::default()
+            };
+            s.chat_usage
+                .insert(sid, vec![(ModelRef::new("anthropic", "claude-sonnet-4-6"), t)]);
+        }
+    }),
+    ("usage-agent", |s| {
+        load_samples(s);
+        demo_usage(s);
+        s.edit_agent(&Target::agent("atlas"));
+        s.agent_spend = s.usage.rows.iter().filter(|r| r.agent_id == "atlas").cloned().collect();
+    }),
+    ("settings-usage", |s| {
+        s.usage.confirm_clear = true;
+        s.route = Route::Settings;
     }),
     ("runs", |s| {
         demo_runs(s);

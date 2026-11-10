@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::agents::Agent;
 use crate::app::{App, now};
 use crate::command::{self, Finish};
-use crate::completion::{self, Call, Event, Request, ToolSpec, Turn};
+use crate::completion::{self, Call, Event, Request, Tokens, ToolSpec, Turn};
 use crate::flows::Prep;
 use crate::model::{AgentStatus, Message, ToolCall, new_id};
 use crate::models::{self, ModelRef};
@@ -169,8 +169,8 @@ enum End {
 struct Outcome {
     end: End,
     steps: Vec<Step>,
-    input: u32,
-    output: u32,
+    /// What all its model calls used together.
+    tokens: Tokens,
     ms: u32,
 }
 
@@ -215,7 +215,6 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
         user: &job.task,
         user_name: None,
     });
-    let (mut input, mut output) = (0u32, 0u32);
     let mut turns = vec![Turn::user(job.task.clone())];
     let key = job.prep.key.as_deref().map(String::as_str);
     let end = 'rounds: {
@@ -234,11 +233,11 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
             tell(Note::Model);
             let round = Instant::now();
             let (mut text, mut reasoning, mut calls) = (String::new(), String::new(), Vec::new());
-            let (mut used_in, mut used_out, mut first) = (None, None, None);
+            let (mut used, mut first) = (Tokens::default(), None);
             let (mut shown, mut last) = (String::new(), Instant::now());
             let result =
                 completion::run(&job.prep.endpoint, key, &request, &job.cancel, &mut |ev| {
-                    if first.is_none() && !matches!(ev, Event::Usage { .. }) {
+                    if first.is_none() && !matches!(ev, Event::Usage(_)) {
                         first = Some(round.elapsed());
                     }
                     match ev {
@@ -252,20 +251,15 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                         }
                         Event::Reasoning(t) => reasoning.push_str(&t),
                         Event::ToolCall(c) => calls.push(c),
-                        Event::Usage { input, output } => {
-                            used_in = input.or(used_in);
-                            used_out = output.or(used_out);
-                        }
+                        Event::Usage(t) => used.update(t),
                     }
                 });
             if !shown.is_empty() {
                 tell(Note::Text(shown));
             }
-            input += used_in.unwrap_or(0);
-            output += used_out.unwrap_or(0);
             tell(Note::ModelDone {
-                input: used_in.unwrap_or(0),
-                output: used_out.unwrap_or(0),
+                input: used.input.unwrap_or(0),
+                output: used.output.unwrap_or(0),
             });
 
             let (status, failure) = match &result {
@@ -290,8 +284,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 calls: &called,
                 failure: failure.as_deref(),
                 status,
-                input_tokens: used_in,
-                output_tokens: used_out,
+                tokens: used,
                 began: round,
                 first,
             }));
@@ -328,8 +321,12 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
     Outcome {
         end,
         steps,
-        input,
-        output,
+        tokens: Tokens {
+            input: trace.run.input_tokens,
+            output: trace.run.output_tokens,
+            cache_read: trace.run.cache_read_tokens,
+            cache_write: trace.run.cache_write_tokens,
+        },
         ms: began.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
     }
 }
@@ -511,8 +508,9 @@ impl App {
         mut run: Run,
         out: Outcome,
     ) {
-        run.input_tokens = Some(out.input);
-        run.output_tokens = Some(out.output);
+        let t = out.tokens;
+        (run.input_tokens, run.output_tokens) = (t.input, t.output);
+        (run.cache_read_tokens, run.cache_write_tokens) = (t.cache_read, t.cache_write);
         run.duration_ms = Some(out.ms);
         run.ended_at = Some(now());
         // Stop on the chat holds the lead for you; stopping one member lets the lead go on without it.
@@ -537,7 +535,7 @@ impl App {
         if let Some(d) = self.delegated.get_mut(call_id) {
             d.ended = Some(Instant::now());
             d.text.clear();
-            (d.input, d.output) = (out.input, out.output);
+            (d.input, d.output) = (t.input.unwrap_or(0), t.output.unwrap_or(0));
             for stage in d.stages.iter_mut().filter(|s| s.ended.is_none()) {
                 (stage.ended, stage.ok) = (d.ended, false);
             }
@@ -550,7 +548,7 @@ impl App {
                 member.status = AgentStatus::Idle;
             }
         }
-        self.save("the run", |db| db.save_run(&run, &out.steps));
+        self.save_run(&run, &out.steps);
         if self.route == crate::app::Route::Runs {
             self.reload_runs();
         }

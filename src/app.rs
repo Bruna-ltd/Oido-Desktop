@@ -26,6 +26,8 @@ pub enum Route {
     Workflows,
     /// Schedules: prompts and workflows fired on a timing, and how their fires went.
     Schedules,
+    /// What agents used, in tokens, and its estimated cost.
+    Usage,
     /// MCP servers: other programs that give agents tools.
     Mcp,
     /// The app's own settings: its appearance.
@@ -146,6 +148,17 @@ pub struct App {
     pub theme_open: bool,
     /// This app's own updates: on their own or not, and where they stand.
     pub updates: crate::update::Updates,
+    /// Model prices, the catalog's and yours, for working out cost; and whether the catalog is
+    /// being fetched.
+    pub prices: crate::usage::Prices,
+    pub prices_fetching: bool,
+    /// The Usage screen.
+    pub usage: crate::usage::Page,
+    /// Each chat's tokens by model, as saved, for the cost in its header.
+    pub chat_usage:
+        std::collections::HashMap<String, Vec<(crate::models::ModelRef, crate::usage::Totals)>>,
+    /// The open agent form's agent's daily totals over the last 30 days.
+    pub agent_spend: Vec<crate::usage::Row>,
     /// Saved schedules, the fire each running one is on (by schedule id), and whether schedules
     /// run at all (Settings).
     pub schedules: Vec<crate::schedule::Schedule>,
@@ -275,6 +288,11 @@ impl App {
             schedules: Vec::new(),
             firing: std::collections::HashMap::new(),
             run_schedules: persist::run_schedules(store.as_ref()),
+            prices: crate::usage::Prices::default(),
+            prices_fetching: false,
+            usage: crate::usage::Page::default(),
+            chat_usage: std::collections::HashMap::new(),
+            agent_spend: Vec::new(),
             proposals: Vec::new(),
             schedule_page: crate::schedules::Page::default(),
             store,
@@ -283,6 +301,8 @@ impl App {
         app.load_workflows();
         app.load_mcp();
         app.load_schedules();
+        app.load_prices();
+        app.load_chat_usage();
         app
     }
 
@@ -359,6 +379,7 @@ impl App {
 
     pub fn edit_agent(&mut self, t: &Target) {
         self.roster.open_edit(t);
+        self.load_agent_spend(&t.id);
         self.route = if self.roster.editing.is_some() {
             Route::AgentForm
         } else {

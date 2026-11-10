@@ -21,6 +21,7 @@ mod models;
 mod omarchy;
 mod persist;
 mod picker;
+mod pricing;
 mod prompt;
 mod providers;
 mod run;
@@ -36,6 +37,7 @@ mod tools;
 mod typesafe;
 mod ui;
 mod update;
+mod usage;
 mod vault;
 mod workflow;
 
@@ -85,6 +87,8 @@ fn main() {
             if s.updates.auto {
                 s.check_for_updates();
             }
+            // Model prices, for the cost shown on Usage and Runs.
+            s.refresh_prices();
         });
     });
     // Schedules: what is due fires now (catching up on what was missed) and every half minute.

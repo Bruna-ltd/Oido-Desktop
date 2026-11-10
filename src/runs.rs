@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::completion::ToolSpec;
+use crate::completion::{Tokens, ToolSpec};
 use crate::model::ToolCall;
 use crate::models::ModelRef;
 
@@ -74,6 +74,9 @@ pub struct Run {
     pub error: Option<String>,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
+    /// Of the input, how much was read from and written to the provider's cache.
+    pub cache_read_tokens: Option<u32>,
+    pub cache_write_tokens: Option<u32>,
     pub duration_ms: Option<u32>,
     /// Seconds since the epoch.
     pub started_at: i64,
@@ -105,6 +108,8 @@ impl Run {
             error: None,
             input_tokens: None,
             output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             duration_ms: None,
             started_at: crate::app::now(),
             ended_at: None,
@@ -196,6 +201,9 @@ pub struct Step {
     pub reasoning: Option<String>,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
+    /// Of the input, how much was read from and written to the provider's cache.
+    pub cache_read_tokens: Option<u32>,
+    pub cache_write_tokens: Option<u32>,
     pub duration_ms: Option<u32>,
     pub started_at: i64,
     /// When it began, in milliseconds after the run began.
@@ -219,6 +227,8 @@ impl Step {
             reasoning: None,
             input_tokens: None,
             output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             duration_ms: None,
             started_at,
             at_ms: None,
@@ -341,8 +351,7 @@ pub struct Reply<'a> {
     pub calls: &'a [ToolCall],
     pub failure: Option<&'a str>,
     pub status: Status,
-    pub input_tokens: Option<u32>,
-    pub output_tokens: Option<u32>,
+    pub tokens: Tokens,
     pub began: Instant,
     pub first: Option<Duration>,
 }
@@ -441,7 +450,9 @@ impl Trace {
             (clip_start(r.sent, INPUT_LIMIT), clip(&said, OUTPUT_LIMIT));
         (call.input, call.output) = (Some(sent), Some(said));
         call.reasoning = Some(clip(r.reasoning, OUTPUT_LIMIT).0).filter(|t| !t.is_empty());
-        (call.input_tokens, call.output_tokens) = (r.input_tokens, r.output_tokens);
+        let t = r.tokens;
+        (call.input_tokens, call.output_tokens) = (t.input, t.output);
+        (call.cache_read_tokens, call.cache_write_tokens) = (t.cache_read, t.cache_write);
         call.duration_ms = Some(ms(r.began.elapsed()));
         call.first_ms = r.first.map(ms);
         call.truncated = sent_cut || said_cut;
@@ -451,8 +462,11 @@ impl Trace {
             (None, None) => None,
             (t, m) => Some(t.unwrap_or(0).saturating_add(m.unwrap_or(0))),
         };
-        self.run.input_tokens = add(self.run.input_tokens, r.input_tokens);
-        self.run.output_tokens = add(self.run.output_tokens, r.output_tokens);
+        let run = &mut self.run;
+        run.input_tokens = add(run.input_tokens, t.input);
+        run.output_tokens = add(run.output_tokens, t.output);
+        run.cache_read_tokens = add(run.cache_read_tokens, t.cache_read);
+        run.cache_write_tokens = add(run.cache_write_tokens, t.cache_write);
 
         if let Some(why) = r.failure {
             let mut e = self.note(StepKind::Error, "", why);
@@ -561,8 +575,12 @@ mod tests {
             calls,
             failure: None,
             status: Status::Ok,
-            input_tokens: Some(12),
-            output_tokens: Some(3),
+            tokens: Tokens {
+                input: Some(12),
+                output: Some(3),
+                cache_read: Some(8),
+                cache_write: None,
+            },
             began: Instant::now(),
             first: Some(Duration::from_millis(40)),
         }
@@ -660,6 +678,11 @@ mod tests {
         assert_eq!(
             (t.run.input_tokens, t.run.output_tokens),
             (Some(24), Some(6))
+        );
+        assert_eq!(
+            (t.run.cache_read_tokens, t.run.cache_write_tokens),
+            (Some(16), None),
+            "cache counts add up like the rest, and stay unknown when never said"
         );
     }
 

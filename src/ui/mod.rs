@@ -21,6 +21,7 @@ pub(crate) mod schedules;
 mod settings;
 mod sidebar;
 mod tools;
+mod usage;
 mod workflows;
 
 use std::time::Duration;
@@ -58,6 +59,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Tools => ("Tools".to_owned(), tools::screen(s, &k)),
         Route::Workflows => ("Workflows".to_owned(), workflows::screen(s, &k)),
         Route::Schedules => ("Schedules".to_owned(), schedules::screen(s, &k, &mut layer)),
+        Route::Usage => ("Usage".to_owned(), usage::screen(s, &k)),
         Route::Mcp => ("MCP".to_owned(), mcp::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
         Route::Soon(name) => (name.to_owned(), soon(name, &k)),

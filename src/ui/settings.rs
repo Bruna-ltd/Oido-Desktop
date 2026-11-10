@@ -33,6 +33,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(24.0)
                 .child(section("Appearance", vec![theme_row(s, k, layer)], k))
                 .child(section("Schedules", vec![schedules_row(s, k)], k))
+                .child(section("Usage", vec![clear_usage_row(s, k)], k))
                 .child(section(
                     "Updates",
                     vec![version_row(&s.updates, k), auto_update_row(&s.updates, k)],
@@ -79,6 +80,46 @@ fn auto_update_row(u: &Updates, k: &Kit) -> El {
             .disabled(!u.available())
             .on_toggle(|s: &mut App| s.set_auto_update(!s.updates.auto))
             .build(k),
+        k,
+    )
+}
+
+/// Empties the Usage screen's history, after asking.
+fn clear_usage_row(s: &App, k: &Kit) -> El {
+    let button = |label: &str| Button::new(label).control_size(ControlSize::Small);
+    let control = if s.usage.confirm_clear {
+        row()
+            .gap(8.0)
+            .child(
+                button("Keep it")
+                    .variant(ButtonVariant::Ghost)
+                    .on_press(|s: &mut App| s.usage.confirm_clear = false)
+                    .build(k)
+                    .key("clear-usage-keep"),
+            )
+            .child(
+                button("Clear history")
+                    .variant(ButtonVariant::Danger)
+                    .on_press(|s: &mut App| s.clear_usage_history())
+                    .build(k)
+                    .key("clear-usage-confirm"),
+            )
+    } else {
+        button("Clear usage history…")
+            .variant(ButtonVariant::Outline)
+            .on_press(|s: &mut App| s.usage.confirm_clear = true)
+            .build(k)
+            .key("clear-usage")
+    };
+    setting(
+        "clear-usage",
+        "Usage history",
+        if s.usage.confirm_clear {
+            "This empties the Usage screen for good. Chats keep their totals, and runs stay until they expire."
+        } else {
+            "Every model call is counted on the Usage screen and kept until you clear it."
+        },
+        control,
         k,
     )
 }
