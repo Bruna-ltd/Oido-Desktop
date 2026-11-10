@@ -61,7 +61,7 @@ pub enum Outcome {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Message {
-    User(String),
+    User(crate::prompt::Prompt),
     /// "Start fresh": the agent forgets everything above, the screen keeps it.
     Divider(String),
     Assistant {

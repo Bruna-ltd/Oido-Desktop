@@ -74,11 +74,6 @@ icon!(
 );
 icon!(PLUS, "oido-plus", r#"<path d="M8 3.5V12.5M3.5 8H12.5"/>"#);
 icon!(
-    PAPERCLIP,
-    "oido-paperclip",
-    r#"<path d="M12.6 7.4L8 12C6.6 13.4 4.4 13.4 3.1 12C1.8 10.7 1.8 8.6 3.1 7.2L8.2 2.1C9.1 1.2 10.5 1.2 11.4 2.1C12.3 3 12.3 4.4 11.4 5.3L6.4 10.3C5.9 10.8 5.1 10.8 4.7 10.3C4.2 9.8 4.2 9.1 4.7 8.6L9 4.3"/>"#
-);
-icon!(
     STOP,
     "oido-stop",
     r#"<rect x="4.5" y="4.5" width="7" height="7" rx="1.2" fill="currentColor"/>"#

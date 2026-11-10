@@ -58,6 +58,10 @@ system keyring is unavailable, no key is stored.
 - `src/listing.rs`: asking a provider for its models. `src/connect.rs`: connecting, refreshing.
 - `src/completion.rs`: streaming chat requests (OpenAI-compatible and Anthropic). `src/run.rs`: sending,
   streaming into the chat, stop and retry. `src/runs.rs`: what a run records.
+  `src/prompt.rs`: what you send, your words and attachments (text files inlined, pictures shrunk to
+  1568 px and sent as image parts). `src/composer.rs`: the message box's logic: `/` commands, `@` files
+  from the working folder, ↑/↓ through what you sent, attaching (button, drop, paste), and a message
+  sent while the agent answers waiting until the reply ends.
   `src/context.rs`: what the agent is told about the moment (the date and time), sent after its brief.
   `src/tools.rs`: the tools every agent is given (`ask_user_question`, `shell`, `read_file`, `write_file`, `edit_file`, `teach_workflow`, `run_workflow`).
   `src/workflow/`: workflows (definition and checks, references, the engine, learning one from a chat);

@@ -140,6 +140,15 @@ pub struct Turn {
     pub calls: Vec<Call>,
     /// For a tool turn, the call it answers.
     pub call_id: Option<String>,
+    /// Pictures sent with a user turn.
+    pub images: Vec<Image>,
+}
+
+/// A picture in a user turn: its type (`image/png`, `image/jpeg`) and its bytes, base64.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Image {
+    pub media_type: String,
+    pub data: String,
 }
 
 impl Turn {
@@ -149,6 +158,15 @@ impl Turn {
             text: text.into(),
             calls: Vec::new(),
             call_id: None,
+            images: Vec::new(),
+        }
+    }
+
+    /// A user turn with pictures after its words.
+    pub fn user_with(text: impl Into<String>, images: Vec<Image>) -> Turn {
+        Turn {
+            images,
+            ..Turn::user(text)
         }
     }
 
@@ -158,6 +176,7 @@ impl Turn {
             text: text.into(),
             calls,
             call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -167,6 +186,7 @@ impl Turn {
             text: result.into(),
             calls: Vec::new(),
             call_id: Some(call_id.into()),
+            images: Vec::new(),
         }
     }
 }
@@ -361,7 +381,18 @@ fn openai_messages(req: &Request) -> Vec<Value> {
     }
     for t in &req.turns {
         messages.push(match t.role {
-            Role::User => json!({"role": "user", "content": t.text}),
+            Role::User if t.images.is_empty() => json!({"role": "user", "content": t.text}),
+            Role::User => {
+                let mut parts = Vec::new();
+                if !t.text.is_empty() {
+                    parts.push(json!({"type": "text", "text": t.text}));
+                }
+                for i in &t.images {
+                    let url = format!("data:{};base64,{}", i.media_type, i.data);
+                    parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+                }
+                json!({"role": "user", "content": parts})
+            }
             Role::Tool => json!({"role": "tool", "tool_call_id": t.call_id, "content": t.text}),
             Role::Assistant if t.calls.is_empty() => {
                 json!({"role": "assistant", "content": t.text})
@@ -435,7 +466,14 @@ fn anthropic_messages(req: &Request) -> Vec<Value> {
         match t.role {
             Role::Tool => user_blocks
                 .push(json!({"type": "tool_result", "tool_use_id": t.call_id, "content": t.text})),
-            Role::User => user_blocks.push(json!({"type": "text", "text": t.text})),
+            Role::User => {
+                if !t.text.is_empty() || t.images.is_empty() {
+                    user_blocks.push(json!({"type": "text", "text": t.text}));
+                }
+                for i in &t.images {
+                    user_blocks.push(json!({"type": "image", "source": {"type": "base64", "media_type": i.media_type, "data": i.data}}));
+                }
+            }
             Role::Assistant => {
                 flush(&mut out, &mut user_blocks);
                 let mut blocks = Vec::new();
@@ -971,6 +1009,40 @@ mod tests {
         assert_eq!(s.base, "http://localhost:8080/v1");
         assert!(endpoint("llama-server:box", true, None).is_none());
         assert!(endpoint("nonesuch", false, None).is_none());
+    }
+
+    #[test]
+    fn pictures_follow_the_words_in_each_providers_shape() {
+        let mut r = req(None);
+        let pic = Image {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        r.turns = vec![Turn::user_with("what is this", vec![pic])];
+
+        let b = openai_body(Thinking::None, &r);
+        let parts = &b["messages"][1]["content"];
+        assert_eq!(parts[0], json!({"type": "text", "text": "what is this"}));
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+
+        let b = anthropic_body(&r);
+        let blocks = &b["messages"][0]["content"];
+        assert_eq!(blocks[0]["text"], "what is this");
+        assert_eq!(
+            blocks[1]["source"],
+            json!({"type": "base64", "media_type": "image/png", "data": "AAAA"})
+        );
+
+        // A picture sent with no words carries no empty text part.
+        r.turns[0].text.clear();
+        assert_eq!(
+            openai_body(Thinking::None, &r)["messages"][1]["content"][0]["type"],
+            "image_url"
+        );
+        assert_eq!(
+            anthropic_body(&r)["messages"][0]["content"][0]["type"],
+            "image"
+        );
     }
 
     #[test]

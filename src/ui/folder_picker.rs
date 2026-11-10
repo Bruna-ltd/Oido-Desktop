@@ -1,5 +1,5 @@
-//! The working-folder field: shows the chosen folder (or the home folder when none), and opens a
-//! small browser to pick another. Rune has no system folder dialog, so the browser is drawn here.
+//! The working-folder browser: a small list of folders to pick from, for the agent form's field
+//! and for the message box's folder pill. Rune has no system folder dialog, so it is drawn here.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -12,44 +12,80 @@ use rune_kit::{
 };
 
 use crate::app::App;
+use crate::folders::Browser;
 
 const ROW: f32 = 30.0;
 const MAX_HEIGHT: f32 = 240.0;
 /// The most width Rune's popover gives its content.
 const WIDTH: f32 = 320.0;
-const KEY: &str = "workdir";
 
+/// Whose folder the browser picks: the agent form's draft, or the open agent's own (saved at once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Form,
+    Agent,
+}
+
+impl Target {
+    fn key(self) -> &'static str {
+        match self {
+            Target::Form => "workdir",
+            Target::Agent => "composer-workdir",
+        }
+    }
+
+    fn browser(self, s: &App) -> &Browser {
+        match self {
+            Target::Form => &s.roster.form.folders,
+            Target::Agent => &s.workdir_browser,
+        }
+    }
+
+    fn browser_mut(self, s: &mut App) -> &mut Browser {
+        match self {
+            Target::Form => &mut s.roster.form.folders,
+            Target::Agent => &mut s.workdir_browser,
+        }
+    }
+
+    pub fn chosen(self, s: &App) -> Option<&str> {
+        match self {
+            Target::Form => s.roster.form.workdir.as_deref(),
+            Target::Agent => s.current().and_then(|a| a.workdir.as_deref()),
+        }
+    }
+
+    fn choose(self, s: &mut App, folder: Option<String>) {
+        match self {
+            Target::Form => s.roster.form.workdir = folder,
+            Target::Agent => s.set_workdir(folder),
+        }
+    }
+
+    /// Opens the browser at the chosen folder, or closes it.
+    pub fn toggle(self, s: &mut App) {
+        if self.browser(s).open {
+            self.browser_mut(s).close();
+        } else {
+            let start = self.chosen(s).map(str::to_owned);
+            self.browser_mut(s).show(start.as_deref().map(Path::new));
+        }
+    }
+}
+
+/// The agent form's field: the chosen folder (or the home folder when none), and a way to clear it.
 pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    let form = &s.roster.form;
-    let chosen = form.workdir.clone();
-    let shown = chosen.clone().unwrap_or_else(|| "Home folder".to_owned());
-    let trigger = Select::new::<&str>(format!("{KEY}-value"), &[])
+    let target = Target::Form;
+    let chosen = target.chosen(s);
+    let shown = chosen.unwrap_or("Home folder").to_owned();
+    let trigger = Select::new::<&str>(format!("{}-value", target.key()), &[])
         .current(Some(&shown))
         .label("Working folder")
         .appearance(SelectAppearance::Field)
         .width(WIDTH)
         .trigger(k)
-        .on_press(|s: &mut App| {
-            let form = &mut s.roster.form;
-            if form.folders.open {
-                form.folders.close();
-            } else {
-                let start = form.workdir.clone();
-                form.folders.show(start.as_deref().map(Path::new));
-            }
-        });
-    let popover = Popover::new(KEY)
-        .trigger(trigger)
-        .label("Choose a folder")
-        .placement(Placement::BottomStart)
-        .padding(0.0)
-        .open(form.folders.open)
-        .on_close(|s: &mut App| s.roster.form.folders.close());
-    let field = if form.folders.open {
-        popover.child(browser(s, k)).build(k, layer)
-    } else {
-        popover.build(k, layer)
-    };
+        .on_press(move |s: &mut App| target.toggle(s));
+    let field = popover(s, target, trigger, Placement::BottomStart, k, layer);
     // Always wrapped, so a caller's key never lands on the popover's own anchor.
     let mut out = row().gap(4.0).center_y().child(field);
     if chosen.is_some() {
@@ -57,17 +93,42 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             IconButton::new(&glyphs::CLOSE)
                 .variant(IconButtonVariant::GhostMuted)
                 .label("Use the home folder")
-                .on_press(|s: &mut App| s.roster.form.workdir = None)
+                .on_press(move |s: &mut App| target.choose(s, None))
                 .build(k)
-                .key(format!("{KEY}-clear")),
+                .key(format!("{}-clear", target.key())),
         );
     }
     out
 }
 
-fn browser(s: &App, k: &Kit) -> El {
+/// `trigger` with the browser for `target` opening from it.
+pub fn popover(
+    s: &App,
+    target: Target,
+    trigger: El,
+    placement: Placement,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
+    let open = target.browser(s).open;
+    let popover = Popover::new(target.key())
+        .trigger(trigger)
+        .label("Choose a folder")
+        .placement(placement)
+        .padding(0.0)
+        .open(open)
+        .on_close(move |s: &mut App| target.browser_mut(s).close());
+    if open {
+        popover.child(browser(s, target, k)).build(k, layer)
+    } else {
+        popover.build(k, layer)
+    }
+}
+
+fn browser(s: &App, target: Target, k: &Kit) -> El {
     let c = &k.c;
-    let b = &s.roster.form.folders;
+    let b = target.browser(s);
+    let key = target.key();
     let header = row()
         .key("header")
         .w_full()
@@ -80,7 +141,7 @@ fn browser(s: &App, k: &Kit) -> El {
                 .variant(IconButtonVariant::GhostMuted)
                 .label("Up one folder")
                 .disabled(b.at.parent().is_none())
-                .on_press(|s: &mut App| s.roster.form.folders.up())
+                .on_press(move |s: &mut App| target.browser_mut(s).up())
                 .build(k)
                 .key("up"),
         )
@@ -106,9 +167,9 @@ fn browser(s: &App, k: &Kit) -> El {
             ROW,
             {
                 let names = names.clone();
-                move |_: &App, i| Cow::Owned(format!("{KEY}-folder-{}", names[i]))
+                move |_: &App, i| Cow::Owned(format!("{key}-folder-{}", names[i]))
             },
-            move |_: &App, i| folder_row(&kit, &names[i]),
+            move |_: &App, i| folder_row(&kit, target, &names[i]),
         );
     let viewport = col()
         .key("viewport")
@@ -146,7 +207,7 @@ fn browser(s: &App, k: &Kit) -> El {
         )
     } else {
         results.child(
-            scroll_bar(k, &format!("{KEY}-scroll-area"), "viewport", viewport)
+            scroll_bar(k, &format!("{key}-scroll-area"), "viewport", viewport)
                 .w_full()
                 .shrink()
                 .min_h(0.0),
@@ -163,13 +224,28 @@ fn browser(s: &App, k: &Kit) -> El {
             Button::new("Use this folder")
                 .variant(ButtonVariant::Submit)
                 .control_size(ControlSize::Small)
-                .on_press(|s: &mut App| {
-                    let form = &mut s.roster.form;
-                    form.workdir = Some(form.folders.at.to_string_lossy().into_owned());
-                    form.folders.close();
+                .on_press(move |s: &mut App| {
+                    let b = target.browser_mut(s);
+                    let folder = b.at.to_string_lossy().into_owned();
+                    b.close();
+                    target.choose(s, Some(folder));
                 })
                 .build(k)
                 .key("use"),
+        )
+        .children(
+            (target == Target::Agent && target.chosen(s).is_some()).then(|| {
+                Button::new("No folder")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .help("Commands run in the home folder, and @ lists no files")
+                    .on_press(move |s: &mut App| {
+                        target.browser_mut(s).close();
+                        target.choose(s, None);
+                    })
+                    .build(k)
+                    .key("none")
+            }),
         )
         .child(el().grow(1.0))
         .child(
@@ -180,7 +256,7 @@ fn browser(s: &App, k: &Kit) -> El {
             })
             .variant(ButtonVariant::Ghost)
             .control_size(ControlSize::Small)
-            .on_press(|s: &mut App| s.roster.form.folders.toggle_hidden())
+            .on_press(move |s: &mut App| target.browser_mut(s).toggle_hidden())
             .build(k)
             .key("hidden"),
         );
@@ -196,12 +272,12 @@ fn browser(s: &App, k: &Kit) -> El {
         .child(footer)
 }
 
-fn folder_row(k: &Kit, name: &str) -> El {
+fn folder_row(k: &Kit, target: Target, name: &str) -> El {
     let c = &k.c;
     let name = name.to_owned();
     let go = name.clone();
     row()
-        .key(format!("{KEY}-folder-{name}"))
+        .key(format!("{}-folder-{name}", target.key()))
         .role("button")
         .label(format!("Open {name}"))
         .w_full()
@@ -221,5 +297,5 @@ fn folder_row(k: &Kit, name: &str) -> El {
                 .truncate()
                 .a11y_hidden(),
         )
-        .on_press(move |s: &mut App| s.roster.form.folders.enter(&go))
+        .on_press(move |s: &mut App| target.browser_mut(s).enter(&go))
 }
