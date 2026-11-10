@@ -4,7 +4,7 @@ use super::{Result, Store};
 use crate::models::ModelRef;
 use crate::runs::{Run, Status, Step, StepKind};
 
-const COLUMNS: usize = 14;
+const COLUMNS: usize = 17;
 
 impl Store {
     /// A run begins: saved as running, so one that is cut off can be told from one that finished.
@@ -18,14 +18,15 @@ impl Store {
             &r.model.id,
             r.started_at,
             &r.parent,
+            &r.title,
         ))?;
         Ok(())
     }
 
-    /// A run ends, with its steps, in one step.
-    pub fn finish_run(&self, r: &Run, steps: &[Step]) -> Result<()> {
+    /// A run moves on: how it stands now, and the steps it took since it was last saved, together.
+    pub fn save_run(&self, r: &Run, steps: &[Step]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        self.conn.prepare_cached(self.sql("FinishRun")?)?.execute((
+        self.conn.prepare_cached(self.sql("UpdateRun")?)?.execute((
             &r.id,
             r.status.as_str(),
             &r.error,
@@ -33,6 +34,7 @@ impl Store {
             r.output_tokens,
             r.duration_ms,
             r.ended_at,
+            &r.title,
         ))?;
         let mut insert = self.conn.prepare_cached(self.sql("InsertStep")?)?;
         for s in steps {
@@ -49,6 +51,8 @@ impl Store {
                 s.output_tokens,
                 s.duration_ms,
                 s.started_at,
+                s.at_ms,
+                s.first_ms,
                 i64::from(s.truncated),
             ))?;
         }
@@ -78,6 +82,9 @@ impl Store {
                 started_at: r.get(11)?,
                 ended_at: r.get(12)?,
                 parent: r.get(13)?,
+                title: r.get(14)?,
+                calls: r.get(15)?,
+                tools: r.get(16)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -99,7 +106,9 @@ impl Store {
                 output_tokens: r.get(8)?,
                 duration_ms: r.get(9)?,
                 started_at: r.get(10)?,
-                truncated: r.get::<_, i64>(11)? != 0,
+                at_ms: r.get(11)?,
+                first_ms: r.get(12)?,
+                truncated: r.get::<_, i64>(13)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -140,21 +149,9 @@ mod tests {
     }
 
     fn run(id: &str, started_at: i64) -> Run {
-        Run {
-            id: id.into(),
-            agent_id: "a".into(),
-            agent_name: "Atlas".into(),
-            session_id: "s".into(),
-            model: ModelRef::new("openai", "gpt-x"),
-            status: Status::Running,
-            error: None,
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: None,
-            started_at,
-            ended_at: None,
-            parent: None,
-        }
+        let mut r = Run::new(id, "a", "Atlas", "s", ModelRef::new("openai", "gpt-x"));
+        r.started_at = started_at;
+        r
     }
 
     fn step(seq: u32, kind: StepKind) -> Step {
@@ -171,22 +168,28 @@ mod tests {
         assert_eq!(db.list_runs(10).unwrap()[0].status, Status::Running);
 
         let mut done = run("new", 20);
+        done.title = "Sum the files".into();
+        db.save_run(&done, &[step(1, StepKind::User), step(2, StepKind::Llm)])
+            .unwrap();
+        let mut tool = step(3, StepKind::Tool);
+        (tool.at_ms, tool.duration_ms) = (Some(1200), Some(40));
         (done.status, done.input_tokens, done.output_tokens) = (Status::Ok, Some(5), Some(7));
         (done.duration_ms, done.ended_at) = (Some(900), Some(21));
-        db.finish_run(&done, &[step(1, StepKind::User), step(2, StepKind::Llm)])
-            .unwrap();
+        (done.calls, done.tools) = (1, 1);
+        db.save_run(&done, &[tool.clone()]).unwrap();
 
         let runs = db.list_runs(10).unwrap();
         assert_eq!(
             runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["new", "old"]
         );
-        assert_eq!(runs[0], done);
+        assert_eq!(runs[0], done, "saved as it went, counted when read");
         assert_eq!(db.list_runs(1).unwrap().len(), 1, "limited");
         let steps = db.list_steps("new").unwrap();
-        assert_eq!(steps.iter().map(|s| s.seq).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(steps.iter().map(|s| s.seq).collect::<Vec<_>>(), [1, 2, 3]);
         assert_eq!(steps[1].kind, StepKind::Llm);
         assert_eq!(steps[1].output.as_deref(), Some("out2"));
+        assert_eq!(steps[2], tool);
     }
 
     #[test]
@@ -198,7 +201,7 @@ mod tests {
             db.start_run(&run(id, at)).unwrap();
             let mut r = run(id, at);
             r.status = Status::Ok;
-            db.finish_run(&r, &[step(1, StepKind::User)]).unwrap();
+            db.save_run(&r, &[step(1, StepKind::User)]).unwrap();
         }
         db.start_run(&run("cut-off", now - 60)).unwrap();
 

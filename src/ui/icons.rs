@@ -1,4 +1,4 @@
-//! The rail's icons: 16 point strokes in `currentColor`, one per Studio section.
+//! The rail's icons: 16 point strokes in `currentColor`, one per Studio section; and Oido's logo.
 
 use rune::Icon;
 
@@ -83,3 +83,10 @@ icon!(
     "oido-more",
     r#"<circle cx="3.5" cy="8" r="1" fill="currentColor"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="12.5" cy="8" r="1" fill="currentColor"/>"#
 );
+
+/// Oido's mark, at the top of the rail: 2 point strokes on a 32 point grid.
+pub static LOGO: Icon = Icon {
+    name: "oido-logo",
+    view: 32.0,
+    body: r#"<g stroke="currentColor" stroke-width="2" fill="none"><path d="M1 1L16 1A15 15 0 0 1 31 16A15 15 0 0 1 16 31A15 15 0 0 1 1 16Z"/><circle cx="16" cy="16" r="6.5"/></g>"#,
+};

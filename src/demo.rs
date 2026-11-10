@@ -1019,44 +1019,110 @@ pub static SCENES: &[Scene] = &[
 /// Runs for the Runs screen, as the database would give them.
 fn demo_runs(app: &mut App) {
     use crate::runs::{Run, Status, Step, StepKind};
-    let run = |id: &str, name: &str, status, ago: i64| Run {
-        id: id.into(),
-        agent_id: "a".into(),
-        agent_name: name.into(),
-        session_id: "s".into(),
-        model: ModelRef::new("anthropic", "claude-sonnet-4-5"),
-        status,
-        error: (status == Status::Error).then(|| "Anthropic is limiting requests.".to_owned()),
-        input_tokens: Some(812),
-        output_tokens: Some(240),
-        duration_ms: Some(3400),
-        started_at: app::now() - ago,
-        ended_at: None,
-        parent: None,
+    let run = |id: &str, name: &str, title: &str, status, ago: i64| {
+        let mut r = Run::new(
+            id,
+            "a",
+            name,
+            "s",
+            ModelRef::new("anthropic", "claude-sonnet-4-5"),
+        );
+        r.title = title.into();
+        r.status = status;
+        r.error = (status == Status::Error).then(|| "Anthropic is limiting requests.".to_owned());
+        (r.input_tokens, r.output_tokens) = (Some(3120), Some(412));
+        (r.duration_ms, r.calls, r.tools) = (Some(9400), 2, 2);
+        r.started_at = app::now() - ago;
+        r
     };
     app.runs = vec![
-        run("r1", "Atlas", Status::Ok, 120),
-        run("r2", "Forge", Status::Error, 4000),
-        run("r3", "Atlas", Status::Cancelled, 90000),
+        run(
+            "r1",
+            "Atlas",
+            "What changed in the release notes?",
+            Status::Ok,
+            120,
+        ),
+        run("r2", "Forge", "Fix the failing build", Status::Error, 4000),
+        run(
+            "r3",
+            "Atlas",
+            "Draft the announcement",
+            Status::Cancelled,
+            90000,
+        ),
     ];
-    let step = |seq, kind, out: &str| {
+    let mut seq = 0;
+    let mut step = |kind, name: &str, out: &str| {
+        seq += 1;
         let mut s = Step::new(seq, kind, 0);
+        s.name = name.into();
         s.output = Some(out.to_owned());
-        s.duration_ms = (kind == StepKind::Llm).then_some(3400);
         s
     };
-    let mut call = step(
-        3,
+    let timed = |mut s: Step, at, ms| {
+        (s.at_ms, s.duration_ms) = (Some(at), Some(ms));
+        s
+    };
+    let mut first = step(
         StepKind::Llm,
-        "Three things changed: the runs screen is real now.",
+        "",
+        "I'll read the notes first.\n\n[tool call] read_file {\"path\":\"NOTES.md\"}",
     );
-    call.input = Some("[system]\nYou plan work.\n\n[user]\nWhat changed?".into());
-    call.input_tokens = Some(812);
-    call.output_tokens = Some(240);
-    call.reasoning = Some("The user wants a summary.".into());
+    first.input = Some("[user]\nWhat changed in the release notes?".into());
+    (first.input_tokens, first.output_tokens, first.first_ms) = (Some(1480), Some(96), Some(620));
+    first.reasoning = Some("The user wants a summary. The notes are in NOTES.md.".into());
+    let mut read = step(
+        StepKind::Tool,
+        "read_file",
+        "## 0.4.0\n- Runs record every tool\n- Skills",
+    );
+    read.input = Some(r#"{"path":"NOTES.md"}"#.into());
+    let mut grep = step(
+        StepKind::Tool,
+        "shell",
+        "Error: grep: CHANGELOG: No such file",
+    );
+    grep.input = Some(r#"{"command":"grep -n fix CHANGELOG","reason":"Find fixes"}"#.into());
+    grep.status = Status::Error;
+    let mut last = step(
+        StepKind::Llm,
+        "",
+        "Three things changed:\n\n1. **Runs** record every model call and tool.\n2. Skills show in the setup.\n3. Errors are marked.",
+    );
+    last.input = Some("[user]\nWhat changed?\n\n[tool result]\n## 0.4.0 …".into());
+    (last.input_tokens, last.output_tokens, last.first_ms) = (Some(1640), Some(316), Some(540));
+    let brief = step(
+        StepKind::System,
+        "",
+        "You plan work. Be brief, and say what you assumed.",
+    );
+    let skill = step(
+        StepKind::Skill,
+        "release-notes",
+        "# Release notes\nRead NOTES.md, group changes by area, lead with what users notice.",
+    );
+    let context = step(
+        StepKind::Context,
+        "",
+        "## Context\nIt is Tuesday, 10 November 2026, 14:02 (UTC+02:00).",
+    );
+    let tools = step(
+        StepKind::Tools,
+        "2",
+        "read_file(path, lines?)\nReads a text file in the working folder.\n\nshell(command, reason)\nRuns a command.",
+    );
+    let user = step(StepKind::User, "", "What changed in the release notes?");
     app.steps = vec![
-        step(1, StepKind::System, "You plan work."),
-        step(2, StepKind::User, "What changed?"),
-        call,
+        brief,
+        skill,
+        context,
+        tools,
+        timed(user, 0, 0),
+        timed(first, 10, 3100),
+        timed(read, 3120, 40),
+        timed(grep, 3120, 880),
+        timed(last, 4020, 5380),
     ];
+    app.record = 5;
 }

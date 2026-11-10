@@ -92,7 +92,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 10] = [
+const MIGRATIONS: [&str; 11] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -103,6 +103,7 @@ const MIGRATIONS: [&str; 10] = [
     include_str!("../../db/migrations/008_delegation.sql"),
     include_str!("../../db/migrations/009_mcp.sql"),
     include_str!("../../db/migrations/010_schedules.sql"),
+    include_str!("../../db/migrations/011_run_trace.sql"),
 ];
 
 const QUERY_FILES: [&str; 8] = [
@@ -626,6 +627,41 @@ mod tests {
         assert!(
             list.iter().any(|p| p.id == "llama-server:mine"),
             "a server someone really added stays"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migrating_keeps_recorded_runs_and_names_them_after_their_message() {
+        let dir = std::env::temp_dir().join(format!("oido-mig11-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oido.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..10] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO runs (id, agent_id, agent_name, session_id, model_provider, model, status, started_at)
+                 VALUES ('r', 'a', 'Atlas', 's', 'openai', 'gpt-x', 'ok', 4102444800);
+                 INSERT INTO run_steps (run_id, seq, kind, output, started_at)
+                 VALUES ('r', 1, 'system', 'Be brief.', 4102444800),
+                        ('r', 2, 'user', '  Sum the files' || char(10) || 'in src', 4102444800),
+                        ('r', 3, 'llm', 'Done.', 4102444800);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 10).unwrap();
+        }
+        let s = Store::open(&path, Vault::fixed([1; 32])).unwrap();
+        let runs = s.list_runs(10).unwrap();
+        assert_eq!(runs[0].title, "Sum the files");
+        assert_eq!((runs[0].calls, runs[0].tools), (1, 0));
+        let steps = s.list_steps("r").unwrap();
+        assert_eq!(steps.len(), 3, "every step is kept");
+        assert_eq!(steps[2].output.as_deref(), Some("Done."));
+        assert_eq!(
+            steps[2].at_ms, None,
+            "old steps have no timing within the run"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

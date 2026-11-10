@@ -17,9 +17,9 @@ use crate::app::{App, now};
 use crate::command::{self, Finish};
 use crate::completion::{self, Call, Event, Request, ToolSpec, Turn};
 use crate::flows::Prep;
-use crate::model::{AgentStatus, Message, new_id};
+use crate::model::{AgentStatus, Message, ToolCall, new_id};
 use crate::models::{self, ModelRef};
-use crate::runs::{INPUT_LIMIT, OUTPUT_LIMIT, Run, Status, Step, StepKind, clip};
+use crate::runs::{Reply, Run, Setup, Status, Step, Trace};
 use crate::tools::{self, DELEGATE};
 
 /// The most times a team member may call the model for one task before it is cut off.
@@ -147,6 +147,10 @@ pub fn summary(args: &str) -> String {
 /// Everything a team member's worker needs, worked out before leaving the UI thread.
 struct Job {
     prep: Prep,
+    /// The member's run as it began: its steps are recorded against it.
+    run: Run,
+    brief: String,
+    skills: Vec<(String, String)>,
     system: Option<String>,
     context: String,
     think: Option<completion::Think>,
@@ -199,23 +203,19 @@ fn run_tool(job: &Job, call: &Call) -> String {
     format!("Error: there is no tool called {} for you.", call.name)
 }
 
-/// A step that is just text: the brief, the task, or what the tools gave back.
-fn note(steps: &mut Vec<Step>, kind: StepKind, name: &str, text: &str) {
-    let mut s = Step::new(steps.len() as u32 + 1, kind, now());
-    s.name = name.to_owned();
-    let (text, cut) = clip(text, INPUT_LIMIT);
-    (s.output, s.truncated) = (Some(text), cut);
-    steps.push(s);
-}
-
 /// Works on the task until the model answers without asking for a tool. Blocks.
 fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
     let began = Instant::now();
-    let (mut steps, mut input, mut output) = (Vec::new(), 0u32, 0u32);
-    if let Some(system) = &job.system {
-        note(&mut steps, StepKind::System, "", system);
-    }
-    note(&mut steps, StepKind::User, "", &job.task);
+    let mut trace = Trace::new(job.run.clone());
+    let mut steps = trace.setup(&Setup {
+        brief: &job.brief,
+        skills: &job.skills,
+        context: &job.context,
+        tools: &job.tools,
+        user: &job.task,
+        user_name: None,
+    });
+    let (mut input, mut output) = (0u32, 0u32);
     let mut turns = vec![Turn::user(job.task.clone())];
     let key = job.prep.key.as_deref().map(String::as_str);
     let end = 'rounds: {
@@ -232,32 +232,32 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 tools: job.tools.clone(),
             };
             tell(Note::Model);
-            let (at, round) = (now(), Instant::now());
+            let round = Instant::now();
             let (mut text, mut reasoning, mut calls) = (String::new(), String::new(), Vec::new());
-            let (mut used_in, mut used_out) = (None, None);
+            let (mut used_in, mut used_out, mut first) = (None, None, None);
             let (mut shown, mut last) = (String::new(), Instant::now());
-            let result = completion::run(
-                &job.prep.endpoint,
-                key,
-                &request,
-                &job.cancel,
-                &mut |ev| match ev {
-                    Event::Text(t) => {
-                        text.push_str(&t);
-                        shown.push_str(&t);
-                        if last.elapsed() >= FLUSH {
-                            tell(Note::Text(std::mem::take(&mut shown)));
-                            last = Instant::now();
+            let result =
+                completion::run(&job.prep.endpoint, key, &request, &job.cancel, &mut |ev| {
+                    if first.is_none() && !matches!(ev, Event::Usage { .. }) {
+                        first = Some(round.elapsed());
+                    }
+                    match ev {
+                        Event::Text(t) => {
+                            text.push_str(&t);
+                            shown.push_str(&t);
+                            if last.elapsed() >= FLUSH {
+                                tell(Note::Text(std::mem::take(&mut shown)));
+                                last = Instant::now();
+                            }
+                        }
+                        Event::Reasoning(t) => reasoning.push_str(&t),
+                        Event::ToolCall(c) => calls.push(c),
+                        Event::Usage { input, output } => {
+                            used_in = input.or(used_in);
+                            used_out = output.or(used_out);
                         }
                     }
-                    Event::Reasoning(t) => reasoning.push_str(&t),
-                    Event::ToolCall(c) => calls.push(c),
-                    Event::Usage { input, output } => {
-                        used_in = input.or(used_in);
-                        used_out = output.or(used_out);
-                    }
-                },
-            );
+                });
             if !shown.is_empty() {
                 tell(Note::Text(shown));
             }
@@ -268,39 +268,37 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 output: used_out.unwrap_or(0),
             });
 
-            let mut said = text.clone();
-            for c in &calls {
-                if !said.is_empty() {
-                    said.push_str("\n\n");
-                }
-                said.push_str(&format!("[tool call] {} {}", c.name, c.args));
-            }
-            let sent = crate::run::transcript(job.system.as_deref(), Some(&job.context), &turns);
-            let mut s = Step::new(steps.len() as u32 + 1, StepKind::Llm, at);
-            s.status = match &result {
-                Ok(()) => Status::Ok,
-                Err(completion::Error::Cancelled) => Status::Cancelled,
-                Err(_) => Status::Error,
+            let (status, failure) = match &result {
+                Ok(()) => (Status::Ok, None),
+                Err(completion::Error::Cancelled) => (Status::Cancelled, None),
+                Err(e) => (Status::Error, Some(e.describe(&job.prep.who))),
             };
-            let ((sent, cut_in), (said, cut_out)) =
-                (clip(&sent, INPUT_LIMIT), clip(&said, OUTPUT_LIMIT));
-            (s.input, s.output, s.truncated) = (Some(sent), Some(said), cut_in || cut_out);
-            s.reasoning = Some(reasoning).filter(|r| !r.is_empty());
-            (s.input_tokens, s.output_tokens) = (used_in, used_out);
-            s.duration_ms = Some(round.elapsed().as_millis().min(u128::from(u32::MAX)) as u32);
-            steps.push(s);
-
-            match result {
-                Ok(()) => {}
-                Err(completion::Error::Cancelled) => break 'rounds End::Stopped,
-                Err(e) => {
-                    let why = e.describe(&job.prep.who);
-                    let mut s = Step::new(steps.len() as u32 + 1, StepKind::Error, now());
-                    s.status = Status::Error;
-                    s.output = Some(why.clone());
-                    steps.push(s);
-                    break 'rounds End::Failed(why);
-                }
+            let called: Vec<ToolCall> = calls
+                .iter()
+                .map(|c: &Call| ToolCall {
+                    name: c.name.clone(),
+                    summary: String::new(),
+                    output: None,
+                    id: c.id.clone(),
+                    args: c.args.clone(),
+                })
+                .collect();
+            steps.extend(trace.reply(&Reply {
+                sent: &crate::run::transcript(&turns),
+                text: &text,
+                reasoning: &reasoning,
+                calls: &called,
+                failure: failure.as_deref(),
+                status,
+                input_tokens: used_in,
+                output_tokens: used_out,
+                began: round,
+                first,
+            }));
+            match (status, failure) {
+                (Status::Cancelled, _) => break 'rounds End::Stopped,
+                (_, Some(why)) => break 'rounds End::Failed(why),
+                _ => {}
             }
             if calls.is_empty() {
                 break 'rounds if text.trim().is_empty() {
@@ -310,7 +308,6 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 };
             }
             turns.push(Turn::assistant(text, calls.clone()));
-            let mut results = Vec::new();
             for call in &calls {
                 tell(Note::Tool {
                     name: call.name.clone(),
@@ -320,15 +317,9 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 tell(Note::ToolDone {
                     ok: !result.starts_with("Error"),
                 });
-                results.push(format!("[{}]\n{result}", call.name));
+                steps.extend(trace.tool_done(&call.id, &result));
                 turns.push(Turn::tool(call.id.clone(), result));
             }
-            note(
-                &mut steps,
-                StepKind::User,
-                "Tool result",
-                &results.join("\n\n"),
-            );
         }
         End::Failed(format!(
             "It was still working after {MAX_ROUNDS} model calls, so it was cut off."
@@ -448,23 +439,15 @@ impl App {
             .providers
             .model_info(&model)
             .is_none_or(|i| models::can_think(&i.caps));
-        let run = Run {
-            id: new_id(),
-            agent_id: member.id.clone(),
-            agent_name: member.name.clone(),
-            session_id: sid.to_owned(),
-            model,
-            status: Status::Running,
-            error: None,
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: None,
-            started_at: now(),
-            ended_at: None,
-            parent,
-        };
+        let mut run = Run::new(&new_id(), &member.id, &member.name, sid, model);
+        run.parent = parent;
+        run.title = crate::runs::title_of(&task);
+        let (brief, skills) = self.brief_of(member);
         let job = Job {
-            system: self.system_for(member),
+            run: run.clone(),
+            system: Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty()),
+            brief,
+            skills,
             context: crate::context::now_text(),
             think: crate::run::think_of(self.effort).filter(|_| can_think),
             tools: tools::offered(&member.tools, false, &[])
@@ -567,7 +550,7 @@ impl App {
                 member.status = AgentStatus::Idle;
             }
         }
-        self.save("the run", |db| db.finish_run(&run, &out.steps));
+        self.save("the run", |db| db.save_run(&run, &out.steps));
         if self.route == crate::app::Route::Runs {
             self.reload_runs();
         }

@@ -424,10 +424,7 @@ fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 items: s
                     .skills
                     .iter()
-                    .map(|k| Item {
-                        name: k.name.clone(),
-                        description: k.description.clone(),
-                    })
+                    .map(|k| Item::plain(k.name.clone(), k.description.clone()))
                     .collect(),
                 chosen: s.roster.form.skills.clone(),
                 get: |s| &s.roster.form.skill_picker,
@@ -518,9 +515,14 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                     .all_tools()
                     .iter()
                     .filter(|t| s.typesafe_connected() || !crate::tools::needs_typesafe(&t.name))
-                    .map(|t| Item {
-                        name: t.name.to_owned(),
-                        description: t.description.to_owned(),
+                    .map(|t| {
+                        let shown = crate::tools::shown(&t.name, &s.mcp.servers);
+                        Item {
+                            name: t.name.clone(),
+                            label: shown.label,
+                            description: shown.about,
+                            group: shown.group,
+                        }
                     })
                     .collect(),
                 chosen: s.roster.form.tools.clone(),

@@ -52,16 +52,22 @@ pub fn body(dir: &Path, name: &str) -> Option<String> {
     Some(split(&text).1.trim().to_owned())
 }
 
-/// The brief with the chosen skills' instructions after it.
-pub fn with_skills(brief: &str, dir: Option<&Path>, chosen: &[String]) -> String {
+/// Each chosen skill still in the folder, with its instructions, in the order chosen.
+pub fn chosen(dir: Option<&Path>, names: &[String]) -> Vec<(String, String)> {
+    names
+        .iter()
+        .filter_map(|name| Some((name.clone(), body(dir?, name)?)))
+        .collect()
+}
+
+/// The brief with the skills' instructions after it: what the model is sent as its system prompt.
+pub fn system(brief: &str, skills: &[(String, String)]) -> String {
     let mut out = brief.trim().to_owned();
-    for name in chosen {
-        if let Some(text) = dir.and_then(|d| body(d, name)) {
-            if !out.is_empty() {
-                out.push_str("\n\n");
-            }
-            out.push_str(&format!("## Skill: {name}\n\n{text}"));
+    for (name, text) in skills {
+        if !out.is_empty() {
+            out.push_str("\n\n");
         }
+        out.push_str(&format!("## Skill: {name}\n\n{text}"));
     }
     out
 }
@@ -178,6 +184,8 @@ mod tests {
 
     #[test]
     fn chosen_skills_follow_the_brief_and_a_missing_or_escaping_one_adds_nothing() {
+        let with_skills =
+            |brief: &str, dir: Option<&Path>, names: &[String]| system(brief, &chosen(dir, names));
         let root = tree();
         let chosen = ["beta".to_owned(), "gone".to_owned(), "../beta".to_owned()];
         let text = with_skills("Be brief.", Some(&root), &chosen);

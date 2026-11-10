@@ -320,37 +320,57 @@ impl MultiPicker {
 /// One choice in a multi-select: a skill or a tool.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Item {
+    /// What is chosen and saved.
     pub name: String,
+    /// What the person sees; often the name itself.
+    pub label: String,
     pub description: String,
+    /// The heading it is listed under, or empty for a list without headings. Items of one group
+    /// come together.
+    pub group: String,
 }
 
-/// The items that match `query`, best first: a name that starts with it, then a name that
-/// contains it, then a description that does. All, in order, when the query is empty. Plain text,
-/// not scattered letters: with a long list those match nearly everything.
+impl Item {
+    /// An item shown by its own name, under no heading.
+    pub fn plain(name: String, description: String) -> Self {
+        Self {
+            label: name.clone(),
+            name,
+            description,
+            group: String::new(),
+        }
+    }
+}
+
+/// The items that match `query`, best first within each group, groups in their order: a label or
+/// name that starts with it, then one that contains it, then a description that does. All, in
+/// order, when the query is empty. Plain text, not scattered letters: with a long list those match
+/// nearly everything.
 pub fn matching<'a>(items: &'a [Item], query: &str) -> Vec<&'a Item> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return items.iter().collect();
     }
-    let mut hits: Vec<(u8, usize)> = items
+    let group_at = |group: &str| items.iter().position(|it| it.group == group);
+    let mut hits: Vec<(Option<usize>, u8, usize)> = items
         .iter()
         .enumerate()
         .filter_map(|(i, s)| {
-            let (name, about) = (s.name.to_lowercase(), s.description.to_lowercase());
-            let rank = if name.starts_with(&query) {
+            let names = [s.label.to_lowercase(), s.name.to_lowercase()];
+            let rank = if names.iter().any(|n| n.starts_with(&query)) {
                 0
-            } else if name.contains(&query) {
+            } else if names.iter().any(|n| n.contains(&query)) {
                 1
-            } else if about.contains(&query) {
+            } else if s.description.to_lowercase().contains(&query) {
                 2
             } else {
                 return None;
             };
-            Some((rank, i))
+            Some((group_at(&s.group), rank, i))
         })
         .collect();
     hits.sort();
-    hits.into_iter().map(|(_, i)| &items[i]).collect()
+    hits.into_iter().map(|(_, _, i)| &items[i]).collect()
 }
 
 #[cfg(test)]
@@ -359,10 +379,7 @@ mod multi_tests {
 
     #[test]
     fn searching_finds_by_name_first_then_by_description() {
-        let item = |n: &str, d: &str| Item {
-            name: n.into(),
-            description: d.into(),
-        };
+        let item = |n: &str, d: &str| Item::plain(n.into(), d.into());
         let all = [
             item("copy", "Helps with seo copy"),
             item("ai-seo", "Search answers"),
@@ -382,5 +399,33 @@ mod multi_tests {
             "starts with, then contains, then the description; no scattered letters"
         );
         assert!(names("zzz").is_empty());
+    }
+
+    #[test]
+    fn a_search_keeps_groups_together_and_finds_by_label() {
+        let item = |n: &str, l: &str, g: &str| Item {
+            name: n.into(),
+            label: l.into(),
+            description: String::new(),
+            group: g.into(),
+        };
+        let all = [
+            item("read_file", "Read files", "Defaults"),
+            item("mcp__resend__send_email", "Send email", "Resend"),
+            item("shell", "Run commands", "Defaults"),
+            item("mcp__resend__list_emails", "List emails", "Resend"),
+        ];
+        let names = |q| {
+            matching(&all, q)
+                .iter()
+                .map(|s| s.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("send e"), ["Send email"], "the label is searched");
+        assert_eq!(
+            names("e"),
+            ["Read files", "Run commands", "Send email", "List emails"],
+            "matches stay under their group, groups in list order"
+        );
     }
 }

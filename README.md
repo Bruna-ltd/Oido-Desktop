@@ -43,7 +43,7 @@ the user cannot write to (a package manager's) reports why it cannot.
 | Database | `~/.local/share/oido-desktop/oido.db` (override with `OIDO_DB`, `:memory:` for a throwaway) |
 | Schema and queries | `db/migrations/*.sql` and `db/queries/*.sql`, run by `src/store` |
 | Provider API keys | sealed in the database (XChaCha20-Poly1305); the key that opens them is in the OS keyring |
-| Runs | each message you send is a run: the brief, your message, what was sent to the model and what came back (and any error), shown on the Runs screen. Kept 30 days, then deleted at startup; chats are never touched. Keys are never recorded |
+| Runs | each message you send is a run, lasting until the agent stops or waits on you: its setup (the brief, each skill, the context, the tools offered), then every model call (messages sent, reply, thinking, tokens, time to first token) and every tool call (arguments, result, time), drawn on a timeline on the Runs screen. Kept 30 days, then deleted at startup; chats are never touched. Keys are never recorded |
 | Workflows | saved in the database with the agent that learned them (deleted with it); drafts wait in their chat; runs are kept 30 days |
 | Model lists | fetched from each provider when it is connected, saved in the database, refreshed when stale |
 

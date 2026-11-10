@@ -108,6 +108,17 @@ pub fn build(s: &App, k: &Kit) -> El {
         .px(8.0)
         .py(12.0)
         .gap(2.0)
+        .child(
+            // Centred on the items' icons, collapsed or expanded.
+            row()
+                .key("rail-logo")
+                .h(40.0)
+                .px(8.0)
+                .center_y()
+                .a11y_hidden()
+                .child(icon(&icons::LOGO, 24.0).color(k.c.text_strong)),
+        )
+        .child(rule())
         .child(group(&OPERATE))
         .child(rule())
         .child(group(&CONFIGURE))

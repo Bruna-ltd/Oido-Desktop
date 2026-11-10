@@ -87,6 +87,8 @@ pub struct App {
     pub record: usize,
     /// Replies being written, by chat.
     pub live: std::collections::HashMap<String, crate::run::Live>,
+    /// Each chat's latest run, still being recorded while the agent works on what you said.
+    pub traces: std::collections::HashMap<String, crate::runs::Trace>,
     /// Commands running for the shell tool, by chat, with the flag that stops each.
     pub commands: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Chats whose agent has handed tasks to team members that have not come back yet.
@@ -223,7 +225,7 @@ impl App {
         let skills_dir = crate::skills::dir();
         let mut app = App {
             sidebar: PaneState::new(264.0).range(180.0, 420.0),
-            inspector: PaneState::new(300.0).range(240.0, 460.0),
+            inspector: PaneState::new(380.0).range(260.0, 720.0),
             route: Route::Chat,
             roster,
             runs: Vec::new(),
@@ -231,6 +233,7 @@ impl App {
             steps: Vec::new(),
             record: 0,
             live: std::collections::HashMap::new(),
+            traces: std::collections::HashMap::new(),
             commands: std::collections::HashMap::new(),
             delegating: std::collections::HashMap::new(),
             delegated: std::collections::HashMap::new(),

@@ -7,8 +7,8 @@ use std::rc::Rc;
 
 use rune::{Color, El, GrowthSpec, Key, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text};
 use rune_kit::{
-    IconButton, IconButtonVariant, Kit, Placement, Popover, Select, SelectAppearance, TextInput,
-    glyphs, scroll_bar,
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Placement, Popover,
+    Select, SelectAppearance, TextInput, glyphs, scroll_bar,
 };
 
 use crate::app::App;
@@ -40,6 +40,34 @@ pub struct Spec {
 
 fn row_key(key: &str, name: &str) -> String {
     format!("{key}-option-{name}")
+}
+
+/// One row of the open list: a group's heading, or the item at this place among those found.
+enum Line {
+    /// The group's name and the names of its items that are shown.
+    Heading(String, Vec<String>),
+    Item(usize),
+}
+
+/// The rows for `found`: a heading over each group's items, when the items have groups.
+fn lines(found: &[&Item]) -> Vec<Line> {
+    let mut out: Vec<Line> = Vec::with_capacity(found.len());
+    let mut group: Option<&str> = None;
+    let mut heading: Option<usize> = None;
+    for (i, item) in found.iter().enumerate() {
+        if group != Some(item.group.as_str()) {
+            group = Some(item.group.as_str());
+            heading = (!item.group.is_empty()).then(|| {
+                out.push(Line::Heading(item.group.clone(), Vec::new()));
+                out.len() - 1
+            });
+        }
+        if let Some(Line::Heading(_, members)) = heading.and_then(|h| out.get_mut(h)) {
+            members.push(item.name.clone());
+        }
+        out.push(Line::Item(i));
+    }
+    out
 }
 
 pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
@@ -80,7 +108,7 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
     // Always wrapped, so a caller's key never lands on the popover's own anchor.
     let mut out = col().w_full().gap(10.0).child(row().child(field));
     if !spec.chosen.is_empty() {
-        out = out.child(chips(key, &spec.chosen, toggle, k));
+        out = out.child(chips(key, &spec.chosen, &spec.items, toggle, k));
     }
     out
 }
@@ -118,7 +146,8 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
     let inner = WIDTH - 8.0;
     // Only the rows on screen are built.
     let shown: Rc<Vec<Item>> = Rc::new(found.iter().map(|f| (*f).clone()).collect());
-    let count = shown.len();
+    let rows: Rc<Vec<Line>> = Rc::new(lines(&found));
+    let count = rows.len();
     let kit = k.clone();
     let chosen = spec.chosen.clone();
     let list = col()
@@ -129,13 +158,21 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
             count,
             ROW,
             {
-                let shown = shown.clone();
-                move |_: &App, i| Cow::Owned(row_key(key, &shown[i].name))
+                let (shown, rows) = (shown.clone(), rows.clone());
+                move |_: &App, i| {
+                    Cow::Owned(match &rows[i] {
+                        Line::Heading(g, _) => format!("{key}-group-{g}"),
+                        Line::Item(at) => row_key(key, &shown[*at].name),
+                    })
+                }
             },
-            move |_: &App, i| {
-                let item = &shown[i];
-                let on = chosen.contains(&item.name);
-                option(&kit, key, item, i, i == active, on, edit, toggle)
+            move |_: &App, i| match &rows[i] {
+                Line::Heading(g, members) => heading(&kit, key, g, members, &chosen, toggle),
+                Line::Item(at) => {
+                    let item = &shown[*at];
+                    let on = chosen.contains(&item.name);
+                    option(&kit, key, item, *at, *at == active, on, edit, toggle)
+                }
             },
         )
         .reveal_selected(true);
@@ -194,6 +231,57 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
         .child(results)
 }
 
+/// A group's name over its items, with a button that chooses every item shown under it, or
+/// removes them all once they are all chosen. The heading itself cannot be chosen or reached by
+/// the arrow keys.
+fn heading(
+    k: &Kit,
+    key: &str,
+    group: &str,
+    members: &[String],
+    chosen: &[String],
+    toggle: fn(&mut App, &str),
+) -> El {
+    let all_on = members.iter().all(|m| chosen.contains(m));
+    // Toggling exactly these chooses the rest, or removes every one.
+    let flip: Vec<String> = members
+        .iter()
+        .filter(|m| chosen.contains(m) == all_on)
+        .cloned()
+        .collect();
+    row()
+        .w_full()
+        .h(ROW)
+        .pl(8.0)
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(group.to_owned())
+                .font(k.ty.small)
+                .color(k.c.text_faint)
+                .grow(1.0)
+                .shrink()
+                .truncate(),
+        )
+        .child(
+            Button::new(if all_on { "Remove all" } else { "Select all" })
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .help(if all_on {
+                    format!("Remove every {group} item shown")
+                } else {
+                    format!("Choose every {group} item shown")
+                })
+                .on_press(move |s: &mut App| {
+                    for name in &flip {
+                        toggle(s, name);
+                    }
+                })
+                .build(k)
+                .key(format!("{key}-all-{group}")),
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn option(
     k: &Kit,
@@ -210,7 +298,7 @@ fn option(
     row()
         .key(row_key(key, &item.name))
         .role("option")
-        .label(item.name.clone())
+        .label(item.label.clone())
         .checked(on)
         .focus_selected(active)
         .w_full()
@@ -226,7 +314,7 @@ fn option(
                 .opacity(if on { 1.0 } else { 0.0 }),
         )
         .child(
-            text(item.name.clone())
+            text(item.label.clone())
                 .font(k.ty.ui_compact)
                 .color(c.text_base)
                 .shrink()
@@ -254,12 +342,16 @@ fn option(
 
 /// The chosen items, each removable. One that is gone from the list still shows, so it can be
 /// removed.
-fn chips(key: &str, chosen: &[String], toggle: fn(&mut App, &str), k: &Kit) -> El {
+fn chips(key: &str, chosen: &[String], items: &[Item], toggle: fn(&mut App, &str), k: &Kit) -> El {
     let c = &k.c;
     let mut rows = col().w_full().gap(6.0);
     let mut line = row().w_full().gap(6.0);
     for (i, name) in chosen.iter().enumerate() {
         let remove = name.clone();
+        let label = items
+            .iter()
+            .find(|it| it.name == *name)
+            .map_or(name.as_str(), |it| it.label.as_str());
         line = line.child(
             row()
                 .key(format!("{key}-chip-{name}"))
@@ -270,11 +362,11 @@ fn chips(key: &str, chosen: &[String], toggle: fn(&mut App, &str), k: &Kit) -> E
                 .center_y()
                 .radius(14.0)
                 .border(1.0, c.border_base)
-                .child(text(name.clone()).font(k.ty.small).color(c.text_base))
+                .child(text(label.to_owned()).font(k.ty.small).color(c.text_base))
                 .child(
                     IconButton::new(&glyphs::CLOSE)
                         .variant(IconButtonVariant::GhostMuted)
-                        .label(format!("Remove {name}"))
+                        .label(format!("Remove {label}"))
                         .on_press(move |s: &mut App| toggle(s, &remove))
                         .build(k)
                         .key(format!("{key}-remove-{name}")),
@@ -345,5 +437,49 @@ fn wrap(at: usize, by: isize, len: usize) -> usize {
         0
     } else {
         (at as isize + by).rem_euclid(len as isize) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_heading_lists_the_items_shown_under_it() {
+        let item = |n: &str, g: &str| Item {
+            name: n.into(),
+            label: n.into(),
+            description: String::new(),
+            group: g.into(),
+        };
+        let all = [
+            item("ask", "Defaults"),
+            item("shell", "Defaults"),
+            item("send", "Resend"),
+        ];
+        let found: Vec<&Item> = all.iter().collect();
+        let got: Vec<String> = lines(&found)
+            .iter()
+            .map(|l| match l {
+                Line::Heading(g, m) => format!("{g}: {}", m.join(",")),
+                Line::Item(i) => found[*i].name.clone(),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "Defaults: ask,shell",
+                "ask",
+                "shell",
+                "Resend: send",
+                "send"
+            ]
+        );
+        let plain = [Item::plain("a".into(), String::new())];
+        let found: Vec<&Item> = plain.iter().collect();
+        assert!(
+            matches!(lines(&found)[..], [Line::Item(0)]),
+            "no headings without groups"
+        );
     }
 }

@@ -1,6 +1,7 @@
-//! Running an agent: a message you send becomes a run. The agent's brief and the chat since the
+//! Running an agent: a message you send starts a run. The agent's brief and the chat since the
 //! last "Start fresh" go to the agent's model, and the reply is written into the chat as it
-//! streams in. Every run is recorded (see [`crate::runs`]) however it ends.
+//! streams in. When the model calls tools and is asked again with what they gave back, that is the
+//! same run. Every run is recorded (see [`crate::runs`]) as it goes, however it ends.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,11 +9,12 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
-use crate::app::{App, Effort, Route, now};
+use crate::app::{App, Effort, Route};
 use crate::completion::{self, Call, Endpoint, Error, Event, Request, Role, Think, Turn};
 use crate::model::{AgentStatus, Message, Outcome, Stats, ToolCall, new_id};
+use crate::models::ModelRef;
 use crate::providers::ModelStatus;
-use crate::runs::{Record, Run, Status};
+use crate::runs::{Reply, Run, Setup, Status, Trace};
 
 /// How often streamed text reaches the screen: often enough to read as typing, rarely enough that
 /// a fast model does not redraw on every token.
@@ -20,20 +22,22 @@ const FLUSH: Duration = Duration::from_millis(40);
 /// Chats are named after their first message, up to this many characters.
 const TITLE: usize = 40;
 
-/// A reply being written: what the run needs to be recorded when it ends.
+/// A reply being written: one model call of a run, and what its step needs when it ends.
 pub struct Live {
-    run: Run,
+    run_id: String,
+    agent_id: String,
+    model: ModelRef,
     cancel: Arc<AtomicBool>,
     began: Instant,
-    system: Option<String>,
-    user: String,
-    /// Set when `user` is a tool's result rather than your message.
-    user_name: Option<String>,
-    /// What the model was given, as readable text.
+    /// The messages the model was sent, as readable text.
     sent: String,
     reasoning: String,
     /// How long it thought: until its first word, when it thought out loud.
     thought: Option<Duration>,
+    /// How long until the first of the reply (a word, a thought, a tool call) arrived.
+    first: Option<Duration>,
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
 }
 
 /// The messages the model sees: everything since the last divider that was answered in full, with
@@ -97,15 +101,10 @@ pub fn build_turns(messages: &[Message]) -> Vec<Turn> {
     turns
 }
 
-/// What was sent, as text for the run's record.
-pub(crate) fn transcript(system: Option<&str>, context: Option<&str>, turns: &[Turn]) -> String {
+/// The messages sent, as text for the run's record. The brief, skills, context and tools go with
+/// every call too; the run records them once, as its first steps.
+pub(crate) fn transcript(turns: &[Turn]) -> String {
     let mut parts = Vec::new();
-    if let Some(s) = system.filter(|s| !s.is_empty()) {
-        parts.push(format!("[system]\n{s}"));
-    }
-    if let Some(c) = context.filter(|c| !c.is_empty()) {
-        parts.push(format!("[context]\n{c}"));
-    }
     for t in turns {
         let who = match t.role {
             Role::User => "user",
@@ -145,41 +144,33 @@ pub(crate) fn think_of(effort: Effort) -> Option<Think> {
 }
 
 impl Live {
-    /// A reply in progress, for screenshots.
-    #[cfg(debug_assertions)]
-    pub fn demo() -> Live {
+    fn new(run_id: &str, agent_id: &str, model: ModelRef) -> Live {
         Live {
-            run: Run {
-                id: "r1".into(),
-                agent_id: String::new(),
-                agent_name: String::new(),
-                session_id: String::new(),
-                model: crate::models::ModelRef::new("openai", "x"),
-                status: Status::Running,
-                error: None,
-                input_tokens: None,
-                output_tokens: None,
-                duration_ms: None,
-                started_at: 0,
-                ended_at: None,
-                parent: None,
-            },
+            run_id: run_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            model,
             cancel: Arc::new(AtomicBool::new(false)),
             began: Instant::now(),
-            system: None,
-            user: String::new(),
-            user_name: None,
             sent: String::new(),
             reasoning: String::new(),
             thought: None,
+            first: None,
+            input_tokens: None,
+            output_tokens: None,
         }
+    }
+
+    /// A reply in progress, for screenshots.
+    #[cfg(debug_assertions)]
+    pub fn demo() -> Live {
+        Live::new("r1", "", ModelRef::new("openai", "x"))
     }
 }
 
 impl App {
     /// Whether the agent is writing a reply in any chat.
     pub(crate) fn writing(&self, agent_id: &str) -> bool {
-        self.live.values().any(|l| l.run.agent_id == agent_id)
+        self.live.values().any(|l| l.agent_id == agent_id)
     }
 
     /// Seconds the open chat's reply has been in progress.
@@ -318,14 +309,20 @@ impl App {
                     .map(|c| c.name.as_str())
             })
             .collect();
+        let asked = names.contains(&crate::tools::ASK);
         let user_name = (!names.is_empty()).then(|| {
             if names.iter().all(|n| *n == crate::tools::ASK) {
-                "Answer to your question".to_owned()
+                "Answer to your question"
             } else {
-                "Tool result".to_owned()
+                "Tool result"
             }
         });
-        let system = self.system_for(agent);
+        // What tools gave back carries the run on; something you said starts a new one.
+        let carries_on = !asked
+            && trailing.iter().all(|t| t.role == Role::Tool)
+            && self.traces.contains_key(&sid);
+        let (brief, skills) = self.brief_of(agent);
+        let system = Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty());
         let can_think = self
             .providers
             .model_info(&model)
@@ -333,7 +330,7 @@ impl App {
         let context = crate::context::now_text();
         let request = Request {
             model: model.id.clone(),
-            system: system.clone(),
+            system,
             context: Some(context.clone()),
             think: think_of(self.effort).filter(|_| can_think),
             turns: turns.clone(),
@@ -343,36 +340,46 @@ impl App {
                 &crate::mcp::specs(&self.mcp.servers),
             ),
         };
-        let run = Run {
-            id: new_id(),
-            agent_id: agent.id.clone(),
-            agent_name: agent.name.clone(),
-            session_id: sid.clone(),
-            model: model.clone(),
-            status: Status::Running,
-            error: None,
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: None,
-            started_at: now(),
-            ended_at: None,
-            parent: None,
+        let agent_id = agent.id.clone();
+        let mut setup = Vec::new();
+        if !carries_on {
+            let mut trace = Trace::new(Run::new(
+                &new_id(),
+                &agent.id,
+                &agent.name,
+                &sid,
+                model.clone(),
+            ));
+            setup = trace.setup(&Setup {
+                brief: &brief,
+                skills: &skills,
+                context: &context,
+                tools: &request.tools,
+                user: &user,
+                user_name,
+            });
+            // The chat's run before this one is over, whatever it was waiting for.
+            if let Some(mut old) = self.traces.insert(sid.clone(), trace) {
+                old.stop();
+                self.save("the run", |db| db.save_run(&old.run, &[]));
+            }
+        }
+        let Some(trace) = self.traces.get_mut(&sid) else {
+            return;
         };
-        let live = Live {
-            run: run.clone(),
-            cancel: Arc::new(AtomicBool::new(false)),
-            began: Instant::now(),
-            system: system.clone(),
-            user,
-            user_name,
-            sent: transcript(system.as_deref(), Some(&context), &turns),
-            reasoning: String::new(),
-            thought: None,
-        };
+        if carries_on {
+            trace.resume();
+        }
+        let run = trace.run.clone();
+        let mut live = Live::new(&run.id, &agent_id, model.clone());
+        live.sent = transcript(&turns);
         let cancel = Arc::clone(&live.cancel);
         let target = self.target_for(&model.provider);
-        self.save("the run", |db| db.start_run(&run));
-        if let Some(agent) = self.roster.agent_mut(&run.agent_id) {
+        if !carries_on {
+            self.save("the run", |db| db.start_run(&run));
+        }
+        self.save("the run", |db| db.save_run(&run, &setup));
+        if let Some(agent) = self.roster.agent_mut(&agent_id) {
             agent.status = AgentStatus::Running;
             if let Some(chat) = agent.sessions.iter_mut().find(|s| s.id == sid) {
                 chat.messages
@@ -387,14 +394,25 @@ impl App {
         }
     }
 
-    /// The brief an agent is given: its instructions with the skills it has.
-    pub(crate) fn system_for(&self, agent: &crate::agents::Agent) -> Option<String> {
-        Some(crate::skills::with_skills(
-            &agent.prompt,
-            self.skills_dir.as_deref(),
-            &agent.skills,
-        ))
-        .filter(|p| !p.trim().is_empty())
+    /// The brief an agent is given, and each of its skills still in the folder with its
+    /// instructions: together, its system prompt.
+    pub(crate) fn brief_of(&self, agent: &crate::agents::Agent) -> (String, Vec<(String, String)>) {
+        (
+            agent.prompt.clone(),
+            crate::skills::chosen(self.skills_dir.as_deref(), &agent.skills),
+        )
+    }
+
+    /// Saves how chat `sid`'s run stands with the steps it just took, and shows them if the Runs
+    /// screen is open.
+    fn record(&mut self, sid: &str, steps: &[crate::runs::Step]) {
+        let Some(run) = self.traces.get(sid).map(|t| t.run.clone()) else {
+            return;
+        };
+        self.save("the run", |db| db.save_run(&run, steps));
+        if self.route == Route::Runs {
+            self.reload_runs();
+        }
     }
 
     /// Where a provider's chat is, and the key to use, or why there is no way to ask it.
@@ -471,7 +489,7 @@ impl App {
     }
 
     fn is_live(&self, sid: &str, rid: &str) -> bool {
-        self.live.get(sid).is_some_and(|l| l.run.id == rid)
+        self.live.get(sid).is_some_and(|l| l.run_id == rid)
     }
 
     /// What the model said so far goes into the chat. Ignored once its run has ended.
@@ -481,14 +499,17 @@ impl App {
         }
         let (mut text, mut calls) = (String::new(), Vec::new());
         if let Some(live) = self.live.get_mut(sid) {
+            if live.first.is_none() && !events.iter().all(|e| matches!(e, Event::Usage { .. })) {
+                live.first = Some(live.began.elapsed());
+            }
             for ev in events {
                 match ev {
                     Event::Text(t) => text.push_str(&t),
                     Event::Reasoning(t) => live.reasoning.push_str(&t),
                     Event::ToolCall(call) => calls.push(call),
                     Event::Usage { input, output } => {
-                        live.run.input_tokens = input.or(live.run.input_tokens);
-                        live.run.output_tokens = output.or(live.run.output_tokens);
+                        live.input_tokens = input.or(live.input_tokens);
+                        live.output_tokens = output.or(live.output_tokens);
                     }
                 }
             }
@@ -530,9 +551,8 @@ impl App {
         let Some(live) = self.live.remove(sid) else {
             return;
         };
-        let who = self.providers.label_of(&live.run.model.provider);
-        let model_name = self.providers.model_name(&live.run.model);
-        let mut run = live.run;
+        let who = self.providers.label_of(&live.model.provider);
+        let model_name = self.providers.model_name(&live.model);
         let elapsed = live.began.elapsed();
         let (mut reply, mut called) = (String::new(), Vec::new());
         if let Some(Message::Assistant { text, tools, .. }) = self
@@ -558,13 +578,9 @@ impl App {
                 (Outcome::Failed(why.clone()), Status::Error, Some(why))
             }
         };
-        run.status = status;
-        run.error = failure.clone();
-        run.duration_ms = Some(elapsed.as_millis().min(u128::from(u32::MAX)) as u32);
-        run.ended_at = Some(now());
         let stats = (status == Status::Ok).then(|| Stats {
             model: model_name,
-            tokens: run.output_tokens.unwrap_or(0),
+            tokens: live.output_tokens.unwrap_or(0),
             seconds: elapsed.as_secs_f32(),
         });
         let thought = live.thought.map(|d| d.as_secs_f32());
@@ -592,32 +608,27 @@ impl App {
             self.save("the reply", |db| db.put_message(&id, seq, &m));
         }
 
-        let steps = Record {
-            system: live.system.as_deref(),
-            user: &live.user,
-            user_name: live.user_name.as_deref(),
-            calls: &called,
-            sent: &live.sent,
-            reply: &reply,
-            reasoning: &live.reasoning,
-            failure: failure.as_deref(),
-            status,
-            input_tokens: run.input_tokens,
-            output_tokens: run.output_tokens,
-            duration_ms: run.duration_ms.unwrap_or(0),
-            started_at: run.started_at,
-        }
-        .steps();
-        self.save("the run", |db| db.finish_run(&run, &steps));
+        let steps = self.traces.get_mut(sid).map(|trace| {
+            trace.reply(&Reply {
+                sent: &live.sent,
+                text: &reply,
+                reasoning: &live.reasoning,
+                calls: &called,
+                failure: failure.as_deref(),
+                status,
+                input_tokens: live.input_tokens,
+                output_tokens: live.output_tokens,
+                began: live.began,
+                first: live.first,
+            })
+        });
+        self.record(sid, &steps.unwrap_or_default());
 
-        let others = self.writing(&run.agent_id);
-        if let Some(agent) = self.roster.agent_mut(&run.agent_id)
+        let others = self.writing(&live.agent_id);
+        if let Some(agent) = self.roster.agent_mut(&live.agent_id)
             && !others
         {
             agent.status = AgentStatus::Idle;
-        }
-        if self.route == Route::Runs {
-            self.reload_runs();
         }
         // The agent asked to run commands: they run now, with no go-ahead needed.
         if status == Status::Ok {
@@ -643,7 +654,7 @@ impl App {
         self.halt_delegations(sid);
         if let Some(live) = self.live.get(sid) {
             live.cancel.store(true, Ordering::Relaxed);
-            let rid = live.run.id.clone();
+            let rid = live.run_id.clone();
             self.settle(sid, &rid, Err(Error::Cancelled));
         }
     }
@@ -720,12 +731,20 @@ impl App {
         else {
             return;
         };
-        call.output = Some(output);
+        call.output = Some(output.clone());
         let waiting = tools.iter().any(|t| t.output.is_none());
         let saved = (chat.id.clone(), seq, chat.messages[seq].clone());
         self.save("the reply", |db| {
             db.put_message(&saved.0, saved.1, &saved.2)
         });
+        let step = self.traces.get_mut(sid).and_then(|trace| {
+            let step = trace.tool_done(call_id, &output);
+            if !carry_on {
+                trace.stop();
+            }
+            step
+        });
+        self.record(sid, step.as_slice());
         if carry_on && !waiting {
             self.begin_in(sid);
         }
@@ -1022,9 +1041,12 @@ impl App {
         self.select_run(at);
     }
 
+    /// Opens run `i` at its last model call: the answer it came to. Reloading the open run keeps
+    /// the step you were looking at.
     pub fn select_run(&mut self, i: usize) {
+        let same = self.runs.get(i).map(|r| &r.id) == self.runs.get(self.run).map(|r| &r.id)
+            && !self.steps.is_empty();
         self.run = i;
-        self.record = 0;
         self.steps = match (&self.store, self.runs.get(i)) {
             (Some(db), Some(r)) => db.list_steps(&r.id).unwrap_or_else(|e| {
                 eprintln!("oido: could not read the run: {e}");
@@ -1032,6 +1054,13 @@ impl App {
             }),
             _ => Vec::new(),
         };
+        if !same || self.record >= self.steps.len() {
+            self.record = self
+                .steps
+                .iter()
+                .rposition(|s| s.kind == crate::runs::StepKind::Llm)
+                .unwrap_or(0);
+        }
     }
 
     /// Opens a run from the chat.
@@ -1159,18 +1188,25 @@ mod tests {
         );
         assert_eq!(r.model, ModelRef::new("llama-server:box", "llama-3.3-70b"));
         let kinds: Vec<_> = app.steps.iter().map(|s| s.kind).collect();
-        assert_eq!(kinds, vec![StepKind::System, StepKind::User, StepKind::Llm]);
-        let call = &app.steps[2];
-        assert_eq!(call.output.as_deref(), Some("Hello!"));
-        assert_eq!(call.reasoning.as_deref(), Some("hmm"));
-        assert!(call.input.as_deref().unwrap().contains("[user]\nhi there"));
+        use StepKind::{Context, Llm, System, User};
+        assert_eq!(kinds, [System, Context, User, Llm]);
         assert!(
-            call.input
+            app.steps[1]
+                .output
                 .as_deref()
                 .unwrap()
-                .contains("[context]\n## Context"),
-            "the record shows it"
+                .contains("## Context"),
+            "the record shows what it was told about the moment"
         );
+        assert_eq!(app.record, 3, "opened at the model's answer");
+        let call = &app.steps[3];
+        assert_eq!(call.output.as_deref(), Some("Hello!"));
+        assert_eq!(call.reasoning.as_deref(), Some("hmm"));
+        let sent = call.input.as_deref().unwrap();
+        assert!(sent.ends_with("[user]\nhi there"), "{sent}");
+        assert!(!sent.contains("[system]"), "the brief is a step of its own");
+        assert!(call.first_ms.is_some() && call.at_ms.is_some());
+        assert_eq!(r.title, "hi there");
         drop(app);
 
         // After a restart the chat has the reply and the run is still listed.
@@ -1255,42 +1291,17 @@ mod tests {
         let agent = app.current().unwrap();
         let (sid, agent_id) = (agent.chat().id.clone(), agent.id.clone());
         let model = ModelRef::new("llama-server:box", "llama-3.3-70b");
-        let run = Run {
-            id: "run-1".into(),
-            agent_id,
-            agent_name: "Atlas".into(),
-            session_id: sid.clone(),
-            model,
-            status: Status::Running,
-            error: None,
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: None,
-            started_at: now(),
-            ended_at: None,
-            parent: None,
-        };
+        let run = Run::new("run-1", &agent_id, "Atlas", &sid, model.clone());
         app.save("the run", |db| db.start_run(&run));
+        app.traces.insert(sid.clone(), crate::runs::Trace::new(run));
         app.roster
             .current_mut()
             .unwrap()
             .chat_mut()
             .messages
             .push(Message::reply("", Some("run-1".into()), Outcome::Working));
-        app.live.insert(
-            sid.clone(),
-            Live {
-                run,
-                cancel: Arc::new(AtomicBool::new(false)),
-                began: Instant::now(),
-                system: None,
-                user: "q".into(),
-                user_name: None,
-                sent: "[user]\nq".into(),
-                reasoning: String::new(),
-                thought: None,
-            },
-        );
+        app.live
+            .insert(sid.clone(), Live::new("run-1", &agent_id, model));
         assert!(app.busy());
         app.apply(&sid, "run-1", vec![Event::Text("Part".into())]);
         app.apply(&sid, "other-run", vec![Event::Text("IGNORED".into())]);
@@ -1313,35 +1324,10 @@ mod tests {
     fn writing(db: &TempDb) -> (App, String) {
         let (mut app, _) = app_with_server(db, vec![]);
         let sid = app.current().unwrap().chat().id.clone();
-        let run = Run {
-            id: "r".into(),
-            agent_id: app.current().unwrap().id.clone(),
-            agent_name: "A".into(),
-            session_id: sid.clone(),
-            model: ModelRef::new("llama-server:box", "llama-3.3-70b"),
-            status: Status::Running,
-            error: None,
-            input_tokens: None,
-            output_tokens: None,
-            duration_ms: None,
-            started_at: 0,
-            ended_at: None,
-            parent: None,
-        };
-        app.live.insert(
-            sid.clone(),
-            Live {
-                run,
-                cancel: Arc::new(AtomicBool::new(false)),
-                began: Instant::now(),
-                system: None,
-                user: String::new(),
-                user_name: None,
-                sent: String::new(),
-                reasoning: String::new(),
-                thought: None,
-            },
-        );
+        let agent_id = app.current().unwrap().id.clone();
+        let model = ModelRef::new("llama-server:box", "llama-3.3-70b");
+        app.live
+            .insert(sid.clone(), Live::new("r", &agent_id, model));
         (app, sid)
     }
 
@@ -1582,9 +1568,23 @@ data: [DONE]
         assert!(matches!(last(&app), Message::Assistant { text, .. } if text == "Hello!"));
 
         app.go(Route::Runs);
-        let result = app.steps.iter().find(|s| s.kind == StepKind::User).unwrap();
-        assert_eq!(result.name, "Tool result");
+        assert_eq!(
+            app.runs.len(),
+            1,
+            "the command and the carrying on are one run"
+        );
+        let kinds: Vec<_> = app.steps.iter().map(|s| s.kind).collect();
+        use StepKind::{Llm, Tool, Tools, User};
+        assert_eq!(kinds[kinds.len() - 5..], [Tools, User, Llm, Tool, Llm]);
+        let result = app.steps.iter().find(|s| s.kind == Tool).unwrap();
+        assert_eq!(result.name, "shell");
+        assert!(result.input.as_deref().unwrap().contains("sh1") || result.input.is_some());
         assert!(result.output.as_deref().unwrap().contains("done-out"));
+        assert!(result.duration_ms.is_some() && result.at_ms.is_some());
+        assert_eq!(
+            (app.runs[0].calls, app.runs[0].tools, app.runs[0].status),
+            (2, 1, Status::Ok)
+        );
         let _ = std::fs::remove_file(file);
     }
 
@@ -1932,8 +1932,8 @@ data: [DONE]
         assert_eq!(child.status, Status::Ok);
         let own = |r: &Run| r.input_tokens.unwrap_or(0) + r.output_tokens.unwrap_or(0);
         assert!(
-            own(child) == 13 && own(lead_run) == 13,
-            "the lead's run (which reported none of its own) counts its team member's tokens"
+            own(child) == 13 && own(lead_run) == 26,
+            "the lead's run counts its own calls (13 when it carried on) and its team member's"
         );
         let lead_id = lead_run.id.clone();
         let shown = crate::runs::nest(runs);

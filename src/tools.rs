@@ -172,6 +172,151 @@ pub fn summary(name: &str, args: &str) -> String {
     }
 }
 
+/// The group the app's own tools are listed under.
+pub const DEFAULTS: &str = "Defaults";
+/// The group TypeSafe's tools are listed under.
+pub const TYPESAFE: &str = "TypeSafe";
+
+/// How a tool is shown to the person, apart from the name the model calls it by: a plain label, a
+/// line on what it does, and the group it is listed under (the app's own, TypeSafe, or the MCP
+/// server it comes from).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Shown {
+    pub label: String,
+    pub about: String,
+    pub group: String,
+}
+
+/// How the tool called `name` is shown. An MCP tool is labelled from its server's name for it and
+/// grouped under the server; a name nothing knows shows as itself.
+pub fn shown(name: &str, servers: &[crate::mcp::Server]) -> Shown {
+    if let Some((label, about)) = own(name) {
+        let group = if needs_typesafe(name) {
+            TYPESAFE
+        } else {
+            DEFAULTS
+        };
+        return Shown {
+            label: label.to_owned(),
+            about: about.to_owned(),
+            group: group.to_owned(),
+        };
+    }
+    match crate::mcp::resolve(servers, name) {
+        Some((server, tool)) => Shown {
+            label: humanize(&tool.name),
+            about: first_sentence(&tool.description),
+            group: server.name.clone(),
+        },
+        None => Shown {
+            label: name.to_owned(),
+            about: String::new(),
+            group: DEFAULTS.to_owned(),
+        },
+    }
+}
+
+/// The label and line for one of the app's own tools, written for the person rather than the
+/// model.
+fn own(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        ASK => (
+            "Ask you a question",
+            "Stops to ask you for a decision instead of guessing.",
+        ),
+        SHELL => (
+            "Run commands",
+            "Runs shell commands on this computer, without asking first.",
+        ),
+        TEACH => (
+            "Save as a workflow",
+            "Turns what it just did into a workflow you can run again.",
+        ),
+        RUN_WORKFLOW => ("Run workflows", "Runs one of your saved workflows by name."),
+        crate::schedule::tool::NAME => (
+            "Schedule itself",
+            "Sets prompts or workflows to run at set times; new ones need your approval.",
+        ),
+        crate::files::READ => ("Read files", "Reads text files in its working folder."),
+        crate::files::WRITE => (
+            "Write files",
+            "Creates or replaces files in its working folder.",
+        ),
+        crate::files::EDIT => (
+            "Edit files",
+            "Changes part of a file in its working folder.",
+        ),
+        crate::typesafe::YES_NO => (
+            "Yes or no check",
+            "Asks TypeSafe whether something is true of a text or image.",
+        ),
+        crate::typesafe::CHOOSE => (
+            "Pick an option",
+            "Asks TypeSafe which option fits a text or image best.",
+        ),
+        crate::typesafe::SCORE => (
+            "Rate on a scale",
+            "Asks TypeSafe to score a text or image on a scale you describe.",
+        ),
+        crate::typesafe::LOCATE => (
+            "Find in an image",
+            "Asks TypeSafe where something is in an image, such as a button in a screenshot.",
+        ),
+        _ => return None,
+    })
+}
+
+/// A server's tool name as words: "send_email" and "sendEmail" become "Send email". A word in
+/// capitals ("URL") stays so.
+fn humanize(name: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower {
+            words.push(std::mem::take(&mut word));
+        }
+        // The capital before a lowercase letter starts a new word: "APIKeys" is "API" "Keys".
+        if c.is_lowercase() && word.chars().count() > 1 && word.chars().all(char::is_uppercase) {
+            let last = word.pop();
+            words.push(std::mem::take(&mut word));
+            word.extend(last);
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+        word.push(c);
+    }
+    words.extend((!word.is_empty()).then_some(word));
+    let mut out = words
+        .iter()
+        .map(|w| {
+            if w.len() > 1 && w.chars().all(|c| !c.is_lowercase()) {
+                w.clone()
+            } else {
+                w.to_lowercase()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(first) = out.chars().next() {
+        out.replace_range(..first.len_utf8(), &first.to_uppercase().to_string());
+    }
+    if out.is_empty() { name.to_owned() } else { out }
+}
+
+/// The first sentence of a description, on one line.
+fn first_sentence(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.find(". ") {
+        Some(end) => text[..=end].to_owned(),
+        None => text,
+    }
+}
+
 pub fn knows(name: &str) -> bool {
     name == DELEGATE || registered().iter().any(|t| t.name == name)
 }
@@ -264,6 +409,36 @@ mod tests {
             "an unregistered name is ignored"
         );
         assert!(knows(ASK) && !knows("shell.run"));
+    }
+
+    #[test]
+    fn every_registered_tool_has_a_plain_label_and_group() {
+        for t in registered() {
+            let s = shown(&t.name, &[]);
+            assert_ne!(s.label, t.name, "{} has no label", t.name);
+            assert!(!s.about.is_empty(), "{} has no line", t.name);
+        }
+        assert_eq!(shown(ASK, &[]).group, DEFAULTS);
+        assert_eq!(shown(crate::typesafe::SCORE, &[]).group, TYPESAFE);
+    }
+
+    #[test]
+    fn an_mcp_tool_is_labelled_in_words_and_grouped_under_its_server() {
+        let mut server = crate::mcp::tests::server("Resend", &["send_email"]);
+        server.tools[0].description = "Send an email.  Needs a verified domain.".into();
+        let s = shown(&server.qualified("send_email"), &[server]);
+        assert_eq!(
+            s,
+            Shown {
+                label: "Send email".into(),
+                about: "Send an email.".into(),
+                group: "Resend".into(),
+            }
+        );
+        assert_eq!(humanize("listAPIKeys"), "List API keys");
+        assert_eq!(humanize("get-URL"), "Get URL");
+        assert_eq!(humanize("search"), "Search");
+        assert_eq!(shown("mystery", &[]).label, "mystery");
     }
 
     #[test]

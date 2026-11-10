@@ -14,20 +14,7 @@ use crate::theme;
 
 pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let r = &s.roster;
-    let mut sb = Sidebar::new()
-        .label("Agents")
-        .inset(0.0)
-        .header_gap(4.0)
-        .header_padding(0.0, 16.0)
-        .row_gap(2.0)
-        .header(
-            SidebarRow::new("Search")
-                .icon(&glyphs::SEARCH)
-                .detail("⌘K")
-                .height(32.0)
-                .build(k)
-                .key("search"),
-        );
+    let mut sb = Sidebar::new().label("Agents").inset(0.0).row_gap(2.0);
     if !r.pinned().is_empty() {
         let rows = group(s, r.pinned(), k, layer);
         sb = sb.section(

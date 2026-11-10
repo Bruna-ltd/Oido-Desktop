@@ -2,15 +2,30 @@
 //! agents have it. An agent is offered only the tools picked in its own form.
 
 use rune::{El, ScrollSpec, col, el, row, text};
-use rune_kit::{Badge, BadgeVariant, Kit};
+use rune_kit::Kit;
 
 use crate::app::App;
 use crate::completion::ToolSpec;
+use crate::tools::Shown;
 
 const COLUMN: f32 = 760.0;
 
 pub fn screen(s: &App, k: &Kit) -> El {
-    let tools = s.all_tools();
+    let mut list: Vec<El> = Vec::new();
+    let mut group: Option<String> = None;
+    for t in s.all_tools() {
+        let shown = crate::tools::shown(&t.name, &s.mcp.servers);
+        if group.as_ref() != Some(&shown.group) {
+            list.push(
+                text(shown.group.clone())
+                    .font(k.ty.body_medium)
+                    .color(k.c.text_base)
+                    .pt(if group.is_none() { 0.0 } else { 12.0 }),
+            );
+            group = Some(shown.group.clone());
+        }
+        list.push(card(s, &t, &shown, k));
+    }
     col()
         .key("tools")
         .w_full()
@@ -33,11 +48,11 @@ pub fn screen(s: &App, k: &Kit) -> El {
                         .color(k.c.text_muted)
                         .wrap(),
                 )
-                .children(tools.iter().map(|t| card(s, t, k))),
+                .children(list),
         )
 }
 
-fn card(s: &App, t: &ToolSpec, k: &Kit) -> El {
+fn card(s: &App, t: &ToolSpec, shown: &Shown, k: &Kit) -> El {
     let c = &k.c;
     let needs = crate::tools::needs_typesafe(&t.name);
     col()
@@ -53,20 +68,25 @@ fn card(s: &App, t: &ToolSpec, k: &Kit) -> El {
                 .w_full()
                 .center_y()
                 .gap(8.0)
-                .child(text(t.name.clone()).font(k.ty.mono).color(c.text_base))
+                .child(
+                    text(shown.label.clone())
+                        .font(k.ty.body_medium)
+                        .color(c.text_base),
+                )
                 .child(el().grow(1.0))
                 .child(
-                    Badge::new(if needs { "Needs TypeSafe" } else { "Built in" })
-                        .variant(BadgeVariant::Subtle)
-                        .build(k),
+                    text(t.name.clone())
+                        .font(k.ty.mono)
+                        .color(c.text_faint)
+                        .truncate(),
                 ),
         )
-        .child(
-            text(t.description.clone())
+        .children((!shown.about.is_empty()).then(|| {
+            text(shown.about.clone())
                 .font(k.ty.small)
                 .color(c.text_muted)
-                .wrap(),
-        )
+                .wrap()
+        }))
         .child(
             text(format!("Takes: {}", params(t)))
                 .font(k.ty.small)
