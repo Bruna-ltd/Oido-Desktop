@@ -27,6 +27,7 @@ zeroize = "1.9.1"
 sha2 = "0.11"
 percent-encoding = "2"
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
+croner = "4"
 
 # Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with one change, a
 # mouse wheel notch scrolls 100 points instead of 40. Drop this section when upstream lets the app

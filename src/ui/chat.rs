@@ -1,8 +1,9 @@
 //! The conversation: transcript with tool calls and approval gates, and the composer below it.
 
-use rune::{El, ScrollSpec, TextStyle, col, el, row, text};
+use rune::{El, ScrollPos, ScrollSpec, TextStyle, col, el, row, text};
 use rune_kit::{
-    Badge, BadgeVariant, Button, ButtonVariant, Card, ControlSize, Kit, Markdown, MarkdownStyle,
+    Badge, BadgeVariant, Button, ButtonVariant, Card, ControlSize, IconButton, IconButtonVariant,
+    Kit, Markdown, MarkdownStyle, glyphs,
 };
 
 use crate::agents::Agent;
@@ -10,6 +11,9 @@ use crate::app::App;
 use crate::model::{Approval, Decision, Message, Outcome, Stats, ToolCall};
 
 const COLUMN: f32 = 760.0;
+/// How far above the newest message, in points, the transcript is scrolled before the jump button
+/// shows.
+const SCROLLED_UP: f32 = 200.0;
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(agent) = s.current() else {
@@ -19,6 +23,8 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .key("chat")
         .w_full()
         .h_full()
+        // Files dropped anywhere on the chat are attached to the message being written.
+        .on_drop_files(|s: &mut App, files, _| s.attach_paths(files.to_vec()))
         .child(super::chat_header::build(s, agent, k))
         .child(
             col()
@@ -33,7 +39,30 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                         .max_w(COLUMN)
                         .px(24.0)
                         .pb(20.0)
+                        .children(s.scrolled_up.then(|| jump_to_latest(k)))
                         .child(super::composer::build(s, agent, k, layer)),
+                ),
+        )
+}
+
+/// A round button over the top of the composer, while you have scrolled up from the newest
+/// message: it glides back down.
+fn jump_to_latest(k: &Kit) -> El {
+    row()
+        .key("jump-to-latest")
+        .pin(Some(0.0), Some(-48.0), Some(0.0), None)
+        .justify_center()
+        .child(
+            el().radius(18.0)
+                .fill(k.c.layer_01)
+                .border(1.0, k.c.border_base)
+                .child(
+                    IconButton::new(&glyphs::CHEVRON_DOWN)
+                        .variant(IconButtonVariant::GhostMuted)
+                        .label("Jump to the latest message")
+                        .help("Jump to the latest message")
+                        .on_press_tx(|_: &mut App, tx| tx.scroll_to_bottom("transcript"))
+                        .build(k),
                 ),
         )
 }
@@ -56,6 +85,7 @@ fn transcript(s: &App, agent: &Agent, k: &Kit) -> El {
                     .map(|(i, m)| message(s, m, i, i + 1 == messages.len(), k)),
             )
             .children(draft(s, &agent.chat().id, k))
+            .children(schedule_drafts(s, &agent.chat().id, k))
     };
     col()
         .key("transcript")
@@ -64,6 +94,18 @@ fn transcript(s: &App, agent: &Agent, k: &Kit) -> El {
         .min_h(0.0)
         .items_center()
         .scroll(ScrollSpec { stick_bottom: true })
+        .on_scroll_offset({
+            let up = s.scrolled_up;
+            move |at: ScrollPos| {
+                let away = at.max[1] - at.offset[1] > SCROLLED_UP;
+                // This runs as the frame is drawn and cannot change state; it asks for the change.
+                if away != up
+                    && let Some(app) = crate::app::handle()
+                {
+                    app.update(move |s: &mut App, _| s.scrolled_up = away);
+                }
+            }
+        })
         .child(body)
 }
 
@@ -115,7 +157,7 @@ fn no_agents(k: &Kit) -> El {
 
 fn message(s: &App, m: &Message, i: usize, last: bool, k: &Kit) -> El {
     match m {
-        Message::User(t) => user(t, i, k),
+        Message::User(p) => user(p, i, k),
         Message::Divider(label) => divider(label, i, k),
         Message::Assistant {
             text,
@@ -143,22 +185,67 @@ fn message(s: &App, m: &Message, i: usize, last: bool, k: &Kit) -> El {
     }
 }
 
-fn user(t: &str, i: usize, k: &Kit) -> El {
-    row().key(format!("m{i}")).w_full().justify_end().child(
-        col()
-            .max_w(560.0)
-            .px(14.0)
-            .py(10.0)
-            .radius(k.radius.lg)
-            .fill(k.c.layer_02)
-            .child(
-                text(t.to_owned())
-                    .font(k.ty.body)
-                    .color(k.c.text_base)
-                    .wrap()
-                    .selectable(true),
-            ),
-    )
+fn user(p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
+    let mut bubble = col()
+        .max_w(560.0)
+        .px(14.0)
+        .py(10.0)
+        .gap(8.0)
+        .radius(k.radius.lg)
+        .fill(k.c.layer_02);
+    let pictures: Vec<El> = p
+        .images()
+        .map(|img| {
+            let (w, h) = super::picture::fit(img.width, img.height, 320.0, 240.0);
+            let mut shown = el()
+                .size(w, h)
+                .radius(k.radius.md)
+                .fill(k.c.layer_01)
+                .help(format!("{} · {}×{}", img.name, img.width, img.height));
+            if let Some(px) = super::picture::pixels(img) {
+                shown = shown.pixels(&px);
+            }
+            shown
+        })
+        .collect();
+    if !pictures.is_empty() {
+        bubble = bubble.child(row().gap(6.0).wrap().justify_end().children(pictures));
+    }
+    let files: Vec<El> = p
+        .attachments
+        .iter()
+        .filter(|a| !a.is_image())
+        .map(|a| {
+            row()
+                .gap(4.0)
+                .center_y()
+                .child(rune::icon(&rune_kit::glyphs::FILE_TEXT, 12.0).color(k.c.text_muted))
+                .child(
+                    text(a.name())
+                        .font(k.ty.small)
+                        .color(k.c.text_muted)
+                        .max_w(240.0)
+                        .truncate(),
+                )
+        })
+        .collect();
+    if !files.is_empty() {
+        bubble = bubble.child(row().gap(6.0).wrap().children(files));
+    }
+    if !p.text.is_empty() {
+        bubble = bubble.child(
+            text(p.text.clone())
+                .font(k.ty.body)
+                .color(k.c.text_base)
+                .wrap()
+                .selectable(true),
+        );
+    }
+    row()
+        .key(format!("m{i}"))
+        .w_full()
+        .justify_end()
+        .child(bubble)
 }
 
 /// An assistant message as the transcript shows it.
@@ -585,6 +672,89 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
             .build(k)
             .key("draft"),
     )
+}
+
+/// Schedules the agent proposed in this chat, each waiting for you: what it would do, when, the
+/// next few times, and Approve, Edit (on the Schedules page) or Reject. Nothing runs until approved.
+fn schedule_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
+    use chrono::Local;
+    let c = &k.c;
+    s.proposals
+        .iter()
+        .filter(|p| p.session_id == sid)
+        .map(|p| {
+            let x = &p.schedule;
+            let line = |t: String| text(t).font(k.ty.small).color(c.text_base).wrap();
+            let mut body = col()
+                .w_full()
+                .gap(8.0)
+                .child(line(super::schedules::target_words(s, &x.target)))
+                .child(line(format!("When: {}", x.timing.describe(&Local))));
+            let next = s.upcoming(x, 3);
+            if !next.is_empty() {
+                body = body.child(
+                    text(format!("Next: {}", next.join(" · ")))
+                        .font(k.ty.small)
+                        .color(c.text_faint)
+                        .wrap(),
+                );
+            }
+            if let Some((_, why)) = s
+                .schedule_page
+                .card_notice
+                .as_ref()
+                .filter(|(call, _)| *call == p.call_id)
+            {
+                body = body.child(
+                    text(why.clone())
+                        .font(k.ty.small)
+                        .color(k.c.warning.icon)
+                        .wrap(),
+                );
+            }
+            let (approve, edit, reject) = (p.call_id.clone(), p.call_id.clone(), p.call_id.clone());
+            body = body.child(
+                row()
+                    .gap(8.0)
+                    .child(
+                        Button::new("Approve")
+                            .variant(ButtonVariant::Submit)
+                            .control_size(ControlSize::Small)
+                            .on_press(move |s: &mut App| s.approve_from_card(&approve))
+                            .build(k)
+                            .key(format!("schedule-draft-approve-{}", p.call_id)),
+                    )
+                    .child(
+                        Button::new("Edit")
+                            .variant(ButtonVariant::Outline)
+                            .control_size(ControlSize::Small)
+                            .on_press(move |s: &mut App| s.edit_proposal(&edit))
+                            .build(k)
+                            .key(format!("schedule-draft-edit-{}", p.call_id)),
+                    )
+                    .child(
+                        Button::new("Reject")
+                            .variant(ButtonVariant::Ghost)
+                            .control_size(ControlSize::Small)
+                            .on_press(move |s: &mut App| s.reject_proposal(&reject))
+                            .build(k)
+                            .key(format!("schedule-draft-reject-{}", p.call_id)),
+                    ),
+            );
+            let title = if p.updates {
+                format!("Change to schedule: {}", x.name)
+            } else {
+                format!("Schedule draft: {}", x.name)
+            };
+            Card::new()
+                .accent(k.c.info.icon)
+                .title(title, None)
+                .description("It runs on its own, with this agent's tools, once you approve it.")
+                .child(body)
+                .build(k)
+                .key(format!("schedule-draft-{}", p.call_id))
+        })
+        .collect()
 }
 
 /// A command the agent ran: what it ran, where, and what it printed. It runs as soon as the agent

@@ -15,7 +15,7 @@ use crate::providers::{ModelStatus, Providers};
 use crate::runs::{Run, Step};
 use crate::store::Store;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
     Chat,
     Runs,
@@ -24,6 +24,8 @@ pub enum Route {
     Tools,
     /// Saved workflows and their runs.
     Workflows,
+    /// Schedules: prompts and workflows fired on a timing, and how their fires went.
+    Schedules,
     /// MCP servers: other programs that give agents tools.
     Mcp,
     /// The app's own settings: its appearance.
@@ -35,7 +37,7 @@ pub enum Route {
 }
 
 /// How hard the agent thinks before answering (the composer's "Think" button).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Effort {
     Off,
     Low,
@@ -47,6 +49,16 @@ impl Effort {
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "Think",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Its name in words, as `/think` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -98,15 +110,24 @@ pub struct App {
     pub wf_jobs: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub wf_notice: Option<String>,
     pub wf_confirm: bool,
-    pub composer: TextEdit,
+    pub composer: crate::composer::Composer,
     /// What was typed in the chats not open, by session id: each tab keeps its own draft.
-    pub parked: std::collections::HashMap<String, TextEdit>,
+    pub parked: std::collections::HashMap<String, crate::composer::Composer>,
+    /// Messages sent while their chat's agent was still answering, by session id. Each goes when
+    /// its chat's reply ends.
+    pub queued: std::collections::HashMap<String, crate::prompt::Prompt>,
+    /// The open chat's transcript is scrolled up away from its newest message.
+    pub scrolled_up: bool,
+    /// The working folder's files, for the composer's `@`.
+    pub file_index: Option<crate::composer::FileIndex>,
     /// The answer being typed to the agent's question, and the options picked for it.
     pub answer_text: TextEdit,
     pub picks: Vec<String>,
     pub effort: Effort,
     /// The composer's model picker.
     pub model_picker: PickerState,
+    /// The composer's working-folder browser.
+    pub workdir_browser: crate::folders::Browser,
     pub pinned_closed: bool,
     pub others_closed: bool,
     /// The right rail shows labels beside its icons.
@@ -123,6 +144,15 @@ pub struct App {
     pub theme_open: bool,
     /// This app's own updates: on their own or not, and where they stand.
     pub updates: crate::update::Updates,
+    /// Saved schedules, the fire each running one is on (by schedule id), and whether schedules
+    /// run at all (Settings).
+    pub schedules: Vec<crate::schedule::Schedule>,
+    pub firing: std::collections::HashMap<String, crate::schedule::Fire>,
+    pub run_schedules: bool,
+    /// Schedules agents proposed with their `schedule` tool, waiting for approval in their chats.
+    pub proposals: Vec<crate::schedule::Proposal>,
+    /// The Schedules page.
+    pub schedule_page: crate::schedules::Page,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
 }
@@ -216,12 +246,16 @@ impl App {
             wf_jobs: std::collections::HashMap::new(),
             wf_notice: None,
             wf_confirm: false,
-            composer: TextEdit::new(""),
+            composer: crate::composer::Composer::new(),
             parked: std::collections::HashMap::new(),
+            queued: std::collections::HashMap::new(),
+            file_index: None,
+            scrolled_up: false,
             answer_text: TextEdit::new(""),
             picks: Vec::new(),
             effort: Effort::Off,
             model_picker: PickerState::default(),
+            workdir_browser: crate::folders::Browser::default(),
             pinned_closed: false,
             others_closed: false,
             rail_open: false,
@@ -235,11 +269,17 @@ impl App {
             look,
             theme_open: false,
             updates: crate::update::Updates::new(persist::auto_update(store.as_ref())),
+            schedules: Vec::new(),
+            firing: std::collections::HashMap::new(),
+            run_schedules: persist::run_schedules(store.as_ref()),
+            proposals: Vec::new(),
+            schedule_page: crate::schedules::Page::default(),
             store,
         };
         app.settle_interrupted_commands();
         app.load_workflows();
         app.load_mcp();
+        app.load_schedules();
         app
     }
 
@@ -267,13 +307,31 @@ impl App {
         if before == after {
             return;
         }
-        let draft = std::mem::replace(&mut self.composer, TextEdit::new(""));
-        if let Some(id) = before.filter(|_| !draft.text.is_empty()) {
+        let draft = std::mem::take(&mut self.composer).parked();
+        if let Some(id) = before.filter(|_| !draft.is_blank()) {
             self.parked.insert(id, draft);
         }
         if let Some(back) = after.and_then(|id| self.parked.remove(&id)) {
             self.composer = back;
         }
+    }
+
+    /// Opens chat `sid`, whichever agent or team member holds it.
+    pub fn open_chat(&mut self, sid: &str) {
+        let Some(t) = self.roster.target_of(sid) else {
+            return;
+        };
+        self.switching_chat(|s| {
+            s.roster.select(t.clone());
+            if let Some(a) = s.roster.current_mut()
+                && let Some(i) = a.sessions.iter().position(|c| c.id == sid)
+            {
+                a.active = i;
+            }
+        });
+        self.route = Route::Chat;
+        self.save_selection();
+        self.save_agent_row(&t);
     }
 
     pub fn select_agent(&mut self, t: Target) {
@@ -388,7 +446,7 @@ impl App {
 
     pub fn new_tab(&mut self) {
         self.switching_chat(Self::open_new_tab);
-        self.composer.focused = true;
+        self.composer.edit.focused = true;
     }
 
     fn open_new_tab(&mut self) {
@@ -464,7 +522,7 @@ mod tests {
         let mut app = samples();
         ready(&mut app);
         let before = app.current().unwrap().chat().messages.len();
-        app.composer = TextEdit::new("  hello  ");
+        app.composer.edit = TextEdit::new("  hello  ");
         app.send();
         let messages = &app.current().unwrap().chat().messages;
         assert_eq!(
@@ -472,8 +530,8 @@ mod tests {
             before + 2,
             "your message and the reply to it"
         );
-        assert!(matches!(&messages[before], Message::User(t) if t == "hello"));
-        assert!(app.composer.text.is_empty());
+        assert!(matches!(&messages[before], Message::User(p) if p.text == "hello"));
+        assert!(app.composer.edit.text.is_empty());
         app.send();
         assert_eq!(
             app.current().unwrap().chat().messages.len(),
@@ -486,14 +544,17 @@ mod tests {
     fn nothing_is_sent_until_the_agent_has_a_model_that_can_answer() {
         let mut app = samples();
         let before = app.current().unwrap().chat().messages.len();
-        app.composer = TextEdit::new("hello");
+        app.composer.edit = TextEdit::new("hello");
         app.send();
         assert_eq!(
             app.current().unwrap().chat().messages.len(),
             before,
             "no model and no default: choose one first"
         );
-        assert_eq!(app.composer.text, "hello", "and what was typed is kept");
+        assert_eq!(
+            app.composer.edit.text, "hello",
+            "and what was typed is kept"
+        );
 
         ready(&mut app);
         app.set_model(Some(ModelRef::new("anthropic", "retired")));
@@ -540,31 +601,34 @@ mod tests {
         let mut app = db.open_with_samples();
         ready(&mut app);
         let old = app.current().unwrap().active;
-        app.composer = TextEdit::new("first");
+        app.composer.edit = TextEdit::new("first");
         app.new_tab();
         let new = app.current().unwrap().active;
-        assert!(app.composer.text.is_empty(), "a new tab starts empty");
-        app.composer = TextEdit::new("second");
+        assert!(app.composer.edit.text.is_empty(), "a new tab starts empty");
+        app.composer.edit = TextEdit::new("second");
         app.select_tab(old);
-        assert_eq!(app.composer.text, "first");
+        assert_eq!(app.composer.edit.text, "first");
         app.select_tab(new);
-        assert_eq!(app.composer.text, "second");
+        assert_eq!(app.composer.edit.text, "second");
         app.select_agent(Target::agent("scout"));
         assert!(
-            app.composer.text.is_empty(),
+            app.composer.edit.text.is_empty(),
             "another agent's chat is its own"
         );
         app.select_agent(Target::agent("atlas"));
-        assert_eq!(app.composer.text, "second", "and the open tab was kept");
+        assert_eq!(
+            app.composer.edit.text, "second",
+            "and the open tab was kept"
+        );
         app.select_tab(old);
         app.close_tab(new);
-        assert_eq!(app.composer.text, "first");
+        assert_eq!(app.composer.edit.text, "first");
         app.new_tab();
         let doomed = app.current().unwrap().active;
-        app.composer = TextEdit::new("doomed");
+        app.composer.edit = TextEdit::new("doomed");
         app.select_tab(old);
         app.close_tab(doomed);
-        assert_eq!(app.composer.text, "first");
+        assert_eq!(app.composer.edit.text, "first");
         assert!(app.parked.is_empty(), "a closed tab leaves no draft behind");
     }
 
@@ -680,7 +744,7 @@ mod tests {
         let db = TempDb::new();
         let mut app = db.open_with_samples();
         ready(&mut app);
-        app.composer = TextEdit::new("remember me");
+        app.composer.edit = TextEdit::new("remember me");
         app.send();
         app.new_tab();
         app.toggle_pin("scout");

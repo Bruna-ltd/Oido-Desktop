@@ -5,6 +5,7 @@ mod agents;
 mod app;
 mod command;
 mod completion;
+mod composer;
 mod connect;
 mod context;
 mod delegate;
@@ -20,9 +21,12 @@ mod models;
 mod omarchy;
 mod persist;
 mod picker;
+mod prompt;
 mod providers;
 mod run;
 mod runs;
+mod schedule;
+mod schedules;
 mod skills;
 mod store;
 #[cfg(test)]
@@ -82,6 +86,11 @@ fn main() {
                 s.check_for_updates();
             }
         });
+    });
+    // Schedules: what is due fires now (catching up on what was missed) and every half minute.
+    let handle = app.handle();
+    schedules::every_tick(move || {
+        handle.update(|s: &mut app::App, _| s.fire_due(app::now()));
     });
     app.run();
 }

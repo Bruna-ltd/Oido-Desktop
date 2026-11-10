@@ -152,3 +152,19 @@ pub fn app_with_server(
     app.set_model(Some(ModelRef::new("llama-server:box", "llama-3.3-70b")));
     (app, seen)
 }
+
+/// The content type of a streamed answer, for [`serve_as`].
+pub const EVENTS: &str = "text/event-stream";
+
+/// A streamed reply that is just `text`.
+pub fn text_stream(text: &str) -> &'static str {
+    let chunk =
+        serde_json::json!({"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]});
+    Box::leak(format!("data: {chunk}\n\ndata: [DONE]\n\n").into_boxed_str())
+}
+
+/// A streamed reply in which the model calls the tool `name` (call id `c1`).
+pub fn call_stream(name: &str, args: serde_json::Value) -> &'static str {
+    let chunk = serde_json::json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": name, "arguments": args.to_string()}}]}, "finish_reason": "tool_calls"}]});
+    Box::leak(format!("data: {chunk}\n\ndata: [DONE]\n\n").into_boxed_str())
+}

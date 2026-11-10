@@ -22,7 +22,11 @@ const fn soon(label: &'static str, icon: &'static Icon) -> Item {
 }
 
 static OPERATE: [Item; 3] = [
-    soon("Scheduled", &icons::SCHEDULED),
+    Item {
+        label: "Schedules",
+        icon: &icons::SCHEDULED,
+        route: Route::Schedules,
+    },
     soon("Usage", &icons::USAGE),
     Item {
         label: "Runs",

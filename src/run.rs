@@ -47,13 +47,25 @@ pub fn build_turns(messages: &[Message]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     for m in &messages[start..] {
         match m {
-            Message::User(t) => match turns.last_mut().filter(|l| l.role == Role::User) {
-                Some(last) => {
-                    last.text.push_str("\n\n");
-                    last.text.push_str(t);
+            Message::User(p) => {
+                let text = p.for_model();
+                let images = p.images().map(|i| crate::completion::Image {
+                    media_type: i.media_type.clone(),
+                    data: i.data.clone(),
+                });
+                match turns.last_mut().filter(|l| l.role == Role::User) {
+                    Some(last) => {
+                        if !text.is_empty() {
+                            if !last.text.is_empty() {
+                                last.text.push_str("\n\n");
+                            }
+                            last.text.push_str(&text);
+                        }
+                        last.images.extend(images);
+                    }
+                    None => turns.push(Turn::user_with(text, images.collect())),
                 }
-                None => turns.push(Turn::user(t.clone())),
-            },
+            }
             Message::Assistant {
                 text,
                 tools,
@@ -101,6 +113,12 @@ pub(crate) fn transcript(system: Option<&str>, context: Option<&str>, turns: &[T
             Role::Tool => "tool result",
         };
         parts.push(format!("[{who}]\n{}", t.text));
+        // A picture's bytes stay out of the record; that it was sent does not.
+        match t.images.len() {
+            0 => {}
+            1 => parts.push("[1 picture]".to_owned()),
+            n => parts.push(format!("[{n} pictures]")),
+        }
         for c in &t.calls {
             parts.push(format!("[tool call] {} {}", c.name, c.args));
         }
@@ -172,37 +190,43 @@ impl App {
 
     /// Whether the open chat is waiting for a reply.
     pub fn busy(&self) -> bool {
-        self.current().is_some_and(|a| {
-            let id = &a.chat().id;
-            self.live.contains_key(id)
-                || self.commands.contains_key(id)
-                || self.delegating.contains_key(id)
-        })
+        self.current().is_some_and(|a| self.busy_in(&a.chat().id))
     }
 
-    /// Sends the composer's text: it joins the chat and the agent starts answering.
-    pub fn send(&mut self) {
-        let text = self.composer.text.trim().to_owned();
-        if text.is_empty() || !self.can_answer() || self.busy() || self.awaiting_answer() {
-            return;
-        }
-        let Some(agent) = self.roster.current_mut() else {
+    /// Whether chat `sid` is waiting for a reply, a command or a team member.
+    pub(crate) fn busy_in(&self, sid: &str) -> bool {
+        self.live.contains_key(sid)
+            || self.commands.contains_key(sid)
+            || self.delegating.contains_key(sid)
+    }
+
+    /// Puts your message in chat `sid`, which need not be the open one, and starts the reply.
+    pub(crate) fn post(&mut self, sid: &str, prompt: crate::prompt::Prompt) {
+        let Some(agent) = self.roster.owner_of_mut(sid) else {
             return;
         };
-        let chat = agent.chat_mut();
+        let agent_id = agent.id.clone();
+        let Some(position) = agent.sessions.iter().position(|s| s.id == sid) else {
+            return;
+        };
+        let chat = &mut agent.sessions[position];
         let naming = chat.title == "New chat" && chat.messages.is_empty();
         if naming {
-            chat.title = title_of(&text);
+            chat.title = match prompt.text.trim() {
+                "" => title_of(prompt.attachments.first().map_or("", |a| a.name())),
+                text => title_of(text),
+            };
         }
-        chat.messages.push(Message::User(text));
+        chat.messages.push(Message::User(prompt));
         let seq = chat.messages.len() - 1;
-        self.composer = rune::TextEdit::new("");
-        self.composer.focused = true;
-        self.save_message(seq);
+        let chat = chat.clone();
+        self.save("the message", |db| {
+            db.put_message(sid, seq, &chat.messages[seq])
+        });
         if naming {
-            self.save_chat();
+            self.save("the chat", |db| db.save_session(&agent_id, &chat, position));
         }
-        self.begin();
+        self.begin_in(sid);
     }
 
     /// Asks again after a reply that was stopped or failed: that reply goes, and a new run
@@ -231,10 +255,12 @@ impl App {
         self.begin();
     }
 
-    /// Stops the open chat's reply; what was written stays.
+    /// Stops the open chat's reply; what was written stays. A message waiting to go comes back
+    /// to the box instead of going.
     pub fn stop(&mut self) {
         if let Some(id) = self.current().map(|a| a.chat().id.clone()) {
             self.cancel_session(&id);
+            self.unqueue();
         }
     }
 
@@ -597,9 +623,16 @@ impl App {
         if status == Status::Ok {
             self.run_file_tools(sid);
             self.run_teach_calls(sid);
+            self.run_schedule_calls(sid);
             self.start_delegations(sid);
             self.start_next_command(sid);
         }
+        // Your message that waited for this reply goes now, unless you stopped the reply or the
+        // agent carries on.
+        if status != Status::Cancelled {
+            self.send_queued(sid);
+        }
+        self.fire_settled(sid, status, failure.as_deref());
     }
 
     /// Ends the chat's reply as stopped, if it has one being written.
@@ -620,18 +653,39 @@ impl App {
     /// The open chat ends with something the agent asked of you (a question, a command to allow)
     /// that is not settled yet.
     pub fn awaiting_answer(&self) -> bool {
-        self.current().is_some_and(|a| {
-            matches!(
-                a.chat().messages.last(),
-                Some(Message::Assistant { tools, .. })
-                    if tools.iter().any(|t| crate::tools::needs_you(&t.name) && t.output.is_none())
-            )
-        })
+        self.current()
+            .is_some_and(|a| self.awaiting_in(&a.chat().id))
+    }
+
+    /// [`App::awaiting_answer`] for chat `sid`, open or not.
+    pub(crate) fn awaiting_in(&self, sid: &str) -> bool {
+        self.roster
+            .owner_of(sid)
+            .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
+            .is_some_and(|chat| {
+                matches!(
+                    chat.messages.last(),
+                    Some(Message::Assistant { tools, .. })
+                        if tools.iter().any(|t| crate::tools::needs_you(&t.name) && t.output.is_none())
+                )
+            })
     }
 
     /// The first call of `name` in the open chat that has no result yet.
     fn pending_call(&self, name: &str) -> Option<String> {
-        match self.current()?.chat().messages.last()? {
+        let sid = self.current()?.chat().id.clone();
+        self.pending_call_in(&sid, name)
+    }
+
+    /// [`App::pending_call`] in chat `sid`, open or not.
+    pub(crate) fn pending_call_in(&self, sid: &str, name: &str) -> Option<String> {
+        let chat = self
+            .roster
+            .owner_of(sid)?
+            .sessions
+            .iter()
+            .find(|s| s.id == sid)?;
+        match chat.messages.last()? {
             Message::Assistant { tools, .. } => tools
                 .iter()
                 .find(|t| t.name == name && t.output.is_none())
@@ -674,6 +728,10 @@ impl App {
         });
         if carry_on && !waiting {
             self.begin_in(sid);
+        }
+        // Stopped with no new run to come: a scheduled fire in this chat may be over.
+        if !carry_on {
+            self.fire_settled(sid, Status::Cancelled, None);
         }
     }
 
@@ -942,6 +1000,9 @@ impl App {
         if route == Route::Workflows {
             self.reload_workflows();
         }
+        if route == Route::Schedules {
+            self.open_schedules();
+        }
     }
 
     /// Reads the newest runs again, keeping the open one open if it is still there.
@@ -1055,7 +1116,7 @@ mod tests {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![(200, "text/event-stream", STREAM)]);
         app.effort = Effort::Off;
-        app.composer = TextEdit::new("hi there");
+        app.composer.edit = TextEdit::new("hi there");
         // An agent with a team is always offered `delegate`; this one has none.
         app.roster.current_mut().unwrap().subagents.clear();
         app.send();
@@ -1131,7 +1192,7 @@ mod tests {
                 (200, "text/event-stream", STREAM),
             ],
         );
-        app.composer = TextEdit::new("hello");
+        app.composer.edit = TextEdit::new("hello");
         app.send();
         let _ = seen.recv().unwrap();
         let Message::Assistant {
@@ -1175,7 +1236,7 @@ mod tests {
     fn a_provider_with_no_saved_key_says_so_without_asking() {
         let mut app = crate::testing::samples();
         crate::testing::ready(&mut app);
-        app.composer = TextEdit::new("hello");
+        app.composer.edit = TextEdit::new("hello");
         app.send();
         let Message::Assistant {
             outcome: Outcome::Failed(why),
@@ -1248,10 +1309,9 @@ mod tests {
         assert_eq!(app.runs[0].status, Status::Cancelled);
     }
 
-    #[test]
-    fn nothing_is_sent_while_a_reply_is_still_being_written() {
-        let db = TempDb::new();
-        let (mut app, _) = app_with_server(&db, vec![]);
+    /// An app whose open chat has a reply being written (run `r`), and that chat's id.
+    fn writing(db: &TempDb) -> (App, String) {
+        let (mut app, _) = app_with_server(db, vec![]);
         let sid = app.current().unwrap().chat().id.clone();
         let run = Run {
             id: "r".into(),
@@ -1269,7 +1329,7 @@ mod tests {
             parent: None,
         };
         app.live.insert(
-            sid,
+            sid.clone(),
             Live {
                 run,
                 cancel: Arc::new(AtomicBool::new(false)),
@@ -1282,11 +1342,57 @@ mod tests {
                 thought: None,
             },
         );
+        (app, sid)
+    }
+
+    #[test]
+    fn a_message_sent_while_a_reply_is_written_waits_and_goes_when_it_ends() {
+        let db = TempDb::new();
+        let (mut app, sid) = writing(&db);
         let before = app.current().unwrap().chat().messages.len();
-        app.composer = TextEdit::new("another");
+        app.composer.edit = TextEdit::new("another");
         app.send();
-        assert_eq!(app.current().unwrap().chat().messages.len(), before);
-        assert_eq!(app.composer.text, "another", "and what was typed is kept");
+        assert_eq!(
+            app.current().unwrap().chat().messages.len(),
+            before,
+            "nothing goes yet"
+        );
+        assert!(app.composer.edit.text.is_empty());
+        app.composer.edit = TextEdit::new("and more");
+        app.send();
+        assert_eq!(
+            app.queued_here().map(|p| p.text.as_str()),
+            Some("another\n\nand more"),
+            "a second message joins the one waiting"
+        );
+
+        app.settle(&sid, "r", Ok(()));
+        assert!(app.queued.is_empty());
+        assert!(
+            app.current()
+                .unwrap()
+                .chat()
+                .messages
+                .contains(&Message::User("another\n\nand more".into()))
+        );
+    }
+
+    #[test]
+    fn stopping_the_reply_brings_the_waiting_message_back_to_the_box() {
+        let db = TempDb::new();
+        let (mut app, _) = writing(&db);
+        let before = app.current().unwrap().chat().messages.len();
+        app.composer.edit = TextEdit::new("later");
+        app.send();
+        app.stop();
+        assert_eq!(app.composer.edit.text, "later");
+        assert!(app.queued.is_empty());
+        assert!(
+            !app.current().unwrap().chat().messages[before..]
+                .iter()
+                .any(|m| matches!(m, Message::User(_))),
+            "and it was not sent"
+        );
     }
 
     #[test]
@@ -1344,7 +1450,7 @@ data: [DONE]
             ],
         );
         app.roster.current_mut().unwrap().tools = vec![crate::tools::ASK.into()];
-        app.composer = TextEdit::new("paint it");
+        app.composer.edit = TextEdit::new("paint it");
         app.send();
         let first = seen.recv().unwrap();
         assert!(
@@ -1361,10 +1467,10 @@ data: [DONE]
         assert!(tools[0].output.is_none());
         assert!(app.awaiting_answer() && !app.busy());
 
-        app.composer = TextEdit::new("anything");
+        app.composer.edit = TextEdit::new("anything");
         app.send();
         assert_eq!(
-            app.composer.text, "anything",
+            app.composer.edit.text, "anything",
             "nothing is sent until the question is answered"
         );
 
@@ -1414,7 +1520,7 @@ data: [DONE]
             ],
         );
         app.roster.current_mut().unwrap().tools = vec![crate::tools::ASK.into()];
-        app.composer = TextEdit::new("paint it");
+        app.composer.edit = TextEdit::new("paint it");
         app.send();
         let _ = seen.recv().unwrap();
         drop(app);
@@ -1455,7 +1561,7 @@ data: [DONE]
             ],
         );
         app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
-        app.composer = TextEdit::new("do it");
+        app.composer.edit = TextEdit::new("do it");
         app.send();
         let first = seen.recv().unwrap();
         assert!(first.contains("\"name\":\"shell\""), "offered the tool");
@@ -1528,7 +1634,7 @@ data: [DONE]
 
         // The agent has to be given the tool; with it, the model's call runs and is answered.
         app.roster.current_mut().unwrap().tools = vec![tool.into()];
-        app.composer = TextEdit::new("ping it");
+        app.composer.edit = TextEdit::new("ping it");
         app.send();
         let first = seen.recv().unwrap();
         assert!(
@@ -1559,7 +1665,7 @@ data: [DONE]
             ],
         );
         app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
-        app.composer = TextEdit::new("do it");
+        app.composer.edit = TextEdit::new("do it");
         app.send();
         let _ = seen.recv().unwrap();
         let second = seen.recv().unwrap();
@@ -1614,7 +1720,7 @@ data: [DONE]
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![(200, "text/event-stream", STREAM)]);
         app.roster.current_mut().unwrap().tools = vec![crate::tools::ASK.into()];
-        app.composer = TextEdit::new("hi");
+        app.composer.edit = TextEdit::new("hi");
         app.send();
         let request = seen.recv().unwrap();
         assert!(request.contains("ask_user_question") && !request.contains("\"shell\""));
@@ -1638,7 +1744,7 @@ data: [DONE]
         let agent = app.roster.current_mut().unwrap();
         agent.tools = vec![crate::tools::SHELL.into()];
         agent.workdir = Some(folder.to_string_lossy().into_owned());
-        app.composer = TextEdit::new("where am i");
+        app.composer.edit = TextEdit::new("where am i");
         app.send();
         let _ = seen.recv().unwrap();
         let second = seen.recv().unwrap();
@@ -1646,7 +1752,7 @@ data: [DONE]
         assert!(second.contains(&name), "ran in the chosen folder: {second}");
 
         std::fs::remove_dir_all(&folder).unwrap();
-        app.composer = TextEdit::new("again");
+        app.composer.edit = TextEdit::new("again");
         app.send();
         let _ = seen.recv().unwrap();
         let third = seen.recv().unwrap();
@@ -1687,7 +1793,7 @@ data: [DONE]
         let agent = app.roster.current_mut().unwrap();
         agent.tools = vec![crate::files::EDIT.into()];
         agent.workdir = Some(folder.to_string_lossy().into_owned());
-        app.composer = TextEdit::new("change it");
+        app.composer.edit = TextEdit::new("change it");
         app.send();
         let first = seen.recv().unwrap();
         assert!(first.contains("\"edit_file\""), "offered the tool");
@@ -1739,7 +1845,7 @@ data: [DONE]
         let agent = app.roster.current_mut().unwrap();
         agent.tools = vec![crate::files::WRITE.into(), crate::files::READ.into()];
         agent.workdir = Some(folder.to_string_lossy().into_owned());
-        app.composer = TextEdit::new("write it");
+        app.composer.edit = TextEdit::new("write it");
         app.send();
         let _ = seen.recv().unwrap();
         let second = seen.recv().unwrap();
@@ -1747,7 +1853,7 @@ data: [DONE]
         assert!(!outside.exists(), "nothing was written outside");
 
         app.roster.current_mut().unwrap().workdir = None;
-        app.composer = TextEdit::new("read it");
+        app.composer.edit = TextEdit::new("read it");
         app.send();
         let _ = seen.recv().unwrap();
         let fourth = seen.recv().unwrap();
@@ -1790,7 +1896,7 @@ data: [DONE]
             ],
         );
         with_team(&mut app);
-        app.composer = TextEdit::new("do the sums");
+        app.composer.edit = TextEdit::new("do the sums");
         app.send();
         let lead = seen.recv().unwrap();
         assert!(
@@ -1850,7 +1956,7 @@ data: [DONE]
             ],
         );
         with_team(&mut app);
-        app.composer = TextEdit::new("go");
+        app.composer.edit = TextEdit::new("go");
         app.send();
         seen.recv().unwrap();
         let back = seen.recv().unwrap();

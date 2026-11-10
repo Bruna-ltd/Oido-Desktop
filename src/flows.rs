@@ -38,7 +38,7 @@ pub fn trace_of(messages: &[Message]) -> (String, Vec<Trace>) {
     let mut trace = Vec::new();
     for m in &messages[start..] {
         match m {
-            Message::User(t) => request.push(t.as_str()),
+            Message::User(p) => request.push(p.text.as_str()),
             Message::Assistant { tools, .. } => {
                 for t in tools {
                     let useful =
@@ -404,8 +404,8 @@ impl App {
 
     // ---- running
 
-    /// Starts a run of `wf` as `agent_id` on a worker. `done` hears how it ended, on the UI thread.
-    /// Errs, in words, if it cannot start.
+    /// Starts a run of `wf` as `agent_id` on a worker. `done` hears how it ended, on the UI thread,
+    /// with the run as recorded. Errs, in words, if it cannot start.
     pub(crate) fn launch_flow<D>(
         &mut self,
         wf: &Saved,
@@ -416,7 +416,7 @@ impl App {
         done: D,
     ) -> Result<(), String>
     where
-        D: FnOnce(&mut App, Finish) + Send + 'static,
+        D: FnOnce(&mut App, &RunRecord, Finish) + Send + 'static,
     {
         let inputs = engine::bind_inputs(&wf.definition, given)?;
         let prep = self.prepare_flow(agent_id, &wf.definition)?;
@@ -440,15 +440,16 @@ impl App {
         self.spawn(
             move || work(&def, &inputs, &prep, &cancel),
             move |app, outcome| {
-                let finish = app.finish_flow(record, &name, &outcome);
-                done(app, finish);
+                let mut record = record;
+                let finish = app.finish_flow(&mut record, &name, &outcome);
+                done(app, &record, finish);
             },
         );
         Ok(())
     }
 
     /// Records how a run ended, and says it in words for an agent that started it.
-    fn finish_flow(&mut self, mut record: RunRecord, name: &str, o: &Outcome) -> Finish {
+    fn finish_flow(&mut self, record: &mut RunRecord, name: &str, o: &Outcome) -> Finish {
         record.steps = o.steps.clone();
         record.output = o.output.clone();
         record.input_tokens = o.usage.input;
@@ -475,7 +476,7 @@ impl App {
                 Finish::Stopped("The person stopped the workflow before it finished.".to_owned())
             }
         };
-        self.save("the workflow run", |db| db.finish_workflow_run(&record));
+        self.save("the workflow run", |db| db.finish_workflow_run(record));
         if self.route == Route::Workflows {
             self.reload_wf_runs();
         }
@@ -535,7 +536,7 @@ impl App {
             &given,
             "agent",
             cancel,
-            move |app, finish| {
+            move |app, _, finish| {
                 app.command_done(&s, &c, finish);
             },
         );
@@ -628,10 +629,17 @@ impl App {
         self.wf_jobs.insert(wf.id.clone(), Arc::clone(&cancel));
         self.wf_notice = None;
         let id = wf.id.clone();
-        let started = self.launch_flow(&wf, &wf.agent_id, &given, "you", cancel, move |app, _| {
-            app.wf_jobs.remove(&id);
-            app.reload_wf_runs();
-        });
+        let started = self.launch_flow(
+            &wf,
+            &wf.agent_id,
+            &given,
+            "you",
+            cancel,
+            move |app, _, _| {
+                app.wf_jobs.remove(&id);
+                app.reload_wf_runs();
+            },
+        );
         if let Err(why) = started {
             self.wf_jobs.remove(&wf.id);
             self.wf_notice = Some(why);
@@ -673,22 +681,8 @@ mod tests {
 
     use super::*;
     use crate::model::{Outcome, ToolCall};
-    use crate::testing::{TempDb, app_with_server};
+    use crate::testing::{EVENTS, TempDb, app_with_server, call_stream, text_stream};
     use crate::workflow::definition::Step;
-
-    /// A streamed reply that is just `text`.
-    fn text_stream(text: &str) -> &'static str {
-        let chunk = json!({"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]});
-        Box::leak(format!("data: {chunk}\n\ndata: [DONE]\n\n").into_boxed_str())
-    }
-
-    /// A streamed reply in which the model calls the tool `name`.
-    fn call_stream(name: &str, args: Value) -> &'static str {
-        let chunk = json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": name, "arguments": args.to_string()}}]}, "finish_reason": "tool_calls"}]});
-        Box::leak(format!("data: {chunk}\n\ndata: [DONE]\n\n").into_boxed_str())
-    }
-
-    const EVENTS: &str = "text/event-stream";
 
     fn tool_step(id: &str, command: &str, bind: &str) -> Step {
         Step {
@@ -779,7 +773,7 @@ mod tests {
         );
         app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
         assert!(!app.can_teach(), "nothing to learn from yet");
-        app.composer = TextEdit::new("show me hi");
+        app.composer.edit = TextEdit::new("show me hi");
         app.send();
         let _ = (seen.recv().unwrap(), seen.recv().unwrap());
         assert!(app.can_teach());
@@ -922,7 +916,7 @@ mod tests {
             vec![tool_step("s", "echo ok-from-flow", "r")],
             json!({}),
         );
-        app.composer = TextEdit::new("do the thing");
+        app.composer.edit = TextEdit::new("do the thing");
         app.send();
         assert!(seen.recv().unwrap().contains("run_workflow"));
         let second = seen.recv().unwrap();
@@ -959,7 +953,7 @@ mod tests {
         );
         app.roster.current_mut().unwrap().tools = vec![crate::tools::RUN_WORKFLOW.into()];
         save_workflow(&mut app, vec![tool_step("s", "echo x", "r")], json!({}));
-        app.composer = TextEdit::new("go");
+        app.composer.edit = TextEdit::new("go");
         app.send();
         let _ = seen.recv().unwrap();
         let second = seen.recv().unwrap();
@@ -987,7 +981,7 @@ mod tests {
             ],
         );
         assert!(!app.typesafe_connected());
-        app.composer = TextEdit::new("check it");
+        app.composer.edit = TextEdit::new("check it");
         app.send();
         let _ = seen.recv().unwrap();
         let second = seen.recv().unwrap();

@@ -15,6 +15,7 @@ const SELECTED: &str = "agents.selected";
 const DEFAULT_MODEL: &str = "models.default";
 const APPEARANCE: &str = "appearance";
 const AUTO_UPDATE: &str = "updates.auto";
+pub const RUN_SCHEDULES: &str = "schedules.run";
 
 /// What the app starts with: what the store holds, or on the very first launch the sample data
 /// (written once, so deleting all of it stays deleted).
@@ -49,6 +50,19 @@ pub fn auto_update(store: Option<&Store>) -> bool {
     db.setting::<bool>(AUTO_UPDATE)
         .unwrap_or_else(|e| {
             eprintln!("oido: could not read the update setting: {e}");
+            None
+        })
+        .unwrap_or(true)
+}
+
+/// Whether schedules run (Settings → Schedules). On unless turned off.
+pub fn run_schedules(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return true;
+    };
+    db.setting::<bool>(RUN_SCHEDULES)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the schedules setting: {e}");
             None
         })
         .unwrap_or(true)
@@ -213,6 +227,17 @@ impl App {
         };
         if let Some(a) = self.roster.current_mut() {
             a.model = model;
+        }
+        self.save_agent_row(&t);
+    }
+
+    /// Picks the current agent's working folder from the composer; `None` leaves it with none.
+    pub fn set_workdir(&mut self, folder: Option<String>) {
+        let Some(t) = self.roster.selected.clone() else {
+            return;
+        };
+        if let Some(a) = self.roster.current_mut() {
+            a.workdir = folder;
         }
         self.save_agent_row(&t);
     }

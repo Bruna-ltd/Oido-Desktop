@@ -1,5 +1,6 @@
 //! The app's settings, in sections. Appearance: Oido's own look, the desktop's Omarchy theme, or
-//! any one Omarchy theme. Updates: this version, looking for a newer one, and doing so on its own.
+//! any one Omarchy theme. Schedules: whether they run. Updates: this version, looking for a newer
+//! one, and doing so on its own.
 
 use rune::{Color, El, ScrollSpec, Tx, col, el, icon, row, text};
 use rune_kit::{
@@ -31,6 +32,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .py(24.0)
                 .gap(24.0)
                 .child(section("Appearance", vec![theme_row(s, k, layer)], k))
+                .child(section("Schedules", vec![schedules_row(s, k)], k))
                 .child(section(
                     "Updates",
                     vec![version_row(&s.updates, k), auto_update_row(&s.updates, k)],
@@ -76,6 +78,20 @@ fn auto_update_row(u: &Updates, k: &Kit) -> El {
             .hide_label()
             .disabled(!u.available())
             .on_toggle(|s: &mut App| s.set_auto_update(!s.updates.auto))
+            .build(k),
+        k,
+    )
+}
+
+fn schedules_row(s: &App, k: &Kit) -> El {
+    setting(
+        "run-schedules",
+        "Run schedules",
+        "Schedules fire on their own while Oido is open. Off, none do until you turn this on again.",
+        Switch::new(s.run_schedules)
+            .label("Run schedules")
+            .hide_label()
+            .on_toggle(|s: &mut App| s.set_run_schedules(!s.run_schedules))
             .build(k),
         k,
     )

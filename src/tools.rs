@@ -38,6 +38,7 @@ pub fn registered() -> Vec<ToolSpec> {
                 "required": ["name"]
             }),
         },
+        crate::schedule::tool::spec(),
         file_tool(
             crate::files::READ,
             "Read a text file in the working folder. Long files are cut; use `offset` (first line, from 1) and `limit` (number of lines) to read the rest in parts.",
@@ -165,6 +166,7 @@ pub fn summary(name: &str, args: &str) -> String {
             .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| args.to_owned()),
         TEACH => "Save this as a workflow".to_owned(),
+        crate::schedule::tool::NAME => crate::schedule::tool::summary(args),
         n if needs_typesafe(n) => crate::typesafe::summary(args),
         _ => args.to_owned(),
     }

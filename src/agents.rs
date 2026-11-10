@@ -338,6 +338,20 @@ impl Roster {
         })
     }
 
+    /// Which agent, or team member, holds the chat.
+    pub fn target_of(&self, session_id: &str) -> Option<Target> {
+        let holds = |a: &Agent| a.sessions.iter().any(|s| s.id == session_id);
+        self.list.iter().find_map(|a| {
+            if holds(a) {
+                return Some(Target::agent(a.id.clone()));
+            }
+            a.subagents
+                .iter()
+                .find(|m| holds(m))
+                .map(|m| Target::member(a.id.clone(), m.id.clone()))
+        })
+    }
+
     /// The agent, or team member, that holds the chat.
     pub fn owner_of_mut(&mut self, session_id: &str) -> Option<&mut Agent> {
         let holds = |a: &Agent| a.sessions.iter().any(|s| s.id == session_id);

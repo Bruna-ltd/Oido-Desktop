@@ -13,9 +13,11 @@ mod logo;
 mod mcp;
 mod model_picker;
 mod multi_picker;
+mod picture;
 mod providers;
 mod rail;
 mod runs;
+pub(crate) mod schedules;
 mod settings;
 mod sidebar;
 mod tools;
@@ -35,6 +37,12 @@ pub fn wait_for_logos(urls: &[&str]) {
     logo::wait_all(urls);
 }
 
+/// Waits for attached pictures to decode, for a headless picture of the screen.
+#[cfg(debug_assertions)]
+pub fn wait_for_pictures(images: &[&crate::prompt::Image]) {
+    picture::wait(images);
+}
+
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = s.look.kit();
     // Menus, selects and dialogs mount above everything, so each screen adds to this.
@@ -49,6 +57,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Providers => ("Providers".to_owned(), providers::screen(s, &k, &mut layer)),
         Route::Tools => ("Tools".to_owned(), tools::screen(s, &k)),
         Route::Workflows => ("Workflows".to_owned(), workflows::screen(s, &k)),
+        Route::Schedules => ("Schedules".to_owned(), schedules::screen(s, &k, &mut layer)),
         Route::Mcp => ("MCP".to_owned(), mcp::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
         Route::Soon(name) => (name.to_owned(), soon(name, &k)),

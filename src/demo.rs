@@ -219,6 +219,92 @@ pub fn demo_models(app: &mut App) {
 
 /// `--scene NAME`: the app in a state worth looking at. With no scene it opens as a new install does.
 /// A scene: its name and how it sets the app up.
+/// Sample schedules for Atlas and Scout, the first with a few fires.
+fn demo_schedules(app: &mut App) {
+    use crate::schedule::timing::{AtTime, Days};
+    use crate::schedule::{Fire, FireStatus, Schedule, Target, Timing};
+    let now = app::now();
+    let make = |id: &str, agent: &str, name: &str, prompt: &str, timing: Timing| {
+        Schedule::new(
+            agent,
+            name,
+            Target::Prompt(prompt.into()),
+            timing,
+            now,
+            &chrono::Local,
+        )
+        .map(|mut s| {
+            s.id = id.into();
+            s
+        })
+    };
+    let weekdays = Timing::at(AtTime {
+        hour: 8,
+        minute: 30,
+        days: Days::WEEKDAYS,
+    });
+    let list = [
+        weekdays.and_then(|t| {
+            make(
+                "s1",
+                "atlas",
+                "Morning briefing",
+                "Brief me on overnight news about our competitors.",
+                t,
+            )
+        }),
+        Timing::every(now - 600, 3600).and_then(|t| {
+            make(
+                "s2",
+                "scout",
+                "Inbox sweep",
+                "Sort new mail and flag anything urgent.",
+                t,
+            )
+        }),
+        Timing::cron("0 17 * * 5").and_then(|t| {
+            make(
+                "s3",
+                "forge",
+                "Weekly PR review",
+                "Review the open PRs and summarise what is blocked.",
+                t,
+            )
+        }),
+    ];
+    app.schedules = list.into_iter().filter_map(Result::ok).collect();
+    if let Some(s) = app.schedules.get_mut(1) {
+        s.enabled = false;
+    }
+    let fire = |id: &str, ago: i64, status: FireStatus, note: &str| Fire {
+        id: id.into(),
+        schedule_id: "s1".into(),
+        due_at: now - ago,
+        started_at: now - ago,
+        finished_at: Some(now - ago + 40),
+        status,
+        note: note.into(),
+        session_id: None,
+        workflow_run_id: None,
+    };
+    app.schedule_page.open = Some("s1".into());
+    app.schedule_page.fires = vec![
+        fire("f3", 3 * 3600, FireStatus::Succeeded, ""),
+        fire(
+            "f2",
+            27 * 3600,
+            FireStatus::Failed,
+            "Anthropic is limiting requests. Wait a moment and retry.",
+        ),
+        fire(
+            "f1",
+            51 * 3600,
+            FireStatus::Skipped,
+            "The previous fire was still running.",
+        ),
+    ];
+}
+
 type Scene = (&'static str, fn(&mut App));
 
 pub static SCENES: &[Scene] = &[
@@ -317,6 +403,68 @@ pub static SCENES: &[Scene] = &[
     ("forge", |s| {
         load_samples(s);
         s.roster.select(Target::agent("forge"));
+    }),
+    ("schedules", |s| {
+        load_samples(s);
+        demo_schedules(s);
+        s.route = Route::Schedules;
+    }),
+    ("schedule-form", |s| {
+        load_samples(s);
+        demo_schedules(s);
+        if let Some(x) = s.schedules.first().cloned() {
+            let source = crate::schedules::form::Source::Edit(x.id.clone());
+            s.schedule_page.form = Some(crate::schedules::form::Form::of(
+                &x,
+                source,
+                &s.workflows,
+                &chrono::Local,
+            ));
+        }
+        s.route = Route::Schedules;
+    }),
+    ("schedule-draft", |s| {
+        use crate::schedule::{Proposal, Schedule, Target as Does, Timing};
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        let timing = Timing::every(app::now(), 30 * 60);
+        let draft = timing.and_then(|t| {
+            Schedule::new(
+                "scout",
+                "Inbox sweep",
+                Does::Prompt("Sort new mail and flag anything urgent.".into()),
+                t,
+                app::now(),
+                &chrono::Local,
+            )
+        });
+        if let (Some(a), Ok(x)) = (s.roster.current_mut(), draft) {
+            let sid = a.chat().id.clone();
+            a.chat_mut().messages = vec![
+                Message::User("Check my inbox every half hour and flag anything urgent.".into()),
+                Message::Assistant {
+                    text: "I've drafted a schedule for that. It starts once you approve it.".into(),
+                    thought_secs: None,
+                    tools: vec![ToolCall {
+                        name: "schedule".into(),
+                        summary: "create: Inbox sweep".into(),
+                        output: Some("The person now sees a draft.".into()),
+                        id: "c1".into(),
+                        args: "{}".into(),
+                    }],
+                    approval: None,
+                    stats: None,
+                    run: None,
+                    outcome: Outcome::Done,
+                },
+            ];
+            s.proposals = vec![Proposal {
+                call_id: "c1".into(),
+                session_id: sid,
+                updates: false,
+                schedule: x,
+            }];
+        }
     }),
     ("runs", |s| {
         demo_runs(s);
@@ -791,6 +939,75 @@ pub static SCENES: &[Scene] = &[
         load_samples(s);
         demo_models(s);
         s.set_model(Some(ModelRef::new("anthropic", "claude-opus-4-7")));
+    }),
+    // The composer's folder pill with its browser open.
+    ("composer-folder", |s| {
+        load_samples(s);
+        demo_models(s);
+        s.set_model(Some(ModelRef::new("anthropic", "claude-opus-4-7")));
+        s.set_workdir(Some("/home".into()));
+        s.workdir_browser.show(Some(std::path::Path::new("/")));
+    }),
+    // The composer's `/` list, as it opens on a slash.
+    ("composer-commands", |s| {
+        load_samples(s);
+        demo_models(s);
+        s.set_model(Some(ModelRef::new("anthropic", "claude-opus-4-7")));
+        s.composer.edit = rune::TextEdit::new("/");
+        s.composer.edit.set_caret(1);
+        s.composer.edit.focused = true;
+    }),
+    // A draft with a mentioned file, a text file and a picture attached, and a message waiting
+    // for the reply being written.
+    ("composer-attached", |s| {
+        use crate::prompt::{Attachment, Image};
+        load_samples(s);
+        demo_models(s);
+        s.set_model(Some(ModelRef::new("anthropic", "claude-opus-4-7")));
+        let edit = &mut s.composer.edit;
+        *edit = rune::TextEdit::new("Compare ");
+        edit.set_caret(8);
+        edit.insert_pill("src/main.rs", "@src/main.rs");
+        edit.insert(" with the screenshot and the notes.");
+        edit.focused = true;
+        s.composer.attachments.push(Attachment::File {
+            name: "notes.md".into(),
+            text: "# Notes\n- one\n- two\n".into(),
+        });
+        // A picture with something in it, so the thumbnail shows it was drawn.
+        let picture = |name: &str, w: u32, h: u32| {
+            let img = image::RgbImage::from_fn(w, h, |x, y| {
+                image::Rgb([(x * 255 / w) as u8, (y * 255 / h) as u8, 180])
+            });
+            let mut png = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut png, image::ImageFormat::Png)
+                .ok()
+                .and_then(|_| Image::fit(name, png.get_ref()).ok())
+        };
+        let shot = picture("Screenshot.png", 1280, 800);
+        if let Some(img) = &shot {
+            s.composer.attachments.push(Attachment::Image(img.clone()));
+        }
+        let sid = s.roster.current_mut().map(|a| {
+            let sent = crate::prompt::Prompt {
+                text: "What changed on this page?".into(),
+                attachments: shot.iter().cloned().map(Attachment::Image).collect(),
+            };
+            a.chat_mut().messages = vec![
+                Message::User(sent),
+                Message::reply("", Some("r1".into()), Outcome::Working),
+            ];
+            a.chat().id.clone()
+        });
+        if let Some(img) = &shot {
+            crate::ui::wait_for_pictures(&[img]);
+        }
+        s.scrolled_up = true;
+        if let Some(sid) = sid {
+            s.queued
+                .insert(sid.clone(), "Then draft the announcement.".into());
+            s.live.insert(sid, crate::run::Live::demo());
+        }
     }),
     ("model-gone", |s| {
         load_samples(s);
