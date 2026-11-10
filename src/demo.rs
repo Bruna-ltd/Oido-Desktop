@@ -381,7 +381,13 @@ type Scene = (&'static str, fn(&mut App));
 const TREND: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='60'%3E%3Cpolyline fill='none' stroke='%2333aaff' stroke-width='3' points='0,50 60,40 120,44 180,20 240,10'/%3E%3C/svg%3E";
 
 /// A reply that uses what the chat draws beyond plain text.
-const RICH_REPLY: &str = r##"Churn last week, by plan:
+const RICH_REPLY: &str = r##"Churn last week, by plan. The rate is $r = \frac{c}{n}$, and over $k$ weeks it compounds:
+
+$$
+R_k = 1 - (1 - r)^k \approx k \cdot r \quad \text{for small } r
+$$
+
+The plans cost $5 and $10 a seat.
 
 | Plan | Orgs | Churned | Rate |
 |:-----|-----:|--------:|-----:|

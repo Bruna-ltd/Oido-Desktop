@@ -289,15 +289,16 @@ fn reply_style(k: &Kit) -> MarkdownStyle {
         .heading_font(4, heading(16.0, 24.0))
 }
 
-/// Reply text as Markdown: diagrams and charts drawn, links opened in the browser, pictures from
-/// the agent's folder, and web pictures once you let them load (see [`super::picture::markdown`]).
+/// Reply text as Markdown: math written out in Unicode, diagrams and charts drawn, links opened in
+/// the browser, pictures from the agent's folder, and web pictures once you let them load (see
+/// [`super::picture::markdown`]).
 fn markdown(s: &App, body: &str, style: MarkdownStyle, k: &Kit) -> Markdown {
     let folder = s
         .current()
         .map(|a| s.workdir_of(&a.chat().id))
         .unwrap_or_default();
     let kit = k.clone();
-    Markdown::new(body)
+    Markdown::new(super::math::unicode(body))
         .style(style)
         .on_link(|_: &mut App, url| crate::browser::open_link(url))
         .images(move |src| super::picture::markdown(src, &folder))

@@ -10,6 +10,7 @@ mod folder_picker;
 mod icons;
 mod inspector;
 mod logo;
+mod math;
 mod mcp;
 mod model_picker;
 mod multi_picker;
