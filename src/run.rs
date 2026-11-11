@@ -373,6 +373,10 @@ impl App {
                 &crate::mcp::specs(&self.mcp.servers),
             ),
         };
+        // A chat carried on privately from a channel can send files there.
+        if let Some(kind) = self.channels.files_go(&sid) {
+            request.tools.push(crate::channels::send_file_spec(kind));
+        }
         // Older tool results and pictures are trimmed from what is sent when it would come near the
         // model's limit; the chat keeps them. If that is not enough, the older messages are
         // summarized first, and then this goes on; if there is nothing left to summarize and it
@@ -910,14 +914,21 @@ impl App {
             self.start_delegations(sid);
             self.start_next_command(sid);
         }
+        // The turn is over (nothing more runs in the chat): a chat carried on from a channel gets
+        // what the agent wrote, before a message waiting for it goes.
+        let told = !self.busy_in(sid) && self.channel_turn_over(sid, status, failure.as_deref());
         // Your message that waited for this reply goes now, unless you stopped the reply or the
         // agent carries on.
         if status != Status::Cancelled {
             self.send_queued(sid);
         }
-        // The turn is over (nothing more runs in the chat) and you did not stop it yourself. A
-        // schedule's fire says so itself, once it ends.
-        if status != Status::Cancelled && !self.busy_in(sid) && self.firing_in(sid).is_none() {
+        // The turn is over and you did not stop it yourself. A schedule's fire says so itself,
+        // once it ends; a channel's chat was told above.
+        if !told
+            && status != Status::Cancelled
+            && !self.busy_in(sid)
+            && self.firing_in(sid).is_none()
+        {
             self.tell_finished(sid, &reply, failure.as_deref());
         }
         self.fire_settled(sid, status, failure.as_deref());
@@ -1186,6 +1197,10 @@ impl App {
         }
         if crate::mcp::is_tool(&name) {
             self.start_mcp_call(&sid, &id, &name, &args);
+            return true;
+        }
+        if name == crate::channels::SEND_FILE {
+            self.start_send_file(&sid, &id, &args);
             return true;
         }
         if name == crate::web::NAME {

@@ -331,8 +331,10 @@ impl App {
                 self.teaching.remove(sid);
                 self.save("the workflow draft", |db| db.put_draft(&draft));
                 self.drafts.insert(sid.to_owned(), draft);
+                self.channel_workflow_ready(sid, None);
             }
             Err(why) => {
+                self.channel_workflow_ready(sid, Some(&why));
                 self.teaching.insert(sid.to_owned(), Teach::Failed(why));
             }
         }
@@ -340,12 +342,16 @@ impl App {
 
     /// Saves the open chat's draft as a workflow of its agent.
     pub fn save_draft(&mut self) {
-        let Some(sid) = self.current().map(|a| a.chat().id.clone()) else {
-            return;
-        };
-        let Some(draft) = self.drafts.remove(&sid) else {
-            return;
-        };
+        if let Some(sid) = self.current().map(|a| a.chat().id.clone()) {
+            self.save_draft_in(&sid);
+        }
+    }
+
+    /// Saves chat `sid`'s draft as a workflow of its agent, under its name or, if the agent has
+    /// one called that, a numbered one. Returns the name it was saved under.
+    pub(crate) fn save_draft_in(&mut self, sid: &str) -> Option<String> {
+        let sid = sid.to_owned();
+        let draft = self.drafts.remove(&sid)?;
         let mut name = draft.name.clone();
         let mut n = 1;
         while self
@@ -369,18 +375,23 @@ impl App {
             db.delete_draft(&sid)
         });
         self.teaching.remove(&sid);
+        let name = saved.name.clone();
         self.workflows.push(saved);
         self.workflows
             .sort_by_key(|w| (w.name.to_lowercase(), w.id.clone()));
+        Some(name)
     }
 
     pub fn discard_draft(&mut self) {
-        let Some(sid) = self.current().map(|a| a.chat().id.clone()) else {
-            return;
-        };
-        self.drafts.remove(&sid);
-        self.teaching.remove(&sid);
-        self.save("the workflow draft", |db| db.delete_draft(&sid));
+        if let Some(sid) = self.current().map(|a| a.chat().id.clone()) {
+            self.discard_draft_in(&sid);
+        }
+    }
+
+    pub(crate) fn discard_draft_in(&mut self, sid: &str) {
+        self.drafts.remove(sid);
+        self.teaching.remove(sid);
+        self.save("the workflow draft", |db| db.delete_draft(sid));
     }
 
     /// The agent called `teach_workflow`: learning starts, and the agent is told it has.

@@ -29,6 +29,8 @@ pub struct Agent {
     pub workdir: Option<String>,
     /// For a team member: when its lead should hand it a task. The lead reads this to choose.
     pub description: String,
+    /// People paired on a channel (Telegram) may pick it. Only top-level agents offer it.
+    pub on_channels: bool,
     pub active: usize,
     pub sessions: Vec<Session>,
 }
@@ -48,6 +50,7 @@ impl Agent {
             subagents: Vec::new(),
             workdir: None,
             description: String::new(),
+            on_channels: false,
             active: 0,
             sessions: vec![chat("New chat", Vec::new())],
         }
@@ -189,6 +192,7 @@ pub struct Form {
     pub tools: Vec<String>,
     pub workdir: Option<String>,
     pub description: TextEdit,
+    pub on_channels: bool,
     pub folders: crate::folders::Browser,
     pub template: Option<usize>,
     pub advanced: bool,
@@ -209,6 +213,7 @@ impl Form {
             tools: Vec::new(),
             workdir: None,
             description: TextEdit::new(""),
+            on_channels: false,
             folders: crate::folders::Browser::default(),
             template: None,
             advanced: false,
@@ -471,6 +476,7 @@ impl Roster {
         form.tools = a.tools.clone();
         form.workdir = a.workdir.clone();
         form.description = TextEdit::new(a.description.clone());
+        form.on_channels = a.on_channels;
         form.advanced = !(a.skills.is_empty() && a.tools.is_empty() && a.workdir.is_none());
         form.name.focused = true;
         self.form = form;
@@ -523,6 +529,7 @@ impl Roster {
             a.tools = f.tools.clone();
             a.workdir = f.workdir.clone();
             a.description = f.description.text.trim().to_owned();
+            a.on_channels = f.on_channels;
         };
         let target = match kind {
             FormKind::NewAgent => {

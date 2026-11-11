@@ -26,6 +26,11 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-i
 zeroize = "1.9.1"
 sha2 = "0.11"
 percent-encoding = "2"
+# Replies' Markdown turned into the HTML Telegram reads (the same version rune-kit renders with).
+pulldown-cmark = { version = "0.13", default-features = false }
+# Slack's Socket Mode: a WebSocket the app opens, so Slack needs no public address. Blocking, on a
+# thread of its own like the rest; TLS through the rustls ureq already brings.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
 croner = "4"
 # The icon in the desktop bar's tray (StatusNotifierItem), on the zbus 5 and async-io the keyring already uses.

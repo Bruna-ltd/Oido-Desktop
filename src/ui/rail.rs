@@ -50,7 +50,11 @@ static CONFIGURE: [Item; 6] = [
         icon: &icons::WORKFLOWS,
         route: Route::Workflows,
     },
-    soon("Channels", &icons::CHANNELS),
+    Item {
+        label: "Channels",
+        icon: &icons::CHANNELS,
+        route: Route::Channels,
+    },
     soon("Extensions", &icons::EXTENSIONS),
     Item {
         label: "MCP",

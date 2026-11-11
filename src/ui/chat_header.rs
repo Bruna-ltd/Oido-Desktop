@@ -17,7 +17,7 @@ pub fn build(s: &App, a: &Agent, k: &Kit) -> El {
         .key("chat-header")
         .w_full()
         .child(title(s, a, k))
-        .child(tabs(a, k))
+        .child(tabs(s, a, k))
         .child(Divider::horizontal().build(k))
 }
 
@@ -120,7 +120,7 @@ fn spend(s: &App, a: &Agent, k: &Kit) -> Option<El> {
     )
 }
 
-fn tabs(a: &Agent, k: &Kit) -> El {
+fn tabs(s: &App, a: &Agent, k: &Kit) -> El {
     let many = a.sessions.len() > 1;
     row()
         .w_full()
@@ -135,6 +135,7 @@ fn tabs(a: &Agent, k: &Kit) -> El {
                 i == a.active,
                 a.status == AgentStatus::Running,
                 many,
+                s.on_channel(&t.id),
                 k,
             )
         }))
@@ -148,7 +149,15 @@ fn tabs(a: &Agent, k: &Kit) -> El {
         )
 }
 
-fn tab(i: usize, title: &str, active: bool, running: bool, closable: bool, k: &Kit) -> El {
+fn tab(
+    i: usize,
+    title: &str,
+    active: bool,
+    running: bool,
+    closable: bool,
+    on_channel: Option<crate::channels::Kind>,
+    k: &Kit,
+) -> El {
     let c = &k.c;
     let ink = if active { c.text_base } else { c.text_muted };
     let mut e = row()
@@ -166,6 +175,13 @@ fn tab(i: usize, title: &str, active: bool, running: bool, closable: bool, k: &K
         .on_press(move |s: &mut App| s.select_tab(i));
     if running && active {
         e = e.child(el().size(6.0, 6.0).radius(3.0).fill(k.c.success.icon));
+    }
+    // A chat a paired person carries on from a channel: what is written here goes to them too.
+    if let Some(kind) = on_channel {
+        e = e.child(icon(&icons::CHANNELS, 12.0).color(ink).help(format!(
+            "Carried on from {}: replies here go there too",
+            kind.title()
+        )));
     }
     e = e.child(
         text(title.to_owned())

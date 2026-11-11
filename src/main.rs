@@ -5,6 +5,7 @@ mod agent_tool;
 mod agents;
 mod app;
 mod browser;
+mod channels;
 mod command;
 mod completion;
 mod composer;

@@ -156,13 +156,14 @@ pub fn offered(chosen: &[String], typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolS
 }
 
 /// A tool that runs in the background and ends later: a command, a workflow, a page fetched from
-/// the web, a question put to TypeSafe, or a call to an MCP server.
+/// the web, a question put to TypeSafe, a call to an MCP server, or a file sent on Telegram.
 pub fn is_job(name: &str) -> bool {
     name == SHELL
         || name == RUN_WORKFLOW
         || name == crate::web::NAME
         || needs_typesafe(name)
         || crate::mcp::is_tool(name)
+        || name == crate::channels::SEND_FILE
 }
 
 /// Whether a tool waits for you (an answer, or a go-ahead) before its result exists.
@@ -175,7 +176,9 @@ pub fn summary(name: &str, args: &str) -> String {
     match name {
         ASK => question(args).text,
         SHELL => crate::command::parse(args).map_or_else(|| args.to_owned(), |s| s.command),
-        n if crate::files::is_file_tool(n) => crate::files::path_of(args),
+        n if crate::files::is_file_tool(n) || n == crate::channels::SEND_FILE => {
+            crate::files::path_of(args)
+        }
         DELEGATE => crate::delegate::summary(args),
         RUN_WORKFLOW => serde_json::from_str::<Value>(args)
             .ok()
@@ -349,7 +352,10 @@ fn first_sentence(text: &str) -> String {
 }
 
 pub fn knows(name: &str) -> bool {
-    name == DELEGATE || registered().iter().any(|t| t.name == name)
+    // `send_file` is offered only in chats carried on from Telegram; elsewhere it says so.
+    name == DELEGATE
+        || name == crate::channels::SEND_FILE
+        || registered().iter().any(|t| t.name == name)
 }
 
 /// A question as the model wrote it.

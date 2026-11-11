@@ -28,6 +28,8 @@ pub enum Route {
     Usage,
     /// MCP servers: other programs that give agents tools.
     Mcp,
+    /// Messaging apps (Telegram) through which paired people talk to agents.
+    Channels,
     /// The app's own settings: its appearance.
     Settings,
     /// The create, edit and team-member form (`Roster::editing` says which).
@@ -183,6 +185,8 @@ pub struct App {
     pub agent_draft_notice: Option<(String, String)>,
     /// The Schedules page.
     pub schedule_page: crate::schedules::Page,
+    /// The channels (Telegram): each one's bot, the people paired with it and their chats.
+    pub channels: crate::channels::Channels,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
     /// The window has the keyboard focus, so the person is looking at it: no notifications then.
@@ -320,6 +324,7 @@ impl App {
             agent_drafts: Vec::new(),
             agent_draft_notice: None,
             schedule_page: crate::schedules::Page::default(),
+            channels: crate::channels::Channels::default(),
             store,
             focused: false,
         };
@@ -329,6 +334,7 @@ impl App {
         app.load_schedules();
         app.load_prices();
         app.load_chat_usage();
+        app.load_channels();
         app
     }
 

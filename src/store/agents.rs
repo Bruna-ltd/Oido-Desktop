@@ -72,6 +72,7 @@ impl Store {
                     subagents: Vec::new(),
                     workdir: r.get(11)?,
                     description: r.get(12)?,
+                    on_channels: r.get::<_, i64>(13)? != 0,
                     active: 0,
                     sessions: Vec::new(),
                 };
@@ -131,6 +132,7 @@ impl Store {
                 a.model.as_ref().map(|m| &m.provider),
                 &a.workdir,
                 &a.description,
+                i64::from(a.on_channels),
             ))?;
         Ok(())
     }

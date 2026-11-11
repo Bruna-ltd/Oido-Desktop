@@ -2,6 +2,7 @@
 //! on the right) built from rune-kit's `SplitView`.
 
 mod agent_form;
+mod channels;
 mod chat;
 mod chat_header;
 mod composer;
@@ -68,6 +69,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Schedules => ("Schedules".to_owned(), schedules::screen(s, &k, &mut layer)),
         Route::Usage => ("Usage".to_owned(), usage::screen(s, &k)),
         Route::Mcp => ("MCP".to_owned(), mcp::screen(s, &k)),
+        Route::Channels => ("Channels".to_owned(), channels::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
         Route::Soon(name) => (name.to_owned(), soon(name, &k)),
     };

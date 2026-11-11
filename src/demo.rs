@@ -35,6 +35,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![member("fact-checker", "fact-checker", 60.0, "You check every number in a draft against its source before it goes out.")],
             workdir: None,
             description: String::new(),
+            on_channels: false,
             active: 0,
             sessions: vec![
                 chat(
@@ -108,6 +109,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![member("reviewer", "reviewer", 200.0, "You read a diff for unsafe code and missing tests, and report only what matters.")],
             workdir: None,
             description: String::new(),
+            on_channels: false,
             active: 0,
             sessions: vec![chat(
                 "Review PR 482",
@@ -152,6 +154,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![],
             workdir: None,
             description: String::new(),
+            on_channels: false,
             active: 0,
             sessions: vec![chat("New chat", vec![])],
         },
@@ -168,6 +171,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![],
             workdir: None,
             description: String::new(),
+            on_channels: false,
             active: 0,
             sessions: vec![chat("New chat", vec![])],
         },
@@ -436,6 +440,61 @@ pub static SCENES: &[Scene] = &[
             s.updates.status = crate::update::Status::Ready(v);
         }
         s.route = Route::Settings;
+    }),
+    // Telegram connected, one person asking to pair and one paired; then before connecting, a
+    // token that did not work.
+    ("channels", |s| {
+        load_samples(s);
+        let t = &mut s.channels.telegram;
+        t.bot = Some("oido_home_bot".into());
+        t.enabled = true;
+        t.status = crate::channels::Status::Listening;
+        t.pending.push(crate::channels::Pairing {
+            user: "7".into(),
+            name: "Grace Hopper".into(),
+            handle: Some("grace".into()),
+            code: "482913".into(),
+            expires: i64::MAX,
+        });
+        t.users.push(crate::channels::Paired {
+            id: "42".into(),
+            name: "Ada Lovelace".into(),
+            handle: Some("ada".into()),
+            agent: Some("atlas".into()),
+        });
+        s.route = Route::Channels;
+    }),
+    ("channels-connect", |s| {
+        s.channels.telegram_token = rune::TextEdit::new("123456:AAH-abcdefghijklmnopqrstuvw");
+        s.channels.telegram.status = crate::channels::Status::Failed(
+            "Could not connect: Telegram does not accept this token.".into(),
+        );
+        s.route = Route::Channels;
+    }),
+    // A chat Ada carries on from Telegram, open beside the agent's own.
+    ("chat-telegram", |s| {
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        if let Some(a) = s.roster.current_mut() {
+            a.sessions.push(chat(
+                "Telegram · Ada",
+                vec![
+                    Message::User("What changed in the release notes?".into()),
+                    Message::reply(
+                        "Two things need action: the API key rotation and the new rate limits.",
+                        None,
+                        Outcome::Done,
+                    ),
+                ],
+            ));
+            a.active = a.sessions.len() - 1;
+            let sid = a.chat().id.clone();
+            s.channels.telegram.chats.push(crate::channels::Binding {
+                user: "42".into(),
+                agent: "scout".into(),
+                session: sid,
+            });
+        }
     }),
     ("mcp-search", |s| {
         s.mcp.search = rune::TextEdit::new("cloud work");
