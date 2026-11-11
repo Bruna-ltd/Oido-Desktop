@@ -29,3 +29,12 @@ SELECT user_id, agent_id, session_id FROM channel_chats WHERE channel = ?1;
 -- name: UpsertChannelChat :exec
 INSERT INTO channel_chats (channel, user_id, agent_id, session_id) VALUES (?1, ?2, ?3, ?4)
 ON CONFLICT (channel, user_id, agent_id) DO UPDATE SET session_id = excluded.session_id;
+
+-- name: ListChannelAgents :many
+SELECT agent_id FROM channel_agents WHERE channel = ?1;
+
+-- name: AddChannelAgent :exec
+INSERT OR IGNORE INTO channel_agents (channel, agent_id) VALUES (?1, ?2);
+
+-- name: RemoveChannelAgent :exec
+DELETE FROM channel_agents WHERE channel = ?1 AND agent_id = ?2;

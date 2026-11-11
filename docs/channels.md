@@ -33,9 +33,10 @@ the Channels screen. Approving stores their Telegram user id (`channel_users`); 
 Unpairing is one click. A paired person can use the agent's tools on this computer, so the
 allowlist is the trust boundary.
 
-**Which agent.** Agents with **Available on channels** (agent form; top-level agents only, and
-agents cannot turn it on through the `agents` tool) can be picked. `/agent` offers them as buttons,
-`/agent <name>` picks by name or prefix; with one available it is picked automatically.
+**Which agent.** Each channel has its own agents, chosen on the Channels screen (`channel_agents`;
+agents of their own only, a team member is reached through its lead). An agent cannot add itself
+to a channel, and one an agent creates is on none. `/agent` offers a channel's agents as buttons,
+`/agent <name>` picks by name or prefix; with one chosen it is used without asking.
 
 **Chats.** Each person carries on one chat with each agent (`channel_chats`): an ordinary chat in
 the agent's list, titled "Telegram · <name>" and marked in its tab. `/new` binds a fresh one; the

@@ -35,7 +35,6 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![member("fact-checker", "fact-checker", 60.0, "You check every number in a draft against its source before it goes out.")],
             workdir: None,
             description: String::new(),
-            on_channels: false,
             active: 0,
             sessions: vec![
                 chat(
@@ -109,7 +108,6 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![member("reviewer", "reviewer", 200.0, "You read a diff for unsafe code and missing tests, and report only what matters.")],
             workdir: None,
             description: String::new(),
-            on_channels: false,
             active: 0,
             sessions: vec![chat(
                 "Review PR 482",
@@ -154,7 +152,6 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![],
             workdir: None,
             description: String::new(),
-            on_channels: false,
             active: 0,
             sessions: vec![chat("New chat", vec![])],
         },
@@ -171,7 +168,6 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![],
             workdir: None,
             description: String::new(),
-            on_channels: false,
             active: 0,
             sessions: vec![chat("New chat", vec![])],
         },
@@ -447,6 +443,7 @@ pub static SCENES: &[Scene] = &[
         load_samples(s);
         let t = &mut s.channels.telegram;
         t.bot = Some("oido_home_bot".into());
+        t.agents = vec!["atlas".into()];
         t.enabled = true;
         t.status = crate::channels::Status::Listening;
         t.pending.push(crate::channels::Pairing {

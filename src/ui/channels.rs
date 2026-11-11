@@ -1,33 +1,27 @@
 //! The Channels screen: connecting a Telegram bot and a Slack app, approving the people who ask to
 //! pair with them, and the people paired. See `src/channels`.
 
-use rune::{El, ScrollSpec, Tx, col, el, row};
+use rune::{El, ScrollSpec, Tx, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Switch, TextInput};
 
 use super::settings::{section, setting};
 use crate::app::App;
 use crate::channels::{Kind, Paired, Pairing, Status, slack};
+use crate::picker::{Item, MultiPicker};
 
 const TOKEN_WIDTH: f32 = 280.0;
 const COLUMN: f32 = 760.0;
 
-pub fn screen(s: &App, k: &Kit) -> El {
+pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &s.channels;
-    let none_available = s.channel_agents().is_empty();
     let mut page = col().w_full().max_w(COLUMN).px(24.0).py(24.0).gap(24.0);
     for kind in Kind::ALL {
         let mut rows = match kind {
             Kind::Telegram => vec![telegram_row(s, k)],
             Kind::Slack => slack_rows(s, k),
         };
-        if c.get(kind).connected() && none_available {
-            rows.push(setting(
-                &format!("{}-agents", kind.as_str()),
-                "No agent is available",
-                "Paired people pick from agents with Available on channels turned on, in the agent's settings.",
-                el(),
-                k,
-            ));
+        if c.get(kind).connected() {
+            rows.push(agents_row(s, kind, k, layer));
         }
         page = page.child(section(kind.title(), rows, k));
     }
@@ -57,6 +51,72 @@ pub fn screen(s: &App, k: &Kit) -> El {
             stick_bottom: false,
         })
         .child(page)
+}
+
+/// The agents people on `kind` may pick, chosen from the agents of their own.
+fn agents_row(s: &App, kind: Kind, k: &Kit, layer: &mut Vec<El>) -> El {
+    let chosen = s.channel_agents(kind);
+    let help = match chosen.len() {
+        0 => "None chosen yet: paired people have no agent to talk to.".to_owned(),
+        1 => "Paired people talk to it without choosing.".to_owned(),
+        _ => format!(
+            "Paired people choose among them with {}.",
+            kind.command("agent")
+        ),
+    };
+    let items = s
+        .roster
+        .list
+        .iter()
+        .map(|a| Item {
+            name: a.id.clone(),
+            label: a.name.clone(),
+            description: a.prompt.lines().next().unwrap_or_default().to_owned(),
+            group: String::new(),
+        })
+        .collect();
+    let spec =
+        |key, get: fn(&App) -> &MultiPicker, edit: fn(&mut App) -> &mut MultiPicker, toggle| {
+            super::multi_picker::Spec {
+                key,
+                title: "Agents",
+                placeholder: "Choose agents",
+                noun: ("agent", "agents"),
+                none: "No agents yet.",
+                items,
+                chosen: chosen.iter().map(|(id, _)| id.clone()).collect(),
+                get,
+                edit,
+                toggle,
+            }
+        };
+    let spec = match kind {
+        Kind::Telegram => spec(
+            "telegram-agents",
+            |s| &s.channels.telegram.picker,
+            |s| &mut s.channels.telegram.picker,
+            |s, id| s.toggle_channel_agent(Kind::Telegram, id),
+        ),
+        Kind::Slack => spec(
+            "slack-agents",
+            |s| &s.channels.slack.picker,
+            |s| &mut s.channels.slack.picker,
+            |s, id| s.toggle_channel_agent(Kind::Slack, id),
+        ),
+    };
+    // The picker under its words, full width: beside them it would squeeze them.
+    col()
+        .key(format!("setting-{}-agents", kind.as_str()))
+        .w_full()
+        .padding(16.0)
+        .gap(10.0)
+        .child(
+            col()
+                .gap(2.0)
+                .child(text("Agents").font(k.ty.ui_medium).color(k.c.text_base))
+                .child(text(help).font(k.ty.small).color(k.c.text_muted).wrap()),
+        )
+        .child(super::multi_picker::build(s, k, layer, spec))
 }
 
 fn button(label: &str) -> Button {

@@ -3,7 +3,7 @@
 
 use rune::{Color, El, ScrollSpec, TextStyle, col, row, text};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Kit, Switch, TextArea, TextInput};
+use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Kit, TextArea, TextInput};
 
 use super::model_picker::ModelPicker;
 use crate::agents::{FormKind, HUES, TEMPLATES, hue_of, initial_of};
@@ -105,7 +105,6 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             model_select(s, member, k, layer),
             k,
         ))
-        .children((!member).then(|| channels_card(s, k)))
         .child(more_options(s, k, layer));
     if let FormKind::Edit(t) = &kind {
         page = page.child(spend(s, &t.id, k));
@@ -281,45 +280,6 @@ fn templates(s: &App, k: &Kit) -> El {
         )
         .child(row().w_full().gap(8.0).child(one(0)).child(one(1)))
         .child(row().w_full().gap(8.0).child(one(2)).child(one(3)))
-}
-
-/// Whether people paired on Telegram may pick this agent. Team members are reached through
-/// their lead, so only agents of their own offer it.
-fn channels_card(s: &App, k: &Kit) -> El {
-    let on = s.roster.form.on_channels;
-    let help = if on {
-        "Paired people can pick it from Telegram and use its tools, as you can here."
-    } else {
-        "Let people you paired in Channels pick it from Telegram. They can use its tools, as you can here."
-    };
-    row()
-        .key("on-channels")
-        .w_full()
-        .padding(20.0)
-        .gap(16.0)
-        .center_y()
-        .radius(k.radius.lg)
-        .fill(k.c.layer_01)
-        .border(1.0, k.c.border_muted)
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(4.0)
-                .child(
-                    text("Available on channels")
-                        .font(k.ty.body_medium)
-                        .color(k.c.text_base),
-                )
-                .child(text(help).font(k.ty.small).color(k.c.text_muted).wrap()),
-        )
-        .child(
-            Switch::new(on)
-                .label("Available on channels")
-                .hide_label()
-                .on_toggle(|s: &mut App| s.roster.form.on_channels ^= true)
-                .build(k),
-        )
 }
 
 fn card(title: &str, description: &str, body: El, k: &Kit) -> El {

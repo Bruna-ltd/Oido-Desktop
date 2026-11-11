@@ -5,7 +5,7 @@
 //!
 //! A bot connected on the Channels screen is heard while the app runs. Only people paired with it
 //! are answered: a stranger gets a code, and you approve it on the Channels screen. A paired person
-//! talks to one agent at a time, from those switched on for channels, and carries on one chat with
+//! talks to one agent at a time, from those chosen for that channel, and carries on one chat with
 //! each: an ordinary chat in the app, marked as theirs, that `new` replaces. When a turn in such a
 //! chat is over, what the agent wrote goes back to them, whoever wrote the message it answers,
 //! there or here; no desktop notification is raised for it.
@@ -46,7 +46,7 @@ const STALE_SECS: i64 = 600;
 const MAX_PENDING: usize = 10;
 
 const OFFLINE: &str = "Oido was offline when you sent this. Send it again if you still need it.";
-const NO_AGENTS: &str = "No agent is available here yet. In Oido, open an agent's settings and turn on **Available on channels**.";
+const NO_AGENTS: &str = "No agent is available here yet. In Oido, choose agents for this channel on the **Channels** screen.";
 
 /// A messaging app agents can be reached through.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -75,7 +75,7 @@ impl Kind {
     }
 
     /// How command `name` is written there.
-    fn command(self, name: &str) -> String {
+    pub fn command(self, name: &str) -> String {
         match self {
             Kind::Telegram => format!("/{name}"),
             Kind::Slack => format!("/oido {name}"),
@@ -293,6 +293,10 @@ pub struct Channel {
     pub users: Vec<Paired>,
     pub pending: Vec<Pairing>,
     pub chats: Vec<Binding>,
+    /// The agents people here may pick, by id, chosen on the Channels screen.
+    pub agents: Vec<String>,
+    /// The Channels screen's picker for them.
+    pub picker: crate::picker::MultiPicker,
     /// Disconnecting waits for a second press.
     pub confirm_disconnect: bool,
     /// How far each chat's messages have gone back.
@@ -486,6 +490,10 @@ impl App {
             Ok(list) => c.chats = list,
             Err(e) => eprintln!("oido: could not load {what}'s chats: {e}"),
         }
+        match db.channel_agents(kind) {
+            Ok(list) => c.agents = list,
+            Err(e) => eprintln!("oido: could not load {what}'s agents: {e}"),
+        }
         match db.channel_bot(kind) {
             Ok(Some(bot)) => {
                 c.bot = Some(bot.name);
@@ -565,7 +573,7 @@ impl App {
             return;
         };
         let p = c.pending.remove(i);
-        let available = self.channel_agents();
+        let available = self.channel_agents(kind);
         let paired = Paired {
             id: p.user.clone(),
             name: p.name,
@@ -606,14 +614,30 @@ impl App {
         c.sync_allowlist();
     }
 
-    /// The agents people on channels may pick: top-level ones switched on, by id and name.
-    pub(crate) fn channel_agents(&self) -> Vec<(String, String)> {
+    /// The agents people on `kind` may pick, by id and name, in the sidebar's order. Only agents
+    /// of their own: a team member is reached through its lead.
+    pub(crate) fn channel_agents(&self, kind: Kind) -> Vec<(String, String)> {
+        let chosen = &self.channels.get(kind).agents;
         self.roster
             .list
             .iter()
-            .filter(|a| a.on_channels)
+            .filter(|a| chosen.contains(&a.id))
             .map(|a| (a.id.clone(), a.name.clone()))
             .collect()
+    }
+
+    /// Lets people on `kind` pick agent `agent`, or no longer if they could.
+    pub fn toggle_channel_agent(&mut self, kind: Kind, agent: &str) {
+        let c = self.channels.get_mut(kind);
+        let on = !c.agents.iter().any(|a| a == agent);
+        if on {
+            c.agents.push(agent.to_owned());
+        } else {
+            c.agents.retain(|a| a != agent);
+        }
+        self.save("the channel's agents", |db| {
+            db.set_channel_agent(kind, agent, on)
+        });
     }
 
     // ---- what the threads hand over
@@ -790,7 +814,7 @@ impl App {
             "agent" if arg.is_empty() => self.offer_agents(kind, user),
             "agent" => {
                 let wanted = arg.to_lowercase();
-                let agents = self.channel_agents();
+                let agents = self.channel_agents(kind);
                 let found = agents
                     .iter()
                     .find(|(_, n)| n.to_lowercase() == wanted)
@@ -880,7 +904,7 @@ impl App {
 
     /// The agents to pick from, as buttons.
     fn offer_agents(&mut self, kind: Kind, user: &str) {
-        let agents = self.channel_agents();
+        let agents = self.channel_agents(kind);
         if agents.is_empty() {
             self.channels.get_mut(kind).say(user, NO_AGENTS);
             return;
@@ -913,7 +937,7 @@ impl App {
         message: Option<(Place, String)>,
     ) {
         let note = if let Some(id) = data.strip_prefix("agent:") {
-            if self.channel_agents().iter().any(|(a, _)| a == id) {
+            if self.channel_agents(kind).iter().any(|(a, _)| a == id) {
                 let id = id.to_owned();
                 self.pick_agent(kind, user, &id);
                 None
@@ -945,7 +969,7 @@ impl App {
     /// The agent `user` talks to, by id and name: the one they picked if it is still available,
     /// else the only one there is.
     fn agent_for(&self, kind: Kind, user: &str) -> Option<(String, String)> {
-        let agents = self.channel_agents();
+        let agents = self.channel_agents(kind);
         let picked = self.channels.get(kind).user(user)?.agent.as_ref();
         picked
             .and_then(|id| agents.iter().find(|(a, _)| a == id))
@@ -1243,9 +1267,7 @@ mod tests {
         let (mut app, seen) =
             app_with_server(db, replies.into_iter().map(|r| (200, EVENTS, r)).collect());
         let open = app.current().unwrap().id.clone();
-        for a in &mut app.roster.list {
-            a.on_channels = a.id == open;
-        }
+        app.channels.telegram.agents = vec![open];
         app.channels.telegram.bot = Some("oido_bot".into());
         write(&mut app, "hello?");
         app.approve_pairing(T, ADA);
@@ -1339,7 +1361,10 @@ mod tests {
         assert!(seen.recv().unwrap().contains("hi there"));
         let sid = bound(&app);
         let agent = app.roster.owner_of(&sid).unwrap();
-        assert!(agent.on_channels);
+        assert_eq!(
+            app.channels.telegram.agents,
+            std::slice::from_ref(&agent.id)
+        );
         let chat = agent.sessions.iter().find(|s| s.id == sid).unwrap();
         assert_eq!(chat.title, "Telegram · Ada");
         assert_eq!(app.on_channel(&sid), Some(T));
@@ -1436,12 +1461,10 @@ mod tests {
     fn with_several_agents_one_is_picked_by_button_or_name_and_new_starts_fresh() {
         let db = TempDb::new();
         let (mut app, _) = paired(&db, vec![]);
-        for a in &mut app.roster.list {
-            a.on_channels = true;
-        }
+        app.channels.telegram.agents = app.roster.list.iter().map(|a| a.id.clone()).collect();
         // Paired while one agent was available, they were given it; that choice is undone.
         app.channels.telegram.users[0].agent = None;
-        let names: Vec<(String, String)> = app.channel_agents();
+        let names: Vec<(String, String)> = app.channel_agents(T);
         assert!(names.len() > 1);
         write(&mut app, "hi");
         let offered = std::mem::take(&mut app.channels.telegram.sent);
@@ -1499,9 +1522,7 @@ mod tests {
     fn an_agent_switched_off_for_channels_is_not_reached() {
         let db = TempDb::new();
         let (mut app, _) = paired(&db, vec![]);
-        for a in &mut app.roster.list {
-            a.on_channels = false;
-        }
+        app.channels.telegram.agents.clear();
         write(&mut app, "hi");
         assert_eq!(said(&mut app), vec![NO_AGENTS.to_owned()]);
         assert!(app.channels.telegram.chats.is_empty());
@@ -1669,13 +1690,16 @@ mod tests {
         assert_eq!(labels, ["Create", "Reject"]);
         press(&mut app, ADA, &texts[1].1[0].data);
         assert!(app.roster.list.iter().any(|a| a.name == "Scribe"));
+        let scribe = &app
+            .roster
+            .list
+            .iter()
+            .find(|a| a.name == "Scribe")
+            .unwrap()
+            .id;
         assert!(
-            !app.roster
-                .list
-                .iter()
-                .find(|a| a.name == "Scribe")
-                .unwrap()
-                .on_channels
+            !app.channels.telegram.agents.contains(scribe),
+            "an agent made from a channel is not put on it"
         );
         assert_eq!(said(&mut app), vec!["Done: New agent: Scribe.".to_owned()]);
     }
@@ -1905,9 +1929,7 @@ mod tests {
         let (mut app, seen) =
             app_with_server(db, replies.into_iter().map(|r| (200, EVENTS, r)).collect());
         let open = app.current().unwrap().id.clone();
-        for a in &mut app.roster.list {
-            a.on_channels = a.id == open;
-        }
+        app.channels.slack.agents = vec![open];
         app.channels.slack.bot = Some("oido in Acme".into());
         app.hear(S, slack_heard("hello?", thread(), "1.0"), now());
         app.approve_pairing(S, "U1");
@@ -2047,5 +2069,27 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn agents_are_chosen_per_channel_and_kept() {
+        let db = TempDb::new();
+        let (mut app, _) = app_with_server(&db, vec![]);
+        let (a, b) = (app.roster.list[0].id.clone(), app.roster.list[1].id.clone());
+        app.toggle_channel_agent(T, &a);
+        app.toggle_channel_agent(S, &b);
+        app.toggle_channel_agent(S, &a);
+        app.toggle_channel_agent(S, &b);
+        assert_eq!(app.channel_agents(T).len(), 1);
+        assert_eq!(
+            app.channel_agents(S)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            std::slice::from_ref(&a)
+        );
+        let back = db.open();
+        assert_eq!(back.channels.telegram.agents, std::slice::from_ref(&a));
+        assert_eq!(back.channels.slack.agents, [a]);
     }
 }

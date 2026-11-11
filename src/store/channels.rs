@@ -109,6 +109,26 @@ impl Store {
             .execute((kind.as_str(), &b.user, &b.agent, &b.session))?;
         Ok(())
     }
+
+    /// The agents people on `kind` may pick, by id.
+    pub fn channel_agents(&self, kind: Kind) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(self.sql("ListChannelAgents")?)?;
+        let rows = stmt.query_map([kind.as_str()], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Lets people on `kind` pick agent `agent`, or no longer (`on` false).
+    pub fn set_channel_agent(&self, kind: Kind, agent: &str, on: bool) -> Result<()> {
+        let name = if on {
+            "AddChannelAgent"
+        } else {
+            "RemoveChannelAgent"
+        };
+        self.conn
+            .prepare_cached(self.sql(name)?)?
+            .execute((kind.as_str(), agent))?;
+        Ok(())
+    }
 }
 
 /// What a sealed token is bound to, so it cannot be moved to another row.
@@ -231,5 +251,30 @@ mod tests {
             0,
             "unpairing still ends the binding"
         );
+    }
+
+    #[test]
+    fn agents_switched_on_for_channels_are_chosen_on_each_channel_with_a_bot() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in &super::super::MIGRATIONS[..16] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO agents (id, name, on_channels) VALUES ('a', 'Atlas', 1), ('b', 'Bea', 0);
+             INSERT INTO agents (id, parent_id, name, on_channels) VALUES ('m', 'a', 'Member', 1);
+             INSERT INTO channel_bots (channel, token_enc, name) VALUES ('telegram', x'00', 'bot');",
+        )
+        .unwrap();
+        conn.execute_batch(super::super::MIGRATIONS[16]).unwrap();
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT channel, agent_id FROM channel_agents")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, [("telegram".to_owned(), "a".to_owned())]);
     }
 }
