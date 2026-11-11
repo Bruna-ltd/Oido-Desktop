@@ -275,7 +275,7 @@ impl App {
         self.wf_jobs.insert(wf.id.clone(), Arc::clone(&cancel));
         let (schedule_id, chat_id, job) = (s.id.clone(), sid.to_owned(), wf.id.clone());
         let started_by = format!("schedule: {}", s.name);
-        let started = self.launch_flow(&wf, &s.agent_id, inputs, &started_by, cancel, {
+        let started = self.launch_flow(&wf, &s.agent_id, inputs, &started_by, None, cancel, {
             move |app, record, finish| {
                 app.wf_jobs.remove(&job);
                 let (crate::command::Finish::Done(text) | crate::command::Finish::Stopped(text)) =

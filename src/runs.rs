@@ -136,6 +136,9 @@ pub enum StepKind {
     Llm,
     /// A tool the model called: its arguments, and what it gave back. Its name is the tool's.
     Tool,
+    /// A guardrail at work: secrets hidden from the model, or a tool call refused or held. Its
+    /// name says which.
+    Guard,
     Error,
 }
 
@@ -149,6 +152,7 @@ impl StepKind {
             Self::User => "user",
             Self::Llm => "llm",
             Self::Tool => "tool",
+            Self::Guard => "guard",
             Self::Error => "error",
         }
     }
@@ -161,6 +165,7 @@ impl StepKind {
             "tools" => Self::Tools,
             "user" => Self::User,
             "tool" => Self::Tool,
+            "guard" => Self::Guard,
             "error" => Self::Error,
             _ => Self::Llm,
         }
@@ -175,6 +180,7 @@ impl StepKind {
             Self::User => "USER",
             Self::Llm => "LLM",
             Self::Tool => "TOOL",
+            Self::Guard => "GUARD",
             Self::Error => "ERROR",
         }
     }
@@ -370,6 +376,10 @@ pub struct Trace {
     began: Instant,
     seq: u32,
     pending: Vec<Pending>,
+    /// How many secrets the run has said it hid from the model, so each is said once.
+    hidden: usize,
+    /// Whether the run has said outside text was in view.
+    outside: bool,
 }
 
 fn ms(d: Duration) -> u32 {
@@ -383,6 +393,8 @@ impl Trace {
             began: Instant::now(),
             seq: 0,
             pending: Vec::new(),
+            hidden: 0,
+            outside: false,
         }
     }
 
@@ -404,6 +416,41 @@ impl Trace {
         let (text, cut) = clip(text, INPUT_LIMIT);
         (s.output, s.truncated) = (Some(text), cut);
         s
+    }
+
+    /// A guardrail at work, named for what it did.
+    pub fn guard(&mut self, name: &str, text: &str) -> Step {
+        self.note(StepKind::Guard, name, text)
+    }
+
+    /// The model call about to go hides `count` secrets, of the kinds `what` names: a step saying
+    /// so when that is more than the run has said already.
+    pub fn hid(&mut self, count: usize, what: &str) -> Option<Step> {
+        if count <= self.hidden {
+            return None;
+        }
+        self.hidden = count;
+        let name = match count {
+            1 => "1 secret hidden from the model".to_owned(),
+            n => format!("{n} secrets hidden from the model"),
+        };
+        Some(self.guard(
+            &name,
+            &format!("Replaced with placeholders before sending: {what}. The model never sees them; tools get them back on this computer."),
+        ))
+    }
+
+    /// What the model is about to be sent holds outside text (`what`, in words): a step saying so,
+    /// once a run.
+    pub fn outside(&mut self, what: &str) -> Option<Step> {
+        if self.outside {
+            return None;
+        }
+        self.outside = true;
+        Some(self.guard(
+            "Outside text in view",
+            &format!("What the model is sent holds {what}, which could be steering it. While it does, its calls that run, change or send something wait for your go-ahead."),
+        ))
     }
 
     /// The run's time and end move on to now.
@@ -564,6 +611,8 @@ mod tests {
             output: output.map(str::to_owned),
             id: id.into(),
             args: r#"{"path":"a.txt"}"#.into(),
+            trip: None,
+            outside: None,
         }
     }
 

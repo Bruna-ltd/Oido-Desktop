@@ -1,7 +1,7 @@
 //! Running a command for the shell tool. This is the only place the app starts a process on the
-//! model's say-so. There is no approval step: a command runs as soon as an agent that was given
-//! the shell tool asks (see [`crate::run`]), so the limits below, and which agents have the tool,
-//! are the only controls.
+//! model's say-so. A command runs as soon as an agent asks, unless a guardrail refuses it or holds
+//! it for the person's go-ahead first (see [`crate::guard`]); the limits below apply to every one
+//! that runs.
 //!
 //! A command runs through `sh -c` in its own process group, with no input, under a time limit.
 //! Its output is read as it comes and cut at a limit, so a noisy command can neither fill the pipe

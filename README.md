@@ -9,7 +9,7 @@ providers and settings in a local SQLite database, and talks to model providers 
 ```
 cargo run                      # opens the window
 cargo watch -x run             # restarts on save (cargo install cargo-watch)
-cargo run -- --snap out.png --scene providers --size 1280x900   # a headless render (debug builds; --scene NAME shows sample data)
+OIDO_DB=:memory: cargo run -- --snap out.png --scene providers --size 1280x900   # a headless render (debug builds; --scene NAME shows sample data; without OIDO_DB it opens, and migrates, your own database)
 ```
 
 Closing the window leaves Oido in the bar's tray (schedules keep firing, connected Telegram and Slack bots keep answering; see `docs/channels.md`); click the icon to bring it
@@ -52,6 +52,7 @@ the user cannot write to (a package manager's) reports why it cannot.
 | Runs | each message you send is a run, lasting until the agent stops or waits on you: its setup (the brief, each skill, the context, the tools offered), then every model call (messages sent, reply, thinking, tokens, time to first token) and every tool call (arguments, result, time), drawn on a timeline on the Runs screen. Kept 30 days, then deleted at startup; chats are never touched. Keys are never recorded |
 | Usage | every model call is added to daily totals (by model, agent and source) and to its chat's total as it is recorded; kept after runs expire, until cleared in Settings. Cost is estimated when shown, from [models.dev](https://models.dev) prices (fetched at most daily, kept in the database) or a price you set on the Usage screen. See `docs/usage.md` |
 | Channels | a Telegram bot's token and a Slack app's tokens sealed like provider keys; the people paired with it and the chat each carries on with each agent. See `docs/channels.md` |
+| Guardrails | which packs are on and how long a go-ahead waits (Guardrails screen, settings); whether an agent's folder (agent form) and a paired person (Channels) count as yours. A tool call a rule refused or held keeps its trip in the chat, and a result that is outside text says so. Secrets are hidden from models and kept as they are in chats. See `docs/guardrails.md` |
 | Workflows | saved in the database with the agent that learned them (deleted with it); drafts wait in their chat; runs are kept 30 days |
 | Model lists | fetched from each provider when it is connected, saved in the database, refreshed when stale |
 

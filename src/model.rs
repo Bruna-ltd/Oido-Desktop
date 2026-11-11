@@ -24,11 +24,19 @@ pub struct ToolCall {
     pub summary: String,
     /// What came back. `None` while it is still waiting (for a question, for your answer).
     pub output: Option<String>,
-    /// The model's id for the call and its arguments as written; empty on the sample data.
+    /// The model's id for the call and its arguments as written, with any value hidden from the
+    /// model put back; empty on the sample data.
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub args: String,
+    /// The guardrail it tripped, if any: refused, or held for your go-ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trip: Option<crate::guard::Trip>,
+    /// What its result is, in words, when it is outside text (a web page, an MCP tool's result):
+    /// while that is in what the model is sent, its calls that act wait (see `guard::taint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outside: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -78,6 +86,9 @@ pub enum Message {
     Summary {
         text: String,
         keeps: usize,
+        /// What outside text it was written from, if any: it carries that on (see `guard::taint`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outside: Option<String>,
     },
     Assistant {
         text: String,

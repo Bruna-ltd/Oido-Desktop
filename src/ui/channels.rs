@@ -349,15 +349,31 @@ fn paired_row(s: &App, kind: Kind, p: &Paired, k: &Kit) -> El {
             || "No agent picked yet".to_owned(),
             |a| format!("Talks to {}", a.name),
         );
-    let id = p.id.clone();
+    let (id, trust_id, trusted) = (p.id.clone(), p.id.clone(), p.trusted);
+    let trust = if trusted {
+        "Trusted: their messages count as yours."
+    } else {
+        "Not trusted: while their messages are in front of the agent, it asks you before it acts."
+    };
     setting(
         &format!("paired-{}-{}", kind.as_str(), p.id),
         &who(&p.name, p.handle.as_deref()),
-        &format!("On {}. {agent}.", kind.title()),
-        button("Unpair")
-            .variant(ButtonVariant::Outline)
-            .on_press(move |s: &mut App| s.unpair(kind, &id))
-            .build(k),
+        &format!("On {}. {agent}. {trust}", kind.title()),
+        row()
+            .gap(12.0)
+            .center_y()
+            .child(
+                rune_kit::Switch::new(trusted)
+                    .label("Trusted")
+                    .on_toggle(move |s: &mut App| s.set_person_trusted(kind, &trust_id, !trusted))
+                    .build(k),
+            )
+            .child(
+                button("Unpair")
+                    .variant(ButtonVariant::Outline)
+                    .on_press(move |s: &mut App| s.unpair(kind, &id))
+                    .build(k),
+            ),
         k,
     )
 }

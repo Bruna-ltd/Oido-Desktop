@@ -8,6 +8,7 @@ mod chat_header;
 mod composer;
 mod flow;
 mod folder_picker;
+mod guard;
 mod icons;
 mod inspector;
 mod logo;
@@ -70,6 +71,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Usage => ("Usage".to_owned(), usage::screen(s, &k)),
         Route::Mcp => ("MCP".to_owned(), mcp::screen(s, &k)),
         Route::Channels => ("Channels".to_owned(), channels::screen(s, &k, &mut layer)),
+        Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
         Route::Soon(name) => (name.to_owned(), soon(name, &k)),
     };

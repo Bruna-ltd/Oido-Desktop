@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::guard::Guarded;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Api {
     /// `POST {base}/chat/completions`, server-sent events of `choices[0].delta`.
@@ -301,14 +303,15 @@ const WHOLE_STREAM: Duration = Duration::from_secs(600);
 
 /// Streams the reply to `emit`. Blocks on the network, so call it from a worker thread. `cancel` is
 /// checked between lines; a stream that is silent cannot be interrupted until it speaks or times out.
+/// Only a request that has been through the guard can be sent (see [`crate::guard`]).
 pub fn run(
     ep: &Endpoint,
     key: Option<&str>,
-    req: &Request,
+    req: &Guarded,
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(Event),
 ) -> Result<(), Error> {
-    let (url, headers, body) = prepare(ep, key, req);
+    let (url, headers, body) = prepare(ep, key, req.request());
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_response(Some(FIRST_BYTE))
@@ -345,7 +348,7 @@ pub struct Completion {
 pub fn complete(
     ep: &Endpoint,
     key: Option<&str>,
-    req: &Request,
+    req: &Guarded,
     cancel: &AtomicBool,
 ) -> Result<Completion, Error> {
     let mut done = Completion::default();

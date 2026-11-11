@@ -249,6 +249,9 @@ pub struct Paired {
     pub handle: Option<String>,
     /// The agent their next message goes to.
     pub agent: Option<String>,
+    /// Whether their messages count as yours. Off (as it starts), they are outside text: while one
+    /// is in what the agent sees, its calls that act wait for your go-ahead.
+    pub trusted: bool,
 }
 
 /// The chat a paired person carries on with an agent.
@@ -386,7 +389,9 @@ impl Channel {
         self.status = Status::Connecting;
         self.creds = Some(creds.clone());
         self.sync_allowlist();
-        if let Some(app) = crate::app::handle() {
+        // A headless render (`--snap`) only draws: it must not answer, or take a linked session
+        // over from the app that is running.
+        if let Some(app) = crate::app::handle().filter(|_| !rune::is_headless()) {
             let allowlist = Arc::clone(&self.allowlist);
             self.link = Some(match creds {
                 Creds::Telegram(token) => {
@@ -582,6 +587,7 @@ impl App {
                 [(id, _)] => Some(id.clone()),
                 _ => None,
             },
+            trusted: false,
         };
         self.save("the paired person", |db| {
             db.save_channel_user(kind, &paired)
@@ -1078,6 +1084,10 @@ impl App {
         if self.busy_in(&sid) || self.awaiting_in(&sid) {
             let waits = if self.busy_in(&sid) {
                 format!("{name} is still working. This goes next.")
+            } else if self.holding_in(&sid) {
+                format!(
+                    "{name} waits for approval on the computer running Oido. This goes after it."
+                )
             } else {
                 format!("{name} waits for your answer first. This goes after it.")
             };
@@ -1131,21 +1141,51 @@ impl App {
             .copied()
             .unwrap_or(after_you)
             .min(messages.len());
+        // A secret goes back only to whoever sent it in this chat; any other stays the
+        // placeholder the model saw.
+        let system = self.roster.owner_of(sid).map(|a| {
+            let (brief, skills) = self.brief_of(a);
+            crate::skills::system(&brief, &skills)
+        });
+        let hidden = self.guard.chat_hidden(system.as_deref(), messages);
+        let theirs: Vec<String> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(p) => Some(p.for_model()),
+                _ => None,
+            })
+            .collect();
+        let private = |text: &str| {
+            self.guard
+                .for_channel(text, &hidden, theirs.iter().map(String::as_str))
+        };
         let mut said: Vec<String> = Vec::new();
         for m in &messages[from..] {
             if let Message::Assistant { text, .. } = m
                 && !text.trim().is_empty()
             {
-                said.push(text.trim().to_owned());
+                said.push(private(text.trim()));
             }
         }
         let asked = messages.last().and_then(|m| match m {
             Message::Assistant { tools, .. } => tools
                 .iter()
                 .find(|t| t.name == crate::tools::ASK && t.output.is_none())
-                .map(|t| (t.id.clone(), crate::tools::question(&t.args))),
+                .map(|t| {
+                    let mut q = crate::tools::question(&t.args);
+                    q.text = private(&q.text);
+                    q.options = q.options.iter().map(|o| private(o)).collect();
+                    (t.id.clone(), q)
+                }),
             _ => None,
         });
+        // Something it asked to do waits for the owner's go-ahead, which is given in Oido only.
+        if self.holding_in(sid) {
+            said.push(
+                "⏳ Something it wants to do needs approval on the computer running Oido first. It carries on once that is decided."
+                    .to_owned(),
+            );
+        }
         let len = messages.len();
         // Told already (a turn can end twice when the run it started ended first): nothing new.
         if from == len && failure.is_none() && status != RunStatus::Cancelled {
@@ -1192,6 +1232,26 @@ impl App {
     /// The channel chat `sid` is carried on from, if any, for the mark beside its name.
     pub fn on_channel(&self, sid: &str) -> Option<Kind> {
         self.channels.kind_of(sid)
+    }
+
+    /// When chat `sid` is carried on by a paired person you have not marked trusted, what their
+    /// messages are in words ("messages from Ada on Telegram"): outside text (see `guard::taint`).
+    pub(crate) fn outside_person(&self, sid: &str) -> Option<String> {
+        let kind = self.channels.kind_of(sid)?;
+        let channel = self.channels.get(kind);
+        let person = channel.user_of(sid).and_then(|id| channel.user(&id))?;
+        (!person.trusted).then(|| format!("messages from {} on {}", person.name, kind.title()))
+    }
+
+    /// Marks paired person `user` trusted or not: whether their messages count as yours.
+    pub fn set_person_trusted(&mut self, kind: Kind, user: &str, trusted: bool) {
+        let c = self.channels.get_mut(kind);
+        let Some(p) = c.users.iter_mut().find(|u| u.id == user) else {
+            return;
+        };
+        p.trusted = trusted;
+        let p = p.clone();
+        self.save("the paired person", |db| db.save_channel_user(kind, &p));
     }
 }
 #[cfg(test)]
@@ -1388,6 +1448,64 @@ mod tests {
             back.on_channel(&sid),
             Some(T),
             "the chat is still theirs after a restart"
+        );
+    }
+
+    #[test]
+    fn a_person_not_trusted_cannot_make_an_agent_act_without_the_owners_go_ahead() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(crate::tools::SHELL, json!({"command": "echo hi"})),
+                text_stream("Done."),
+            ],
+        );
+        write(&mut app, "run echo hi");
+        let sent = seen.recv().unwrap();
+        assert!(sent.contains("run echo hi"), "{sent}");
+        let sid = bound(&app);
+        assert!(app.holding_in(&sid), "held for the owner");
+        let told = said(&mut app).join("\n");
+        assert!(
+            told.contains("needs approval on the computer running Oido"),
+            "{told}"
+        );
+        app.go(crate::app::Route::Runs);
+        assert!(
+            app.steps.iter().any(|s| s.name == "Outside text in view"
+                && s.output
+                    .as_deref()
+                    .is_some_and(|o| o.contains("messages from Ada on Telegram"))),
+            "the run says why"
+        );
+
+        // Marked trusted, the next ask runs at once.
+        app.set_person_trusted(T, ADA, true);
+        assert!(db.open().channels.telegram.users[0].trusted, "saved");
+    }
+
+    #[test]
+    fn a_channel_person_gets_back_their_own_secret_and_no_other() {
+        const KEY: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123";
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![text_stream(
+                "Saved <<SECRET_1>>. The deploy token is ghp_abcdefghijklmnopqrstuvwxyz0123456789.",
+            )],
+        );
+        write(&mut app, &format!("keep my key {KEY}"));
+        let sent = seen.recv().unwrap();
+        assert!(
+            !sent.contains(KEY) && sent.contains("<<secret_1>>"),
+            "{sent}"
+        );
+        let told = said(&mut app).join("\n");
+        assert!(told.contains(&format!("Saved {KEY}.")), "their own: {told}");
+        assert!(
+            !told.contains("ghp_") && told.contains("<<SECRET_2>>"),
+            "not another: {told}"
         );
     }
 
@@ -1647,6 +1765,7 @@ mod tests {
             name: "Eve".into(),
             handle: None,
             agent: None,
+            trusted: false,
         });
         press(&mut app, "7", &buttons[0].data);
         assert_eq!(note(&app).as_deref(), Some("This button no longer works."));
@@ -1861,6 +1980,8 @@ mod tests {
         app.channels.telegram.creds =
             telegram::Token::parse("123:AAHabcdefghijklmnopqrstuvw").map(Creds::Telegram);
         let dir = folder_with("report.txt", "quarterly numbers");
+        // Trusted, so sending is not held for the owner's go-ahead (see the next test).
+        app.set_person_trusted(T, ADA, true);
         write(&mut app, "hi");
         let sid = bound(&app);
         app.roster.owner_of_mut(&sid).unwrap().workdir = Some(dir.display().to_string());

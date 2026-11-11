@@ -37,6 +37,8 @@ croner = "4"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 # Desktop notifications (org.freedesktop.Notifications): the same zbus the tray and keyring run on.
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+# Guardrails: the patterns that find secrets and risky commands before they reach a model or run.
+regex = "1.13"
 
 # Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with one change, a
 # mouse wheel notch scrolls 100 points instead of 40. Drop this section when upstream lets the app

@@ -73,6 +73,10 @@ pub(crate) struct Prep {
     pub workdir: Option<PathBuf>,
     /// Where commands run: that folder, or home.
     pub shell_dir: PathBuf,
+    /// The guardrails on when it started.
+    pub guard: crate::guard::Guard,
+    /// Who a call a rule questions is put to, since nobody watches the work.
+    pub asker: crate::guard::ask::Asker,
 }
 
 fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Completion, String> {
@@ -84,18 +88,48 @@ fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Com
         think: None,
         tools: Vec::new(),
     };
+    let mut hidden = crate::guard::Hidden::default();
+    let request = p.guard.request(request, &mut hidden);
     completion::complete(
         &p.endpoint,
         p.key.as_deref().map(String::as_str),
         &request,
         cancel,
     )
+    .map(|mut c| {
+        // The step's output stays on this computer, so it carries the real values.
+        c.text = hidden.reveal(&c.text);
+        c
+    })
     .map_err(|e| e.describe(&p.who))
 }
 
 /// Runs the workflow's steps with real tools and a real model. Blocks.
-fn work(def: &Definition, inputs: &Value, p: &Prep, cancel: &AtomicBool) -> Outcome {
+fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> Outcome {
+    let cancel: &AtomicBool = stop;
+    let place = crate::guard::Place {
+        root: p.shell_dir.clone(),
+        home: dirs::home_dir(),
+    };
     let tool = |name: &str, args: &Value| -> ToolOutcome {
+        // A step is one you saved, not one a model chose, so outside text does not hold it.
+        let (_, found) = p.guard.review(
+            &crate::guard::Hidden::default(),
+            name,
+            &args.to_string(),
+            &place,
+            None,
+        );
+        if let Some(f) = found {
+            let (_, refused) =
+                crate::guard::unattended(&p.asker, name, &args.to_string(), &f, stop);
+            if let Some(told) = refused {
+                return ToolOutcome {
+                    value: Value::Null,
+                    error: Some(told),
+                };
+            }
+        }
         if name == crate::tools::SHELL {
             let Some(spec) = command::parse(&args.to_string()) else {
                 return ToolOutcome {
@@ -208,6 +242,8 @@ impl App {
                 .or_else(dirs::home_dir)
                 .unwrap_or_else(|| ".".into()),
             workdir,
+            guard: self.guard.clone(),
+            asker: crate::guard::ask::Asker::nobody(),
         })
     }
 
@@ -423,12 +459,19 @@ impl App {
 
     /// Starts a run of `wf` as `agent_id` on a worker. `done` hears how it ended, on the UI thread,
     /// with the run as recorded. Errs, in words, if it cannot start.
+    /// Runs workflow `wf` in the background. A step a rule questions waits for your go-ahead on a
+    /// card in `chat`, the chat whose agent ran it, or on the workflow's page.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each caller says who started it, where it asks and what follows"
+    )]
     pub(crate) fn launch_flow<D>(
         &mut self,
         wf: &Saved,
         agent_id: &str,
         given: &Map<String, Value>,
         started_by: &str,
+        chat: Option<&str>,
         cancel: Arc<AtomicBool>,
         done: D,
     ) -> Result<(), String>
@@ -436,7 +479,14 @@ impl App {
         D: FnOnce(&mut App, &RunRecord, Finish) + Send + 'static,
     {
         let inputs = engine::bind_inputs(&wf.definition, given)?;
-        let prep = self.prepare_flow(agent_id, &wf.definition)?;
+        let at = match chat {
+            Some(sid) => crate::guard::ask::Where::Chat(sid.to_owned()),
+            None => crate::guard::ask::Where::Workflow(wf.id.clone()),
+        };
+        let prep = Prep {
+            asker: self.asker(at, &wf.name),
+            ..self.prepare_flow(agent_id, &wf.definition)?
+        };
         let record = RunRecord {
             id: new_id(),
             workflow_id: wf.id.clone(),
@@ -584,6 +634,7 @@ impl App {
             &agent_id,
             &given,
             "agent",
+            Some(sid),
             cancel,
             move |app, _, finish| {
                 app.command_done(&s, &c, finish);
@@ -683,6 +734,7 @@ impl App {
             &wf.agent_id,
             &given,
             "you",
+            None,
             cancel,
             move |app, _, _| {
                 app.wf_jobs.remove(&id);
@@ -770,6 +822,8 @@ mod tests {
             output: out.map(str::to_owned),
             id: id.into(),
             args: "{}".into(),
+            trip: None,
+            outside: None,
         };
         let reply = |tools| Message::Assistant {
             text: String::new(),

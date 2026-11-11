@@ -30,6 +30,8 @@ pub enum Route {
     Mcp,
     /// Messaging apps (Telegram) through which paired people talk to agents.
     Channels,
+    /// The checks made before anything reaches a model or an agent's action runs.
+    Guardrails,
     /// The app's own settings: its appearance.
     Settings,
     /// The create, edit and team-member form (`Roster::editing` says which).
@@ -187,6 +189,13 @@ pub struct App {
     pub schedule_page: crate::schedules::Page,
     /// The channels (Telegram): each one's bot, the people paired with it and their chats.
     pub channels: crate::channels::Channels,
+    /// The guardrails on: what is hidden from models and which tool calls wait for you.
+    pub guard: crate::guard::Guard,
+    /// Chats whose last model call had outside text in it, with what it was in words (see
+    /// `guard::taint`): while it is there, calls that act wait for you.
+    pub tainted: std::collections::HashMap<String, String>,
+    /// Calls from work nobody is watching (team members, workflows) waiting for your go-ahead.
+    pub waiting: Vec<crate::guard::ask::Waiting>,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
     /// The window has the keyboard focus, so the person is looking at it: no notifications then.
@@ -325,6 +334,9 @@ impl App {
             agent_draft_notice: None,
             schedule_page: crate::schedules::Page::default(),
             channels: crate::channels::Channels::default(),
+            guard: crate::guard::Guard::load(store.as_ref()),
+            tainted: std::collections::HashMap::new(),
+            waiting: Vec::new(),
             store,
             focused: false,
         };

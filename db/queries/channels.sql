@@ -13,12 +13,12 @@ UPDATE channel_bots SET enabled = ?2 WHERE channel = ?1;
 DELETE FROM channel_bots WHERE channel = ?1;
 
 -- name: ListChannelUsers :many
-SELECT user_id, name, handle, agent_id FROM channel_users WHERE channel = ?1 ORDER BY paired_at, user_id;
+SELECT user_id, name, handle, agent_id, trusted FROM channel_users WHERE channel = ?1 ORDER BY paired_at, user_id;
 
 -- name: UpsertChannelUser :exec
-INSERT INTO channel_users (channel, user_id, name, handle, agent_id) VALUES (?1, ?2, ?3, ?4, ?5)
+INSERT INTO channel_users (channel, user_id, name, handle, agent_id, trusted) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT (channel, user_id) DO UPDATE SET
-    name = excluded.name, handle = excluded.handle, agent_id = excluded.agent_id;
+    name = excluded.name, handle = excluded.handle, agent_id = excluded.agent_id, trusted = excluded.trusted;
 
 -- name: DeleteChannelUser :exec
 DELETE FROM channel_users WHERE channel = ?1 AND user_id = ?2;

@@ -257,6 +257,11 @@ fn detail(s: &App, k: &Kit) -> El {
         )
     };
     out = out.child(actions);
+    out = out.children(super::guard::waiting(
+        s,
+        &crate::guard::ask::Where::Workflow(w.id.clone()),
+        k,
+    ));
     if let Some(why) = &s.wf_notice {
         out = out.child(
             text(why.clone())

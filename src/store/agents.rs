@@ -71,6 +71,7 @@ impl Store {
                     tools: Vec::new(),
                     subagents: Vec::new(),
                     workdir: r.get(11)?,
+                    trust_workdir: r.get::<_, i64>(13)? != 0,
                     description: r.get(12)?,
                     active: 0,
                     sessions: Vec::new(),
@@ -131,6 +132,7 @@ impl Store {
                 a.model.as_ref().map(|m| &m.provider),
                 &a.workdir,
                 &a.description,
+                i64::from(a.trust_workdir),
             ))?;
         Ok(())
     }
@@ -243,9 +245,14 @@ mod tests {
         let (mut a, mut b) = (Agent::blank("a".into()), Agent::blank("b".into()));
         (a.name, b.name) = ("A".into(), "B".into());
         a.workdir = Some("/srv/project".into());
+        a.trust_workdir = false;
         db.save_roster(&[a, b]).unwrap();
         let loaded = db.load_agents().unwrap();
         assert_eq!(loaded[0].workdir.as_deref(), Some("/srv/project"));
         assert_eq!(loaded[1].workdir, None);
+        assert!(
+            !loaded[0].trust_workdir && loaded[1].trust_workdir,
+            "trusted unless turned off"
+        );
     }
 }

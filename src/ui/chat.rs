@@ -90,6 +90,11 @@ fn transcript(s: &App, agent: &Agent, k: &Kit) -> El {
             .children(schedule_drafts(s, &agent.chat().id, k))
             .children(mcp_drafts(s, &agent.chat().id, k))
             .children(agent_drafts(s, &agent.chat().id, k))
+            .children(super::guard::waiting(
+                s,
+                &crate::guard::ask::Where::Chat(agent.chat().id.clone()),
+                k,
+            ))
     };
     col()
         .key("transcript")
@@ -489,19 +494,30 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
             }
         }
     }
+    // Calls held for your go-ahead wait, all of them, until it is given.
+    let held = r.tools.iter().any(|t| {
+        t.output.is_none()
+            && t.trip
+                .as_ref()
+                .is_some_and(|t| t.state == crate::guard::TripState::Asking)
+    });
+    // A guardrail's card goes right under the call it stopped.
+    let sid = s.current().map(|a| a.chat().id.clone()).unwrap_or_default();
+    let tripped = |j: usize, t: &ToolCall| super::guard::trip(s, &sid, t, j, k);
     // Other tools show what they did before the reply; a question comes after it, as its end.
     out = out.children(
         r.tools
             .iter()
             .enumerate()
             .filter(|(_, t)| !crate::tools::needs_you(&t.name))
-            .map(|(j, t)| {
-                let writing = *r.outcome == Outcome::Working;
-                if t.name == crate::tools::DELEGATE {
+            .flat_map(|(j, t)| {
+                let writing = *r.outcome == Outcome::Working || held;
+                let shown = if t.name == crate::tools::DELEGATE {
                     super::flow::delegation(s, t, writing, j, k)
                 } else {
                     tool(t, writing, j, k)
-                }
+                };
+                std::iter::once(shown).chain(tripped(j, t))
             }),
     );
     if *r.outcome == Outcome::Working && r.body.is_empty() && r.thinking.is_empty() {
@@ -527,12 +543,13 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
             .iter()
             .enumerate()
             .filter(|(_, t)| crate::tools::needs_you(&t.name))
-            .map(|(j, t)| {
-                if t.name == crate::tools::SHELL {
+            .flat_map(|(j, t)| {
+                let shown = if t.name == crate::tools::SHELL {
                     command_card(s, t, j, k)
                 } else {
                     question(s, t, r.last, j, k)
-                }
+                };
+                std::iter::once(shown).chain(tripped(j, t))
             }),
     );
     if let Some(a) = r.approval {
@@ -1288,9 +1305,14 @@ fn command_card(s: &App, t: &ToolCall, j: usize, k: &Kit) -> El {
                 .truncate(),
         );
     let mut accent = k.c.warning.icon;
+    let stopped = t.trip.as_ref().is_some_and(|t| t.state.stopped());
     match &t.output {
         Some(out) => {
-            accent = k.c.success.icon;
+            accent = if stopped {
+                k.c.text_faint
+            } else {
+                k.c.success.icon
+            };
             let (shown, cut) = crate::runs::clip(out, 2000);
             body = body.child(mono(
                 if cut { format!("{shown}\n…") } else { shown },
@@ -1305,10 +1327,18 @@ fn command_card(s: &App, t: &ToolCall, j: usize, k: &Kit) -> El {
             );
         }
         None => {
+            let held = t.trip.is_some() || {
+                // Held with another call that waits for your go-ahead.
+                s.current().is_some_and(|a| s.holding_in(&a.chat().id))
+            };
             body = body.child(
-                text("Waiting for the command before it.")
-                    .font(k.ty.small)
-                    .color(c.text_faint),
+                text(if held {
+                    "Waits for your go-ahead."
+                } else {
+                    "Waiting for the command before it."
+                })
+                .font(k.ty.small)
+                .color(c.text_faint),
             );
         }
     }

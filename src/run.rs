@@ -43,8 +43,11 @@ pub struct Live {
     /// How long until the first of the reply (a word, a thought, a tool call) arrived.
     first: Option<Duration>,
     tokens: Tokens,
-    /// What was sent, as sent: kept so a call refused as too long can go again, trimmed.
+    /// What was sent, before the guard hid its secrets: kept so a call refused as too long can go
+    /// again, trimmed.
     request: Option<Request>,
+    /// The secrets hidden from the model in this call, to put back in what it writes.
+    hidden: crate::guard::Hidden,
     /// The tokens, estimated, trimmed from what was sent.
     trimmed: u32,
     /// Whether this is that second go, which trims all it can.
@@ -61,7 +64,7 @@ pub fn build_turns(messages: &[Message]) -> Vec<Turn> {
         .rposition(|m| matches!(m, Message::Divider(_) | Message::Summary { .. }));
     let mut turns: Vec<Turn> = Vec::new();
     let sent: Vec<&Message> = match last.map(|i| (i, &messages[i])) {
-        Some((i, Message::Summary { text, keeps })) => {
+        Some((i, Message::Summary { text, keeps, .. })) => {
             turns.push(Turn::user(crate::window::summary_turn(text)));
             messages[i.saturating_sub(*keeps)..i]
                 .iter()
@@ -179,6 +182,7 @@ impl Live {
             first: None,
             tokens: Tokens::default(),
             request: None,
+            hidden: crate::guard::Hidden::default(),
             trimmed: 0,
             retried: false,
         }
@@ -356,6 +360,8 @@ impl App {
             && self.traces.contains_key(&sid);
         let (brief, skills) = self.brief_of(agent);
         let system = Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty());
+        // The chat's secrets, numbered from its start, so each keeps its placeholder.
+        let mut hidden = self.guard.chat_hidden(system.as_deref(), &chat.messages);
         let can_think = self
             .providers
             .model_info(&model)
@@ -396,6 +402,9 @@ impl App {
                 let ask = crate::window::summary_request(&model.id, &chat.messages[..cut], limit);
                 (cut, ask)
             });
+        let guarded = self.guard.request(request.clone(), &mut hidden);
+        // Outside text still in what is sent: while it is, calls that act wait for you.
+        let outside = self.outside_in_sent(&sid, &chat.messages, &request.turns);
         let refuse = (summary.is_none() && fitted.too_big(limit)).then(|| {
             let tokens = |n: u32| crate::ui::usage::tokens(u64::from(n));
             format!(
@@ -415,12 +424,17 @@ impl App {
                 &sid,
                 model.clone(),
             ));
+            // The run records what the model was told: secrets as their placeholders.
+            let skills: Vec<(String, String)> = skills
+                .iter()
+                .map(|(name, text)| (name.clone(), hidden.hide(text)))
+                .collect();
             setup = trace.setup(&Setup {
-                brief: &brief,
+                brief: &hidden.hide(&brief),
                 skills: &skills,
                 context: &context,
                 tools: &request.tools,
-                user: &user,
+                user: &hidden.hide(&user),
                 user_name,
             });
             // The chat's run before this one is over, whatever it was waiting for.
@@ -429,17 +443,27 @@ impl App {
                 self.save_run(&old.run, &[]);
             }
         }
+        match &outside {
+            Some(what) => self.tainted.insert(sid.clone(), what.clone()),
+            None => self.tainted.remove(&sid),
+        };
+        let taint_on = self.guard.on(crate::guard::Pack::Taint);
         let Some(trace) = self.traces.get_mut(&sid) else {
             return;
         };
         if carries_on {
             trace.resume();
         }
+        setup.extend(trace.hid(hidden.len(), &hidden.describe()));
+        if taint_on {
+            setup.extend(outside.as_deref().and_then(|what| trace.outside(what)));
+        }
         let run = trace.run.clone();
         let mut live = Live::new(&run.id, &agent_id, model.clone());
-        live.sent = transcript(&request.turns);
+        live.sent = transcript(&guarded.request().turns);
         live.trimmed = fitted.trimmed;
-        live.request = Some(request.clone());
+        live.request = Some(request);
+        live.hidden = hidden.clone();
         let cancel = Arc::clone(&live.cancel);
         let target = self.target_for(&model.provider);
         if !carries_on {
@@ -447,7 +471,7 @@ impl App {
         }
         self.save_run(&run, &setup);
         if let Some((cut, ask)) = summary
-            && self.summarize(&sid, &model, cut, ask)
+            && self.summarize(&sid, &model, cut, ask, hidden)
         {
             return;
         }
@@ -463,7 +487,7 @@ impl App {
         match (refuse, target) {
             (Some(why), _) | (None, Err(why)) => self.settle(&sid, &run.id, Err(Error::Setup(why))),
             (None, Ok((endpoint, key))) => {
-                self.stream(sid, run.id, endpoint, key, request, cancel);
+                self.stream(sid, run.id, endpoint, key, guarded, cancel);
             }
         }
     }
@@ -471,10 +495,18 @@ impl App {
     /// Writes a summary of chat `sid`'s messages before `cut` in the background, then carries on
     /// with the same run (see `docs/context.md`). Returns false, changing nothing, when the model
     /// cannot be asked.
-    fn summarize(&mut self, sid: &str, model: &ModelRef, cut: usize, ask: Request) -> bool {
+    fn summarize(
+        &mut self,
+        sid: &str,
+        model: &ModelRef,
+        cut: usize,
+        ask: Request,
+        mut hidden: crate::guard::Hidden,
+    ) -> bool {
         let Ok((endpoint, key)) = self.target_for(&model.provider) else {
             return false;
         };
+        let ask = self.guard.request(ask, &mut hidden);
         let cancel = Arc::new(AtomicBool::new(false));
         self.summarizing.insert(sid.to_owned(), Arc::clone(&cancel));
         if let Some(agent) = self.roster.owner_of_mut(sid) {
@@ -482,18 +514,22 @@ impl App {
         }
         self.beat();
         let (sid, who) = (sid.to_owned(), self.providers.label_of(&model.provider));
-        let (sent, began) = (transcript(&ask.turns), Instant::now());
+        let (sent, began) = (transcript(&ask.request().turns), Instant::now());
         self.spawn(
             move || {
                 completion::complete(&endpoint, key.as_deref().map(String::as_str), &ask, &cancel)
             },
-            move |app, got| app.summarized(&sid, cut, &sent, began, &who, got),
+            move |app, got| app.summarized(&sid, cut, &sent, began, &who, got, &hidden),
         );
         true
     }
 
     /// The summary came back: it goes in the chat and the run carries on, or the reply fails
     /// saying why. Nothing happens if it was stopped meanwhile.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "what a summary's worker carries back, each part used once"
+    )]
     fn summarized(
         &mut self,
         sid: &str,
@@ -502,6 +538,7 @@ impl App {
         began: Instant,
         who: &str,
         got: Result<Completion, Error>,
+        hidden: &crate::guard::Hidden,
     ) {
         if self.summarizing.remove(sid).is_none() {
             return;
@@ -543,8 +580,18 @@ impl App {
             .unwrap_or_default();
         self.record(sid, &steps);
         let run = self.traces.get(sid).map(|t| t.run.id.clone());
+        // A summary of outside text carries it on.
+        let outside = self
+            .roster
+            .owner_of(sid)
+            .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
+            .and_then(|chat| self.outside_in(sid, &chat.messages[..cut.min(chat.messages.len())]));
         let message = match &failure {
-            None => Message::Summary { text, keeps: 0 },
+            None => Message::Summary {
+                text: hidden.reveal(&text),
+                keeps: 0,
+                outside,
+            },
             Some(why) => Message::reply(
                 "",
                 run,
@@ -592,7 +639,7 @@ impl App {
         let Some(live) = self.live.get(sid) else {
             return false;
         };
-        let model = live.model.clone();
+        let (model, hidden) = (live.model.clone(), live.hidden.clone());
         let Some(messages) = self
             .roster
             .owner_of(sid)
@@ -648,7 +695,7 @@ impl App {
         {
             chat.messages.pop();
         }
-        self.summarize(sid, &model, cut, ask)
+        self.summarize(sid, &model, cut, ask, hidden)
     }
 
     /// The brief an agent is given, and each of its skills still in the folder with its
@@ -662,7 +709,7 @@ impl App {
 
     /// Saves how chat `sid`'s run stands with the steps it just took, and shows them if the Runs
     /// screen is open.
-    fn record(&mut self, sid: &str, steps: &[crate::runs::Step]) {
+    pub(crate) fn record(&mut self, sid: &str, steps: &[crate::runs::Step]) {
         let Some(run) = self.traces.get(sid).map(|t| t.run.clone()) else {
             return;
         };
@@ -702,7 +749,7 @@ impl App {
         rid: String,
         endpoint: Endpoint,
         key: Option<Zeroizing<String>>,
-        request: Request,
+        request: crate::guard::Guarded,
         cancel: Arc<AtomicBool>,
     ) {
         let ask = move |emit: &mut dyn FnMut(Event)| {
@@ -803,6 +850,8 @@ impl App {
                     name: call.name,
                     id: call.id,
                     args: call.args,
+                    trip: None,
+                    outside: None,
                 });
             }
         }
@@ -824,8 +873,15 @@ impl App {
         let who = self.providers.label_of(&live.model.provider);
         let model_name = self.providers.model_name(&live.model);
         let elapsed = live.began.elapsed();
-        let (mut reply, mut called) = (String::new(), Vec::new());
-        if let Some(Message::Assistant { text, tools, .. }) = self
+        // The reply as the model wrote it, placeholders and all, for the run; the chat keeps it
+        // with the hidden values put back.
+        let (mut reply, mut called, mut shown) = (String::new(), Vec::new(), String::new());
+        if let Some(Message::Assistant {
+            text,
+            thinking,
+            tools,
+            ..
+        }) = self
             .roster
             .owner_of_mut(sid)
             .and_then(|a| a.sessions.iter_mut().find(|s| s.id == sid))
@@ -833,6 +889,9 @@ impl App {
         {
             reply = text.clone();
             called = tools.clone();
+            *text = live.hidden.reveal(text);
+            *thinking = live.hidden.reveal(thinking);
+            shown = text.clone();
         }
         let result = match result {
             Ok(()) if reply.is_empty() && called.is_empty() => {
@@ -904,15 +963,10 @@ impl App {
         {
             agent.status = AgentStatus::Idle;
         }
-        // The agent asked to run commands: they run now, with no go-ahead needed.
-        if status == Status::Ok {
-            self.run_file_tools(sid);
-            self.run_teach_calls(sid);
-            self.run_schedule_calls(sid);
-            self.run_mcp_server_calls(sid);
-            self.run_agent_calls(sid);
-            self.start_delegations(sid);
-            self.start_next_command(sid);
+        // The calls it asked for run now, once the guard has looked at them: a risky one waits
+        // for your go-ahead, and the others with it.
+        if status == Status::Ok && !self.review_calls(sid, &live.hidden) {
+            self.dispatch_calls(sid);
         }
         // The turn is over (nothing more runs in the chat): a chat carried on from a channel gets
         // what the agent wrote, before a message waiting for it goes.
@@ -929,9 +983,21 @@ impl App {
             && !self.busy_in(sid)
             && self.firing_in(sid).is_none()
         {
-            self.tell_finished(sid, &reply, failure.as_deref());
+            self.tell_finished(sid, &shown, failure.as_deref());
         }
         self.fire_settled(sid, status, failure.as_deref());
+    }
+
+    /// Runs the calls waiting in chat `sid`'s last reply: quick ones at once, commands one after
+    /// another, team members side by side.
+    pub(crate) fn dispatch_calls(&mut self, sid: &str) {
+        self.run_file_tools(sid);
+        self.run_teach_calls(sid);
+        self.run_schedule_calls(sid);
+        self.run_mcp_server_calls(sid);
+        self.run_agent_calls(sid);
+        self.start_delegations(sid);
+        self.start_next_command(sid);
     }
 
     /// Says in a desktop notification that chat `sid`'s turn is over, unless the window is in
@@ -951,6 +1017,7 @@ impl App {
             None if self.pending_call_in(sid, crate::tools::ASK).is_some() => {
                 "Asks you something.".to_owned()
             }
+            None if self.holding_in(sid) => "Needs your go-ahead to carry on.".to_owned(),
             None if reply.trim().is_empty() => "Done.".to_owned(),
             None => crate::notify::excerpt(reply),
         };
@@ -991,6 +1058,7 @@ impl App {
         let Some(live) = self.live.get_mut(sid) else {
             return false;
         };
+        let guarded = self.guard.request(request.clone(), &mut live.hidden);
         let refused = Reply {
             sent: &live.sent,
             text: "",
@@ -1009,16 +1077,16 @@ impl App {
             .get_mut(sid)
             .map(|t| t.reply(&refused))
             .unwrap_or_default();
-        live.sent = transcript(&request.turns);
+        live.sent = transcript(&guarded.request().turns);
         live.trimmed = trimmed;
         live.retried = true;
-        live.request = Some(request.clone());
+        live.request = Some(request);
         (live.began, live.first, live.thought) = (Instant::now(), None, None);
         live.tokens = Tokens::default();
         live.reasoning.clear();
         let (rid, cancel) = (live.run_id.clone(), Arc::clone(&live.cancel));
         self.record(sid, &steps);
-        self.stream(sid.to_owned(), rid, endpoint, key, request, cancel);
+        self.stream(sid.to_owned(), rid, endpoint, key, guarded, cancel);
         true
     }
 
@@ -1059,18 +1127,21 @@ impl App {
             .is_some_and(|a| self.awaiting_in(&a.chat().id))
     }
 
-    /// [`App::awaiting_answer`] for chat `sid`, open or not.
+    /// [`App::awaiting_answer`] for chat `sid`, open or not: a question, or a call held by a
+    /// guardrail for your go-ahead.
     pub(crate) fn awaiting_in(&self, sid: &str) -> bool {
-        self.roster
-            .owner_of(sid)
-            .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
-            .is_some_and(|chat| {
-                matches!(
-                    chat.messages.last(),
-                    Some(Message::Assistant { tools, .. })
-                        if tools.iter().any(|t| crate::tools::needs_you(&t.name) && t.output.is_none())
-                )
-            })
+        self.holding_in(sid)
+            || self
+                .roster
+                .owner_of(sid)
+                .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
+                .is_some_and(|chat| {
+                    matches!(
+                        chat.messages.last(),
+                        Some(Message::Assistant { tools, .. })
+                            if tools.iter().any(|t| crate::tools::needs_you(&t.name) && t.output.is_none())
+                    )
+                })
     }
 
     /// The first call of `name` in the open chat that has no result yet.
@@ -1099,6 +1170,10 @@ impl App {
     /// Gives a waiting call its result, in the chat that holds it. When nothing in that message is
     /// left waiting and `carry_on`, the agent continues with a new run.
     pub(crate) fn resolve(&mut self, sid: &str, call_id: &str, output: String, carry_on: bool) {
+        // Whether what came back is outside text: a web page, an MCP tool's result, a file or a
+        // command's output where the folder is not trusted, an answer from a person not trusted.
+        let trust_folder = self.roster.owner_of(sid).is_none_or(|a| a.trust_workdir);
+        let person = self.outside_person(sid);
         let Some(chat) = self
             .roster
             .owner_of_mut(sid)
@@ -1123,6 +1198,13 @@ impl App {
             return;
         };
         call.output = Some(output.clone());
+        // Only what actually ran brought anything in; a refusal is the app's own words.
+        let ran = call.trip.as_ref().is_none_or(|t| !t.state.stopped());
+        if call.outside.is_none() && ran {
+            call.outside = crate::guard::taint::result_source(&call.name, trust_folder)
+                .map(str::to_owned)
+                .or_else(|| person.filter(|_| call.name == crate::tools::ASK));
+        }
         let waiting = tools.iter().any(|t| t.output.is_none());
         let saved = (chat.id.clone(), seq, chat.messages[seq].clone());
         self.save("the reply", |db| {
@@ -1373,6 +1455,8 @@ impl App {
                 .filter(|t| {
                     (crate::tools::is_job(&t.name) || t.name == crate::tools::DELEGATE)
                         && t.output.is_none()
+                        // Held for your go-ahead: it never started, and can still be decided.
+                        && t.trip.as_ref().is_none_or(|t| t.state != crate::guard::TripState::Asking)
                 })
                 .map(|t| t.id.clone())
                 .collect(),
@@ -1566,6 +1650,8 @@ mod tests {
                 output: Some(output),
                 id: "c1".into(),
                 args: r#"{"command":"cat big.log"}"#.into(),
+                trip: None,
+                outside: None,
             });
         }
         vec![
@@ -1668,7 +1754,7 @@ mod tests {
             .messages
             .iter()
             .filter_map(|m| match m {
-                Message::Summary { text, keeps } => Some((text.clone(), *keeps)),
+                Message::Summary { text, keeps, .. } => Some((text.clone(), *keeps)),
                 _ => None,
             })
             .collect()
@@ -2185,6 +2271,8 @@ mod tests {
                     output: Some("Blue".into()),
                     id: "c1".into(),
                     args: "{}".into(),
+                    trip: None,
+                    outside: None,
                 },
                 ToolCall {
                     name: "storage.read".into(),
@@ -2478,6 +2566,8 @@ data: [DONE]
                 output: None,
                 id: "c1".into(),
                 args: r#"{"command":"touch x"}"#.into(),
+                trip: None,
+                outside: None,
             }],
             approval: None,
             stats: None,

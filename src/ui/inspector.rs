@@ -91,7 +91,7 @@ fn facts(s: &App, run: &Run, step: &Step, k: &Kit) -> El {
                 ),
             ));
         }
-        StepKind::User | StepKind::Error => {}
+        StepKind::User | StepKind::Guard | StepKind::Error => {}
     }
     if let Some(ms) = step.duration_ms {
         rows.push(("Took", millis(ms)));
@@ -151,6 +151,7 @@ fn parts(step: &Step, k: &Kit) -> Vec<El> {
             ("Arguments", pretty(input), Look::Code),
             ("Result", output.to_owned(), Look::Code),
         ],
+        StepKind::Guard => vec![("What it did", output.to_owned(), Look::Plain)],
         StepKind::Error => vec![("What went wrong", output.to_owned(), Look::Plain)],
     };
     list.into_iter()

@@ -535,6 +535,42 @@ fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .color(c.text_muted),
         )
         .child(super::folder_picker::build(s, k, layer))
+        .child(trust_field(s, k))
+}
+
+/// Whether what the agent reads and runs in its folder counts as yours (see `guard::taint`).
+fn trust_field(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let on = s.roster.form.trust_workdir;
+    row()
+        .key("trust-workdir")
+        .w_full()
+        .gap(16.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text("Trust what it reads and runs there")
+                        .font(k.ty.ui_medium)
+                        .color(c.text_base),
+                )
+                .child(
+                    text("Off, a file it read or a command's output counts as outside text, like a web page: after reading one, it asks before it acts. Turn off for a folder of things you did not write, such as downloads or a cloned project.")
+                        .font(k.ty.small)
+                        .color(c.text_muted)
+                        .wrap(),
+                ),
+        )
+        .child(
+            rune_kit::Switch::new(on)
+                .label("Trust what it reads and runs there")
+                .hide_label()
+                .on_toggle(move |s: &mut App| s.roster.form.trust_workdir = !on)
+                .build(k),
+        )
 }
 
 /// The tools block: the TypeSafe and MCP tools the agent may use. The app's own tools are every

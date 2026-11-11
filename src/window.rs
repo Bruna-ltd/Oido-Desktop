@@ -210,10 +210,7 @@ fn trim(turns: &mut [Turn], goal: u32) -> u32 {
         }
         match t.role {
             Role::Tool if t.text.len() > SMALL_RESULT => {
-                let note = format!(
-                    "(output removed to save room: {} KB)",
-                    t.text.len().div_ceil(1024)
-                );
+                let note = format!("{TRIMMED} {} KB)", t.text.len().div_ceil(1024));
                 trimmed = trimmed.saturating_add(tokens_of(&t.text) - tokens_of(&note));
                 t.text = note;
             }
@@ -235,6 +232,14 @@ fn trim(turns: &mut [Turn], goal: u32) -> u32 {
         }
     }
     trimmed
+}
+
+/// How a tool result trimmed to save room begins.
+const TRIMMED: &str = "(output removed to save room:";
+
+/// Whether a tool result was trimmed to save room, so what it said is no longer sent.
+pub fn was_trimmed(text: &str) -> bool {
+    text.starts_with(TRIMMED)
 }
 
 /// Whether trimming would take anything out of `turns`.
@@ -537,6 +542,7 @@ mod tests {
         chat.push(Message::Summary {
             text: "s".into(),
             keeps: 4,
+            outside: None,
         });
         assert_eq!(summary_cut(&chat), None, "nothing new since");
         chat.extend(talk(2));
@@ -552,6 +558,7 @@ mod tests {
         chat.push(Message::Summary {
             text: "s".into(),
             keeps: 2,
+            outside: None,
         });
         assert_eq!(measured(&chat), None);
         assert_eq!(used(&chat), None);
@@ -562,6 +569,7 @@ mod tests {
         let mut chat = vec![Message::Summary {
             text: "before".into(),
             keeps: 0,
+            outside: None,
         }];
         chat.push(Message::User("x".repeat(10_000).as_str().into()));
         let req = summary_request("m", &chat, None);
