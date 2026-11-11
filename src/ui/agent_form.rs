@@ -537,8 +537,8 @@ fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(super::folder_picker::build(s, k, layer))
 }
 
-/// The tools block: what the agent may use, chosen from the register. Only what is picked here is
-/// offered to the model.
+/// The tools block: the TypeSafe and MCP tools the agent may use. The app's own tools are every
+/// agent's, so they are neither listed nor chosen here.
 fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     col()
@@ -550,7 +550,7 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .color(c.text_base),
         )
         .child(
-            text("Only what you pick here. With none, it can talk but not act. The full list is on the Tools page.")
+            text("Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers or TypeSafe here.")
                 .font(k.ty.small)
                 .color(c.text_muted),
         )
@@ -563,10 +563,11 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 title: "Tools",
                 placeholder: "Add tools",
                 noun: ("tool", "tools"),
-                none: "No tools are registered.",
+                none: "No other tools yet: add an MCP server or connect TypeSafe.",
                 items: s
                     .all_tools()
                     .iter()
+                    .filter(|t| !crate::tools::is_builtin(&t.name))
                     .filter(|t| s.typesafe_connected() || !crate::tools::needs_typesafe(&t.name))
                     .map(|t| {
                         let shown = crate::tools::shown(&t.name, &s.mcp.servers);

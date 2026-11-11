@@ -68,6 +68,10 @@ pub struct Mcp {
     pub notice: Option<String>,
     /// What the page is filtered by.
     pub search: TextEdit,
+    /// Changes agents asked for, each waiting for the person in its chat.
+    pub drafts: Vec<super::Draft>,
+    /// Why approving a draft did not go through, by the draft's tool call.
+    pub draft_notice: Option<(String, String)>,
 }
 
 impl Mcp {
@@ -82,6 +86,8 @@ impl Mcp {
             signing_in: None,
             notice: None,
             search: TextEdit::new(""),
+            drafts: Vec::new(),
+            draft_notice: None,
         }
     }
 
@@ -162,6 +168,25 @@ pub fn split_words(s: &str) -> Result<Vec<String>, String> {
         words.push(cur);
     }
     Ok(words)
+}
+
+/// Words written so [`split_words`] reads them back: plain when they can be, else in double quotes.
+fn join_words(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| {
+            let plain = !w.is_empty()
+                && !w
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'));
+            if plain {
+                w.clone()
+            } else {
+                format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `NAME=value` words as pairs. A word with no `=` or no name is refused, not guessed at.
@@ -283,7 +308,7 @@ impl App {
             ..Secrets::default()
         };
         if auth == Auth::OAuth {
-            self.mcp_sign_in_new(server, secrets);
+            self.mcp_sign_in_new(server, secrets, App::mcp_register);
         } else {
             self.mcp_register(server, secrets);
         }
@@ -314,29 +339,71 @@ impl App {
         self.mcp_register(server, secrets);
     }
 
+    /// Registers what the form holds, then empties it.
+    fn mcp_register(&mut self, server: Server, secrets: Secrets) {
+        if self.mcp_save(server, secrets) {
+            self.mcp.form = Form::new();
+            self.mcp.adding = false;
+            self.mcp.confirming = false;
+        }
+    }
+
     /// Saves the server and asks it for its tools. It stays registered if it cannot be reached,
     /// marked so, since the cause (a key to fix, a program not installed) is the person's to fix.
-    fn mcp_register(&mut self, server: Server, secrets: Secrets) {
+    /// False, with why on the page, if it could not be saved.
+    pub(super) fn mcp_save(&mut self, server: Server, secrets: Secrets) -> bool {
         let Some(db) = &self.store else {
-            return self.mcp_notice("There is no database, so nothing can be saved.");
+            self.mcp_notice("There is no database, so nothing can be saved.");
+            return false;
         };
         if let Err(e) = db.insert_mcp_server(&server, &secrets) {
-            return self.mcp_notice(format!("{e}"));
+            self.mcp_notice(format!("{e}"));
+            return false;
         }
         let id = server.id.clone();
         self.mcp.servers.push(server);
-        self.mcp.form = Form::new();
-        self.mcp.adding = false;
-        self.mcp.confirming = false;
         self.mcp.notice = None;
         self.mcp.open = Some(id.clone());
         self.mcp_resync(&id);
+        true
+    }
+
+    /// Fills the add form with a server and its secrets, opened, to change before adding.
+    pub(super) fn mcp_fill_form(&mut self, server: &Server, secrets: &Secrets) {
+        let mut form = Form::new();
+        form.name = TextEdit::new(&server.name);
+        form.auth = server.auth;
+        form.key = TextEdit::new(secrets.key.as_deref().unwrap_or_default());
+        match &server.transport {
+            Transport::Http { url } => form.url = TextEdit::new(url),
+            Transport::Stdio { command, args } => {
+                form.kind = Kind::Local;
+                form.command = TextEdit::new(command);
+                form.args = TextEdit::new(join_words(args));
+                let pairs: Vec<String> = secrets
+                    .env
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
+                form.env = TextEdit::new(join_words(&pairs));
+            }
+        }
+        self.mcp.form = form;
+        self.mcp.adding = true;
+        self.mcp.confirming = false;
+        self.mcp.notice = None;
     }
 
     // ---- signing in ----
 
     /// Signs in before the server is saved: a sign-in that never finishes leaves nothing behind.
-    fn mcp_sign_in_new(&mut self, server: Server, secrets: Secrets) {
+    /// `save` takes the server once signed in.
+    pub(super) fn mcp_sign_in_new(
+        &mut self,
+        server: Server,
+        secrets: Secrets,
+        save: fn(&mut App, Server, Secrets),
+    ) {
         let Transport::Http { url } = server.transport.clone() else {
             return;
         };
@@ -351,7 +418,7 @@ impl App {
                             oauth: Some(tokens),
                             ..secrets
                         };
-                        app.mcp_register(server, secrets);
+                        save(app, server, secrets);
                     }
                     Err(why) => app.mcp_notice(format!("Sign-in did not finish: {why}.")),
                 }
@@ -626,6 +693,14 @@ mod tests {
         assert_eq!(split_words("  ").unwrap(), Vec::<String>::new());
         assert_eq!(split_words(r#"a "" b"#).unwrap(), ["a", "", "b"]);
         assert!(split_words(r#"a "b"#).is_err());
+    }
+
+    #[test]
+    fn joined_words_split_back_to_the_same_words() {
+        let words: Vec<String> = ["-y", "a b", "", r#"say "hi""#, r"c:\x", "it's"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(split_words(&join_words(&words)).unwrap(), words);
     }
 
     #[test]

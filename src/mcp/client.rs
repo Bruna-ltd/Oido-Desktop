@@ -452,9 +452,13 @@ fn local(target: &Target, command: &str, args: &[String]) -> Result<Arc<Mutex<Lo
 impl Local {
     fn start(command: &str, args: &[String], secrets: &Secrets) -> Result<Local, Failure> {
         let mut cmd = Command::new(command);
-        cmd.args(args)
-            .envs(&secrets.env)
-            .stdin(Pipe::piped())
+        cmd.args(args).envs(&secrets.env);
+        // Somewhere fixed rather than wherever the app was started from, where a relative path the
+        // server writes to would otherwise land.
+        if let Some(home) = dirs::home_dir() {
+            cmd.current_dir(home);
+        }
+        cmd.stdin(Pipe::piped())
             .stdout(Pipe::piped())
             .stderr(Pipe::piped());
         #[cfg(unix)]

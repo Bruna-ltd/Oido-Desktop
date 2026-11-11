@@ -28,6 +28,10 @@ sha2 = "0.11"
 percent-encoding = "2"
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
 croner = "4"
+# The icon in the desktop bar's tray (StatusNotifierItem), on the zbus 5 and async-io the keyring already uses.
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+# Desktop notifications (org.freedesktop.Notifications): the same zbus the tray and keyring run on.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 
 # Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with one change, a
 # mouse wheel notch scrolls 100 points instead of 40. Drop this section when upstream lets the app

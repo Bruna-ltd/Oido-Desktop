@@ -88,6 +88,8 @@ fn transcript(s: &App, agent: &Agent, k: &Kit) -> El {
             )
             .children(draft(s, &agent.chat().id, k))
             .children(schedule_drafts(s, &agent.chat().id, k))
+            .children(mcp_drafts(s, &agent.chat().id, k))
+            .children(agent_drafts(s, &agent.chat().id, k))
     };
     col()
         .key("transcript")
@@ -953,6 +955,288 @@ fn schedule_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
                 .child(body)
                 .build(k)
                 .key(format!("schedule-draft-{}", p.call_id))
+        })
+        .collect()
+}
+
+/// MCP server changes the agent asked for in this chat, each waiting for you: what would be added,
+/// changed or removed, and Approve, Edit (an add, in the MCP page's form) or Reject. A local server
+/// shows the exact command it would run. Keys and variable values are never shown.
+fn mcp_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
+    use crate::mcp::{Proposal, Server, Transport};
+    let c = &k.c;
+    let line = |t: String| text(t).font(k.ty.small).color(c.text_base).wrap();
+    let target = |x: &Server| {
+        match &x.transport {
+        Transport::Http { .. } => line(format!("Address: {}", x.target())),
+        Transport::Stdio { .. } => col()
+            .gap(4.0)
+            .child(line("Runs this program on your computer, with your permissions, whenever an agent uses it:".to_owned()))
+            .child(text(x.target()).font(k.ty.mono).color(c.text_base).wrap()),
+    }
+    };
+    s.mcp
+        .drafts
+        .iter()
+        .filter(|d| d.session_id == sid)
+        .map(|d| {
+            let id = d.call_id.clone();
+            let mut body = col().w_full().gap(8.0);
+            let mut edit = false;
+            let (title, approve) = match &d.proposal {
+                Proposal::Add { server, secrets } => {
+                    body = body.child(target(server));
+                    if !secrets.env.is_empty() {
+                        let names: Vec<&str> = secrets.env.keys().map(String::as_str).collect();
+                        body = body.child(line(format!("Variables: {}", names.join(", "))));
+                    }
+                    match server.auth {
+                        crate::mcp::Auth::Key => {
+                            body = body.child(line("Signs in with a key.".to_owned()))
+                        }
+                        crate::mcp::Auth::OAuth => {
+                            body = body
+                                .child(line("Signs in in your browser when you add it.".to_owned()))
+                        }
+                        crate::mcp::Auth::None => {}
+                    }
+                    edit = true;
+                    let approve = match server.transport {
+                        Transport::Stdio { .. } => "Run it and add",
+                        Transport::Http { .. } => "Add",
+                    };
+                    (format!("Add MCP server: {}", server.name), approve)
+                }
+                Proposal::Update {
+                    server, touched, ..
+                } => {
+                    if let Some(now) = s.mcp.servers.iter().find(|x| x.id == server.id)
+                        && now.target() != server.target()
+                    {
+                        body = body.child(line(format!("Was: {}", now.target())));
+                    }
+                    body = body.child(target(server));
+                    if !touched.is_empty() {
+                        body = body.child(line(format!("Changes: {}", touched.join(", "))));
+                    }
+                    (format!("Change MCP server: {}", server.name), "Approve")
+                }
+                Proposal::Remove { name, .. } => {
+                    body = body.child(line("Agents given its tools lose them.".to_owned()));
+                    (format!("Remove MCP server: {name}"), "Remove")
+                }
+            };
+            if let Some((_, why)) = s.mcp.draft_notice.as_ref().filter(|(call, _)| *call == id) {
+                body = body.child(
+                    text(why.clone())
+                        .font(k.ty.small)
+                        .color(c.warning.icon)
+                        .wrap(),
+                );
+            }
+            let mut buttons = row().gap(8.0).child({
+                let press = id.clone();
+                Button::new(approve)
+                    .variant(ButtonVariant::Submit)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.mcp_approve_draft(&press))
+                    .build(k)
+                    .key(format!("mcp-draft-approve-{id}"))
+            });
+            if edit {
+                let press = id.clone();
+                buttons = buttons.child(
+                    Button::new("Edit")
+                        .variant(ButtonVariant::Outline)
+                        .control_size(ControlSize::Small)
+                        .on_press(move |s: &mut App| s.mcp_edit_draft(&press))
+                        .build(k)
+                        .key(format!("mcp-draft-edit-{id}")),
+                );
+            }
+            buttons = buttons.child({
+                let press = id.clone();
+                Button::new("Reject")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.mcp_reject_draft(&press))
+                    .build(k)
+                    .key(format!("mcp-draft-reject-{id}"))
+            });
+            Card::new()
+                .accent(k.c.info.icon)
+                .title(title, None)
+                .description(
+                    "MCP servers are shared by all your agents. Nothing changes until you approve.",
+                )
+                .child(body.child(buttons))
+                .build(k)
+                .key(format!("mcp-draft-{id}"))
+        })
+        .collect()
+}
+
+/// How much of a drafted agent's instructions its card shows.
+const DRAFT_BRIEF: usize = 400;
+
+/// Agent changes the agent asked for in this chat, each waiting for you: the agent as it would be
+/// (or, for a change, only what changes), and Approve, Edit (in the agent form) or Reject.
+fn agent_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
+    use crate::agent_tool::Proposal;
+    let c = &k.c;
+    let line = |t: String| text(t).font(k.ty.small).color(c.text_base).wrap();
+    // One line per part of the agent; `only` limits it to the parts that change.
+    let parts = |a: &Agent, only: Option<&[&str]>| {
+        let wanted = |p: &str| only.is_none_or(|o| o.contains(&p));
+        let mut body = col().w_full().gap(6.0);
+        if only.is_some() && wanted("name") {
+            body = body.child(line(format!("Name: {}", a.name)));
+        }
+        if wanted("model") {
+            let m = a.model.as_ref().map_or_else(
+                || "the default model".to_owned(),
+                |m| s.providers.model_name(m),
+            );
+            body = body.child(line(format!("Model: {m}")));
+        }
+        if wanted("tools") {
+            let tools: Vec<String> = a
+                .tools
+                .iter()
+                .map(|t| crate::tools::shown(t, &s.mcp.servers).label)
+                .collect();
+            body = body.child(line(if tools.is_empty() {
+                "Tools: the app's own".to_owned()
+            } else {
+                format!("Tools: the app's own, and {}", tools.join(", "))
+            }));
+        }
+        if wanted("skills") && (only.is_some() || !a.skills.is_empty()) {
+            body = body.child(line(format!("Skills: {}", a.skills.join(", "))));
+        }
+        if wanted("folder") {
+            body = body.child(line(format!(
+                "Folder: {}",
+                a.workdir.as_deref().unwrap_or("home folder")
+            )));
+        }
+        if wanted("description") && (only.is_some() || !a.description.is_empty()) {
+            body = body.child(line(format!("Gets tasks for: {}", a.description)));
+        }
+        if wanted("instructions") {
+            let mut brief: String = a.prompt.chars().take(DRAFT_BRIEF).collect();
+            if a.prompt.chars().count() > DRAFT_BRIEF {
+                brief.push('…');
+            }
+            body = body.child(
+                text(if brief.is_empty() {
+                    "No instructions.".to_owned()
+                } else {
+                    brief
+                })
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .wrap(),
+            );
+        }
+        body
+    };
+    s.agent_drafts
+        .iter()
+        .filter(|d| d.session_id == sid)
+        .map(|d| {
+            let id = d.call_id.clone();
+            let (title, approve, body, edit) = match &d.proposal {
+                Proposal::Create { agent, lead: None } => (
+                    format!("New agent: {}", agent.name),
+                    "Create",
+                    parts(agent, None),
+                    true,
+                ),
+                Proposal::Create {
+                    agent,
+                    lead: Some(lead),
+                } => {
+                    let lead = s.roster.agent_ref(lead).map_or("?", |a| a.name.as_str());
+                    (
+                        format!("New team member of {lead}: {}", agent.name),
+                        "Add to team",
+                        parts(agent, None),
+                        true,
+                    )
+                }
+                Proposal::Update { agent, changed, .. } => (
+                    format!("Change agent: {}", agent.name),
+                    "Save changes",
+                    parts(agent, Some(changed)),
+                    true,
+                ),
+                Proposal::Delete { target, name } => {
+                    let team = s.roster.find(target).map_or(0, |a| a.subagents.len());
+                    let also = match team {
+                        0 => String::new(),
+                        1 => ", and its team member".to_owned(),
+                        n => format!(", and its {n} team members"),
+                    };
+                    (
+                        format!("Delete agent: {name}"),
+                        "Delete",
+                        col().child(line(format!(
+                            "Deletes {name} with all its chats{also}. This cannot be undone."
+                        ))),
+                        false,
+                    )
+                }
+            };
+            let mut body = body;
+            if let Some((_, why)) = s
+                .agent_draft_notice
+                .as_ref()
+                .filter(|(call, _)| *call == id)
+            {
+                body = body.child(
+                    text(why.clone())
+                        .font(k.ty.small)
+                        .color(c.warning.icon)
+                        .wrap(),
+                );
+            }
+            let mut buttons = row().gap(8.0).child({
+                let press = id.clone();
+                Button::new(approve)
+                    .variant(ButtonVariant::Submit)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.approve_agent_draft(&press))
+                    .build(k)
+                    .key(format!("agent-draft-approve-{id}"))
+            });
+            if edit {
+                let press = id.clone();
+                buttons = buttons.child(
+                    Button::new("Edit")
+                        .variant(ButtonVariant::Outline)
+                        .control_size(ControlSize::Small)
+                        .on_press(move |s: &mut App| s.edit_agent_draft(&press))
+                        .build(k)
+                        .key(format!("agent-draft-edit-{id}")),
+                );
+            }
+            buttons = buttons.child({
+                let press = id.clone();
+                Button::new("Reject")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.reject_agent_draft(&press))
+                    .build(k)
+                    .key(format!("agent-draft-reject-{id}"))
+            });
+            Card::new()
+                .accent(k.c.info.icon)
+                .title(title, None)
+                .description("Nothing changes until you approve.")
+                .child(body.gap(8.0).child(buttons))
+                .build(k)
+                .key(format!("agent-draft-{id}"))
         })
         .collect()
 }

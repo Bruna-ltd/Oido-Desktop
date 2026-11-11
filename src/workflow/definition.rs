@@ -15,8 +15,9 @@ pub const GENERATE: &str = "generate";
 pub const DECIDE: &str = "decide";
 
 /// The tools a workflow step may call. A flow runs on its own, so it cannot stop to ask you.
-pub const STEP_TOOLS: [&str; 4] = [
+pub const STEP_TOOLS: [&str; 5] = [
     crate::tools::SHELL,
+    crate::web::NAME,
     crate::files::READ,
     crate::files::WRITE,
     crate::files::EDIT,

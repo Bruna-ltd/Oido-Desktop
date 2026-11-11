@@ -360,7 +360,7 @@ impl App {
             .providers
             .model_info(&model)
             .is_none_or(|i| crate::models::can_think(&i.caps));
-        let context = crate::context::now_text();
+        let context = crate::context::now_text(&self.workdir_of(&sid));
         let mut request = Request {
             model: model.id.clone(),
             system,
@@ -905,6 +905,8 @@ impl App {
             self.run_file_tools(sid);
             self.run_teach_calls(sid);
             self.run_schedule_calls(sid);
+            self.run_mcp_server_calls(sid);
+            self.run_agent_calls(sid);
             self.start_delegations(sid);
             self.start_next_command(sid);
         }
@@ -913,7 +915,39 @@ impl App {
         if status != Status::Cancelled {
             self.send_queued(sid);
         }
+        // The turn is over (nothing more runs in the chat) and you did not stop it yourself. A
+        // schedule's fire says so itself, once it ends.
+        if status != Status::Cancelled && !self.busy_in(sid) && self.firing_in(sid).is_none() {
+            self.tell_finished(sid, &reply, failure.as_deref());
+        }
         self.fire_settled(sid, status, failure.as_deref());
+    }
+
+    /// Says in a desktop notification that chat `sid`'s turn is over, unless the window is in
+    /// front of you (shown and focused).
+    fn tell_finished(&self, sid: &str, reply: &str, failure: Option<&str>) {
+        let seen = self.focused && crate::app::handle().is_some_and(|h| h.is_visible());
+        if seen {
+            return;
+        }
+        let title = self
+            .roster
+            .owner_of(sid)
+            .map_or("Oido", |a| a.name.as_str())
+            .to_owned();
+        let body = match failure {
+            Some(why) => why.to_owned(),
+            None if self.pending_call_in(sid, crate::tools::ASK).is_some() => {
+                "Asks you something.".to_owned()
+            }
+            None if reply.trim().is_empty() => "Done.".to_owned(),
+            None => crate::notify::excerpt(reply),
+        };
+        crate::notify::post(crate::notify::Note {
+            title,
+            body,
+            chat: Some(sid.to_owned()),
+        });
     }
 
     /// The provider refused the call as too long: it goes again at once with all the older tool
@@ -1154,6 +1188,23 @@ impl App {
             self.start_mcp_call(&sid, &id, &name, &args);
             return true;
         }
+        if name == crate::web::NAME {
+            // A fetch cannot be interrupted, only ended by its time limit; Stop discards it.
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.commands.insert(sid.clone(), Arc::clone(&cancel));
+            self.spawn(
+                move || (crate::web::fetch(&args), cancel.load(Ordering::Relaxed)),
+                move |app, (text, stopped)| {
+                    let finish = if stopped {
+                        crate::command::Finish::Stopped("Stopped before the page came back.".into())
+                    } else {
+                        crate::command::Finish::Done(text)
+                    };
+                    app.command_done(&sid, &id, finish);
+                },
+            );
+            return true;
+        }
         let Some(spec) = crate::command::parse(&args) else {
             self.resolve(
                 &sid,
@@ -1317,8 +1368,8 @@ impl App {
         }
     }
 
-    /// On start: a command asked for before the app closed never ran, and must not start now.
-    /// It is marked not run, so the chat is not left waiting for it.
+    /// On start: a command asked for before the app closed did not finish, and must not start now.
+    /// It is marked unfinished, so the chat is not left waiting for it. It may have run in part.
     pub(crate) fn settle_interrupted_commands(&mut self) {
         let sessions: Vec<String> = self
             .roster
@@ -1330,7 +1381,7 @@ impl App {
         for sid in sessions {
             self.close_commands(
                 &sid,
-                "Not run: the app was closed before this command started.",
+                "Not finished: the app was closed before this command ended. It may not have run, or run only in part.",
             );
         }
     }
@@ -1769,7 +1820,7 @@ mod tests {
             panic!("a reply");
         };
         assert!(
-            matches!(outcome, Outcome::Failed(why) if why.contains("would be sent about 40.") && why.contains("tokens and takes 32.8k")),
+            matches!(outcome, Outcome::Failed(why) if why.contains("would be sent about 4") && why.contains("tokens and takes 32.8k")),
             "{outcome:?}"
         );
         assert!(seen.try_recv().is_err(), "nothing was sent");
@@ -1813,8 +1864,8 @@ mod tests {
         assert!(request.contains("authorization: bearer sk-box"));
         assert!(request.contains("\"stream\":true") && request.contains("hi there"));
         assert!(
-            !request.contains("\"tools\""),
-            "an agent with no tools is offered none"
+            request.contains("\"tools\"") && !request.contains("\"delegate\""),
+            "the built-in tools, and no delegate without a team"
         );
 
         let Message::Assistant {
@@ -1856,8 +1907,8 @@ mod tests {
         );
         assert_eq!(r.model, ModelRef::new("llama-server:box", "llama-3.3-70b"));
         let kinds: Vec<_> = app.steps.iter().map(|s| s.kind).collect();
-        use StepKind::{Context, Llm, System, User};
-        assert_eq!(kinds, [System, Context, User, Llm]);
+        use StepKind::{Context, Llm, System, Tools, User};
+        assert_eq!(kinds, [System, Context, Tools, User, Llm]);
         assert!(
             app.steps[1]
                 .output
@@ -1866,8 +1917,8 @@ mod tests {
                 .contains("## Context"),
             "the record shows what it was told about the moment"
         );
-        assert_eq!(app.record, 3, "opened at the model's answer");
-        let call = &app.steps[3];
+        assert_eq!(app.record, 4, "opened at the model's answer");
+        let call = &app.steps[4];
         assert_eq!(call.output.as_deref(), Some("Hello!"));
         assert_eq!(call.reasoning.as_deref(), Some("hmm"));
         let sent = call.input.as_deref().unwrap();
@@ -2443,14 +2494,26 @@ data: [DONE]
     }
 
     #[test]
-    fn an_agent_without_the_shell_tool_is_not_offered_it() {
+    fn every_agent_is_offered_the_built_in_tools_without_choosing_them() {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![(200, "text/event-stream", STREAM)]);
-        app.roster.current_mut().unwrap().tools = vec![crate::tools::ASK.into()];
+        app.roster.current_mut().unwrap().tools = Vec::new();
         app.composer.edit = TextEdit::new("hi");
         app.send();
         let request = seen.recv().unwrap();
-        assert!(request.contains("ask_user_question") && !request.contains("\"shell\""));
+        for tool in [
+            "ask_user_question",
+            "\"shell\"",
+            "web_fetch",
+            "read_file",
+            "agents",
+        ] {
+            assert!(request.contains(tool), "{tool} is offered");
+        }
+        assert!(
+            !request.contains("typesafe_"),
+            "TypeSafe's are still chosen"
+        );
     }
 
     #[cfg(unix)]

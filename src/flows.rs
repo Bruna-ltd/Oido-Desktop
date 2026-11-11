@@ -113,6 +113,14 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, cancel: &AtomicBool) -> Outc
                 error: (!raw.succeeded()).then(|| raw.text()),
             };
         }
+        if name == crate::web::NAME {
+            let text = crate::web::fetch(&args.to_string());
+            let error = text.starts_with("Error:").then(|| text.clone());
+            return ToolOutcome {
+                value: Value::String(text),
+                error,
+            };
+        }
         let Some(root) = &p.workdir else {
             return ToolOutcome {
                 value: Value::Null,
@@ -203,21 +211,13 @@ impl App {
         })
     }
 
-    /// Everything a run of `def` by `agent_id` needs, or why it cannot run. An agent runs only
-    /// workflows whose tools it has itself: a workflow does not widen what an agent may do.
+    /// Everything a run of `def` by `agent_id` needs, or why it cannot run. A step uses only
+    /// built-in tools, which every agent has, so a workflow does not widen what an agent may do.
     fn prepare_flow(&self, agent_id: &str, def: &Definition) -> Result<Prep, String> {
         let agent = self
             .roster
             .agent_ref(agent_id)
             .ok_or("That agent is gone.")?;
-        for t in crate::workflow::definition::tools_used(def) {
-            if !agent.tools.contains(&t) {
-                return Err(format!(
-                    "{} does not have the {t} tool, which this workflow uses. Add it in the agent's settings.",
-                    agent.name
-                ));
-            }
-        }
         let prep = self.prepare_model(agent_id)?;
         let files = crate::workflow::definition::tools_used(def)
             .iter()
@@ -912,23 +912,6 @@ mod tests {
         );
         assert_eq!(run.steps.len(), 1, "the next step never ran");
         assert!(seen.try_recv().is_err(), "the model was never asked");
-    }
-
-    #[test]
-    fn an_agent_without_a_workflows_tools_cannot_run_it_and_is_told_which_one() {
-        let db = TempDb::new();
-        let (mut app, _) = app_with_server(&db, vec![]);
-        save_workflow(&mut app, vec![tool_step("s", "echo x", "r")], json!({}));
-        app.go(Route::Workflows);
-        app.run_open_workflow();
-        assert!(
-            app.wf_notice
-                .as_deref()
-                .unwrap()
-                .contains("does not have the shell tool")
-        );
-        assert!(app.wf_runs.is_empty(), "nothing started");
-        assert!(app.wf_jobs.is_empty());
     }
 
     #[cfg(unix)]

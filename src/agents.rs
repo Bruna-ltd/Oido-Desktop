@@ -250,7 +250,14 @@ impl Roster {
     }
 
     /// A roster of `list`, with `selected` open if it still exists, else the first agent.
-    pub fn from_saved(list: Vec<Agent>, selected: Option<Target>) -> Roster {
+    pub fn from_saved(mut list: Vec<Agent>, selected: Option<Target>) -> Roster {
+        // Built-in tools are every agent's now; lists saved when they were chosen drop them.
+        for a in &mut list {
+            a.tools.retain(|t| !crate::tools::is_builtin(t));
+            for m in &mut a.subagents {
+                m.tools.retain(|t| !crate::tools::is_builtin(t));
+            }
+        }
         let first = list.first().map(|a| Target::agent(a.id.clone()));
         let mut r = Roster::bare(list);
         r.selected = selected.filter(|t| r.find(t).is_some()).or(first);

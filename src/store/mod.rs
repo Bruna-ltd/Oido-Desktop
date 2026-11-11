@@ -134,10 +134,9 @@ impl Store {
     /// The user's database: `$OIDO_DB` if set (`:memory:` for a throwaway one), else
     /// `oido.db` in the app's data folder.
     pub fn open_default() -> Result<Store> {
-        match std::env::var("OIDO_DB") {
-            Ok(p) if p == ":memory:" => Store::in_memory(Vault::os()),
-            Ok(p) => Store::open(Path::new(&p), Vault::os()),
-            Err(_) => Store::open(&default_path()?, Vault::os()),
+        match default_location()? {
+            None => Store::in_memory(Vault::os()),
+            Some(path) => Store::open(&path, Vault::os()),
         }
     }
 
@@ -172,6 +171,15 @@ impl Store {
             .find(|(n, _)| *n == name)
             .map(|(_, sql)| *sql)
             .ok_or(Error::MissingQuery(name))
+    }
+}
+
+/// Where [`Store::open_default`] keeps the user's database; `None` for a throwaway one in memory.
+pub fn default_location() -> Result<Option<PathBuf>> {
+    match std::env::var("OIDO_DB") {
+        Ok(p) if p == ":memory:" => Ok(None),
+        Ok(p) => Ok(Some(PathBuf::from(p))),
+        Err(_) => default_path().map(Some),
     }
 }
 

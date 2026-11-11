@@ -51,12 +51,7 @@ impl Store {
     /// Registers a server with its secrets, sealed. Nothing is written if they cannot be sealed.
     pub fn insert_mcp_server(&self, server: &Server, secrets: &Secrets) -> Result<()> {
         let sealed = self.seal_mcp_secrets(&server.id, secrets)?;
-        let (transport, url, command, args) = match &server.transport {
-            Transport::Http { url } => ("http", url.as_str(), "", "[]".to_owned()),
-            Transport::Stdio { command, args } => {
-                ("stdio", "", command.as_str(), serde_json::to_string(args)?)
-            }
-        };
+        let (transport, url, command, args) = columns(&server.transport)?;
         self.conn
             .prepare_cached(self.sql("InsertMcpServer")?)?
             .execute((
@@ -72,6 +67,23 @@ impl Store {
                 &server.detail,
                 serde_json::to_string(&server.tools)?,
                 sealed,
+            ))?;
+        Ok(())
+    }
+
+    /// Saves how the server is reached and signed in to. Its name, state, tools and secrets are
+    /// saved apart.
+    pub fn update_mcp_server(&self, server: &Server) -> Result<()> {
+        let (transport, url, command, args) = columns(&server.transport)?;
+        self.conn
+            .prepare_cached(self.sql("UpdateMcpServer")?)?
+            .execute((
+                &server.id,
+                transport,
+                url,
+                command,
+                args,
+                server.auth.as_str(),
             ))?;
         Ok(())
     }
@@ -133,6 +145,16 @@ impl Store {
         let json = zeroize::Zeroizing::new(serde_json::to_string(secrets)?);
         Ok(self.vault.seal(&secrets_context(id), &json)?)
     }
+}
+
+/// The `transport`, `url`, `command` and `args` columns.
+fn columns(t: &Transport) -> Result<(&'static str, &str, &str, String)> {
+    Ok(match t {
+        Transport::Http { url } => ("http", url.as_str(), "", "[]".to_owned()),
+        Transport::Stdio { command, args } => {
+            ("stdio", "", command.as_str(), serde_json::to_string(args)?)
+        }
+    })
 }
 
 /// What sealed secrets are bound to, so one server's cannot be moved to another's row.

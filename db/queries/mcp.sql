@@ -14,6 +14,9 @@ DELETE FROM mcp_servers WHERE id = ?1;
 -- name: SetMcpEnabled :exec
 UPDATE mcp_servers SET enabled = ?2 WHERE id = ?1;
 
+-- name: UpdateMcpServer :exec
+UPDATE mcp_servers SET transport = ?2, url = ?3, command = ?4, args = ?5, auth = ?6 WHERE id = ?1;
+
 -- name: SetMcpListing :exec
 UPDATE mcp_servers SET status = ?2, status_detail = ?3, tools = ?4 WHERE id = ?1;
 

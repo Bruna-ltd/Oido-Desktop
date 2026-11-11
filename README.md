@@ -12,6 +12,12 @@ cargo watch -x run             # restarts on save (cargo install cargo-watch)
 cargo run -- --snap out.png --scene providers --size 1280x900   # a headless render (debug builds; --scene NAME shows sample data)
 ```
 
+Closing the window leaves Oido in the bar's tray (schedules keep firing); click the icon to bring it
+back, and quit from its menu or with Ctrl+Q. Without a tray, closing quits. A reply that finishes while
+the window is hidden or unfocused raises a desktop notification; clicking it opens the chat. Launching it again while it
+runs shows the running app's window: one app per database. Release builds add Oido to the app launcher
+(`~/.local/share/applications/oido-desktop.desktop` and its icon, from `assets/icon/`).
+
 Rune is pre-release, so `Cargo.toml` pins one revision of its `dev` branch. Bump it on purpose.
 
 ## Test

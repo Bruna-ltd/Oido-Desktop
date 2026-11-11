@@ -8,9 +8,8 @@
 //! it creates or changes waits as a [`Proposal`] for you to approve; pausing, resuming and deleting
 //! apply at once.
 
-use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use chrono::{Local, TimeZone};
@@ -329,7 +328,7 @@ impl App {
     }
 
     /// The schedule whose running fire has chat `sid`.
-    fn firing_in(&self, sid: &str) -> Option<String> {
+    pub(crate) fn firing_in(&self, sid: &str) -> Option<String> {
         self.firing
             .iter()
             .find(|(_, f)| f.session_id.as_deref() == Some(sid))
@@ -355,7 +354,11 @@ impl App {
             FireStatus::Succeeded => "Done.",
             _ => note,
         };
-        notify(name, body);
+        crate::notify::post(crate::notify::Note {
+            title: name.to_owned(),
+            body: body.to_owned(),
+            chat: fire.session_id.clone(),
+        });
     }
 
     /// Adds a message to the end of chat `sid` and saves it.
@@ -854,26 +857,6 @@ where
     tz.timestamp_opt(t, 0)
         .earliest()
         .map_or_else(|| t.to_string(), |d| d.format("%-d %b %H:%M").to_string())
-}
-
-/// Shows a desktop notification through `notify-send`, off the UI thread. Only in the running app
-/// (not tests or headless runs); a desktop without `notify-send` is told about once, on stderr.
-fn notify(title: &str, body: &str) {
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    if crate::app::handle().is_none() {
-        return;
-    }
-    let (title, body) = (title.to_owned(), body.to_owned());
-    std::thread::spawn(move || {
-        let shown = Command::new("notify-send")
-            .args(["--app-name=Oido", &title, &body])
-            .status();
-        if let Err(e) = shown
-            && !WARNED.swap(true, Ordering::Relaxed)
-        {
-            eprintln!("oido: cannot show notifications (notify-send): {e}");
-        }
-    });
 }
 
 #[cfg(test)]
