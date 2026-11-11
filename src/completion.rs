@@ -382,6 +382,16 @@ fn prepare(
     (format!("{}/{path}", ep.base), headers, body.to_string())
 }
 
+/// A call's arguments as the JSON object they should be, or `None` when the model's were cut off
+/// or malformed. Providers parse the arguments of earlier calls when they are sent back, and refuse
+/// the whole request over one that is not an object, so such a call goes back with `{}`: its
+/// result already says what went wrong.
+fn args_object(args: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(args)
+        .ok()
+        .filter(Value::is_object)
+}
+
 fn openai_messages(req: &Request) -> Vec<Value> {
     let mut messages = Vec::new();
     // One system message, the stable part first so a provider that caches by prefix keeps it.
@@ -415,7 +425,10 @@ fn openai_messages(req: &Request) -> Vec<Value> {
                 let calls: Vec<Value> = t
                     .calls
                     .iter()
-                    .map(|c| json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.args}}))
+                    .map(|c| {
+                        let args = if args_object(&c.args).is_some() { c.args.as_str() } else { "{}" };
+                        json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": args}})
+                    })
                     .collect();
                 let content = if t.text.is_empty() { Value::Null } else { json!(t.text) };
                 json!({"role": "assistant", "content": content, "tool_calls": calls})
@@ -495,7 +508,7 @@ fn anthropic_messages(req: &Request) -> Vec<Value> {
                     blocks.push(json!({"type": "text", "text": t.text}));
                 }
                 for c in &t.calls {
-                    let input: Value = serde_json::from_str(&c.args).unwrap_or_else(|_| json!({}));
+                    let input = args_object(&c.args).unwrap_or_else(|| json!({}));
                     blocks.push(
                         json!({"type": "tool_use", "id": c.id, "name": c.name, "input": input}),
                     );
@@ -1219,5 +1232,42 @@ data: {"type":"message_stop"}
             openai_body(Thinking::None, &r)["messages"][0]["role"],
             "user"
         );
+    }
+
+    #[test]
+    fn a_call_with_cut_off_arguments_goes_back_with_an_empty_object() {
+        let mut r = req(None);
+        for (id, args) in [("c1", r#"{"path": "a.md""#), ("c2", ""), ("c3", "[1]")] {
+            r.turns.push(Turn::assistant(
+                "",
+                vec![Call {
+                    id: id.into(),
+                    name: "write_file".into(),
+                    args: args.into(),
+                }],
+            ));
+            r.turns
+                .push(Turn::tool(id, "Error: the arguments were not valid JSON."));
+        }
+
+        let b = openai_body(Thinking::None, &r);
+        let sent: Vec<&Value> = b["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("tool_calls"))
+            .map(|c| &c[0]["function"]["arguments"])
+            .collect();
+        assert_eq!(sent, [&json!("{}"); 3]);
+
+        let b = anthropic_body(&r);
+        let inputs: Vec<&Value> = b["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .map(|m| &m["content"][0]["input"])
+            .collect();
+        assert_eq!(inputs, [&json!({}); 3]);
     }
 }

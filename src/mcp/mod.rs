@@ -12,7 +12,9 @@
 pub mod catalog;
 pub mod client;
 mod flow;
+mod manage;
 pub mod oauth;
+pub mod tool;
 
 use std::collections::BTreeMap;
 
@@ -23,6 +25,7 @@ use crate::completion::ToolSpec;
 
 pub use catalog::{PRESETS, Preset};
 pub use flow::{Kind, Mcp};
+pub use manage::{Draft, Proposal};
 
 /// What every MCP tool name starts with.
 pub const PREFIX: &str = "mcp__";
@@ -209,7 +212,11 @@ pub fn specs(servers: &[Server]) -> Vec<ToolSpec> {
 }
 
 fn spec(server: &Server, tool: &Tool) -> ToolSpec {
-    let from = format!("(From {}.)", server.name);
+    // A server runs in its own process, not in the agent's working folder.
+    let from = format!(
+        "(From {}. It does not run in your working folder: give it absolute paths.)",
+        server.name
+    );
     ToolSpec {
         name: server.qualified(&tool.name),
         description: if tool.description.trim().is_empty() {

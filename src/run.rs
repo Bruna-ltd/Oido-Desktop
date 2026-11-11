@@ -24,6 +24,10 @@ const FLUSH: Duration = Duration::from_millis(40);
 /// Chats are named after their first message, up to this many characters.
 const TITLE: usize = 40;
 
+/// The most of a reply's thinking the chat keeps, in bytes: past it, an ellipsis shows where it
+/// stopped. A model can think at great length, and the chat saves it with the reply.
+const THINKING_LIMIT: usize = 64 * 1024;
+
 /// A reply being written: one model call of a run, and what its step needs when it ends.
 pub struct Live {
     run_id: String,
@@ -356,7 +360,7 @@ impl App {
             .providers
             .model_info(&model)
             .is_none_or(|i| crate::models::can_think(&i.caps));
-        let context = crate::context::now_text();
+        let context = crate::context::now_text(&self.workdir_of(&sid));
         let mut request = Request {
             model: model.id.clone(),
             system,
@@ -369,6 +373,10 @@ impl App {
                 &crate::mcp::specs(&self.mcp.servers),
             ),
         };
+        // A chat carried on privately from a channel can send files there.
+        if let Some(kind) = self.channels.files_go(&sid) {
+            request.tools.push(crate::channels::send_file_spec(kind));
+        }
         // Older tool results and pictures are trimmed from what is sent when it would come near the
         // model's limit; the chat keeps them. If that is not enough, the older messages are
         // summarized first, and then this goes on; if there is nothing left to summarize and it
@@ -746,7 +754,7 @@ impl App {
         if !self.is_live(sid, rid) {
             return;
         }
-        let (mut text, mut calls) = (String::new(), Vec::new());
+        let (mut text, mut thinking, mut calls) = (String::new(), String::new(), Vec::new());
         if let Some(live) = self.live.get_mut(sid) {
             if live.first.is_none() && !events.iter().all(|e| matches!(e, Event::Usage(_))) {
                 live.first = Some(live.began.elapsed());
@@ -754,11 +762,12 @@ impl App {
             for ev in events {
                 match ev {
                     Event::Text(t) => text.push_str(&t),
-                    Event::Reasoning(t) => live.reasoning.push_str(&t),
+                    Event::Reasoning(t) => thinking.push_str(&t),
                     Event::ToolCall(call) => calls.push(call),
                     Event::Usage(t) => live.tokens.update(t),
                 }
             }
+            live.reasoning.push_str(&thinking);
             if !text.is_empty() && live.thought.is_none() && !live.reasoning.is_empty() {
                 live.thought = Some(live.began.elapsed());
             }
@@ -766,7 +775,10 @@ impl App {
         // Found before the chat is borrowed: whether a name is an MCP server's tool depends on the app.
         let known_calls: Vec<bool> = calls.iter().map(|c| self.tool_known(&c.name)).collect();
         if let Some(Message::Assistant {
-            text: body, tools, ..
+            text: body,
+            thinking: thought,
+            tools,
+            ..
         }) = self
             .roster
             .owner_of_mut(sid)
@@ -774,6 +786,14 @@ impl App {
             .and_then(|s| s.messages.last_mut())
         {
             body.push_str(&text);
+            let room = THINKING_LIMIT.saturating_sub(thought.len());
+            if room > 0 {
+                let (kept, cut) = crate::runs::clip(&thinking, room);
+                thought.push_str(&kept);
+                if cut {
+                    thought.push_str("\n\n…");
+                }
+            }
             for (call, known) in calls.into_iter().zip(known_calls) {
                 // A tool the model made up is answered at once.
                 tools.push(ToolCall {
@@ -889,15 +909,56 @@ impl App {
             self.run_file_tools(sid);
             self.run_teach_calls(sid);
             self.run_schedule_calls(sid);
+            self.run_mcp_server_calls(sid);
+            self.run_agent_calls(sid);
             self.start_delegations(sid);
             self.start_next_command(sid);
         }
+        // The turn is over (nothing more runs in the chat): a chat carried on from a channel gets
+        // what the agent wrote, before a message waiting for it goes.
+        let told = !self.busy_in(sid) && self.channel_turn_over(sid, status, failure.as_deref());
         // Your message that waited for this reply goes now, unless you stopped the reply or the
         // agent carries on.
         if status != Status::Cancelled {
             self.send_queued(sid);
         }
+        // The turn is over and you did not stop it yourself. A schedule's fire says so itself,
+        // once it ends; a channel's chat was told above.
+        if !told
+            && status != Status::Cancelled
+            && !self.busy_in(sid)
+            && self.firing_in(sid).is_none()
+        {
+            self.tell_finished(sid, &reply, failure.as_deref());
+        }
         self.fire_settled(sid, status, failure.as_deref());
+    }
+
+    /// Says in a desktop notification that chat `sid`'s turn is over, unless the window is in
+    /// front of you (shown and focused).
+    fn tell_finished(&self, sid: &str, reply: &str, failure: Option<&str>) {
+        let seen = self.focused && crate::app::handle().is_some_and(|h| h.is_visible());
+        if seen {
+            return;
+        }
+        let title = self
+            .roster
+            .owner_of(sid)
+            .map_or("Oido", |a| a.name.as_str())
+            .to_owned();
+        let body = match failure {
+            Some(why) => why.to_owned(),
+            None if self.pending_call_in(sid, crate::tools::ASK).is_some() => {
+                "Asks you something.".to_owned()
+            }
+            None if reply.trim().is_empty() => "Done.".to_owned(),
+            None => crate::notify::excerpt(reply),
+        };
+        crate::notify::post(crate::notify::Note {
+            title,
+            body,
+            chat: Some(sid.to_owned()),
+        });
     }
 
     /// The provider refused the call as too long: it goes again at once with all the older tool
@@ -1138,6 +1199,27 @@ impl App {
             self.start_mcp_call(&sid, &id, &name, &args);
             return true;
         }
+        if name == crate::channels::SEND_FILE {
+            self.start_send_file(&sid, &id, &args);
+            return true;
+        }
+        if name == crate::web::NAME {
+            // A fetch cannot be interrupted, only ended by its time limit; Stop discards it.
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.commands.insert(sid.clone(), Arc::clone(&cancel));
+            self.spawn(
+                move || (crate::web::fetch(&args), cancel.load(Ordering::Relaxed)),
+                move |app, (text, stopped)| {
+                    let finish = if stopped {
+                        crate::command::Finish::Stopped("Stopped before the page came back.".into())
+                    } else {
+                        crate::command::Finish::Done(text)
+                    };
+                    app.command_done(&sid, &id, finish);
+                },
+            );
+            return true;
+        }
         let Some(spec) = crate::command::parse(&args) else {
             self.resolve(
                 &sid,
@@ -1301,8 +1383,8 @@ impl App {
         }
     }
 
-    /// On start: a command asked for before the app closed never ran, and must not start now.
-    /// It is marked not run, so the chat is not left waiting for it.
+    /// On start: a command asked for before the app closed did not finish, and must not start now.
+    /// It is marked unfinished, so the chat is not left waiting for it. It may have run in part.
     pub(crate) fn settle_interrupted_commands(&mut self) {
         let sessions: Vec<String> = self
             .roster
@@ -1314,7 +1396,7 @@ impl App {
         for sid in sessions {
             self.close_commands(
                 &sid,
-                "Not run: the app was closed before this command started.",
+                "Not finished: the app was closed before this command ended. It may not have run, or run only in part.",
             );
         }
     }
@@ -1753,7 +1835,7 @@ mod tests {
             panic!("a reply");
         };
         assert!(
-            matches!(outcome, Outcome::Failed(why) if why.contains("would be sent about 40.") && why.contains("tokens and takes 32.8k")),
+            matches!(outcome, Outcome::Failed(why) if why.contains("would be sent about 4") && why.contains("tokens and takes 32.8k")),
             "{outcome:?}"
         );
         assert!(seen.try_recv().is_err(), "nothing was sent");
@@ -1797,8 +1879,8 @@ mod tests {
         assert!(request.contains("authorization: bearer sk-box"));
         assert!(request.contains("\"stream\":true") && request.contains("hi there"));
         assert!(
-            !request.contains("\"tools\""),
-            "an agent with no tools is offered none"
+            request.contains("\"tools\"") && !request.contains("\"delegate\""),
+            "the built-in tools, and no delegate without a team"
         );
 
         let Message::Assistant {
@@ -1840,8 +1922,8 @@ mod tests {
         );
         assert_eq!(r.model, ModelRef::new("llama-server:box", "llama-3.3-70b"));
         let kinds: Vec<_> = app.steps.iter().map(|s| s.kind).collect();
-        use StepKind::{Context, Llm, System, User};
-        assert_eq!(kinds, [System, Context, User, Llm]);
+        use StepKind::{Context, Llm, System, Tools, User};
+        assert_eq!(kinds, [System, Context, Tools, User, Llm]);
         assert!(
             app.steps[1]
                 .output
@@ -1850,8 +1932,8 @@ mod tests {
                 .contains("## Context"),
             "the record shows what it was told about the moment"
         );
-        assert_eq!(app.record, 3, "opened at the model's answer");
-        let call = &app.steps[3];
+        assert_eq!(app.record, 4, "opened at the model's answer");
+        let call = &app.steps[4];
         assert_eq!(call.output.as_deref(), Some("Hello!"));
         assert_eq!(call.reasoning.as_deref(), Some("hmm"));
         let sent = call.input.as_deref().unwrap();
@@ -1861,10 +1943,10 @@ mod tests {
         assert_eq!(r.title, "hi there");
         drop(app);
 
-        // After a restart the chat has the reply and the run is still listed.
+        // After a restart the chat has the reply, with its thinking, and the run is still listed.
         let mut app = db.open();
         assert!(
-            matches!(last(&app), Message::Assistant { text, outcome: Outcome::Done, .. } if text == "Hello!")
+            matches!(last(&app), Message::Assistant { text, thinking, outcome: Outcome::Done, .. } if text == "Hello!" && thinking == "hmm")
         );
         app.go(Route::Runs);
         assert_eq!(app.runs.len(), 1);
@@ -1955,6 +2037,42 @@ mod tests {
             panic!("failed");
         };
         assert!(why.contains("no saved key"), "{why}");
+    }
+
+    #[test]
+    fn thinking_streams_into_the_reply_up_to_a_limit() {
+        let db = TempDb::new();
+        let (mut app, _) = app_with_server(&db, vec![]);
+        let agent = app.current().unwrap();
+        let (sid, agent_id) = (agent.chat().id.clone(), agent.id.clone());
+        let model = ModelRef::new("llama-server:box", "llama-3.3-70b");
+        app.roster
+            .current_mut()
+            .unwrap()
+            .chat_mut()
+            .messages
+            .push(Message::reply("", Some("run-1".into()), Outcome::Working));
+        app.live
+            .insert(sid.clone(), Live::new("run-1", &agent_id, model));
+        let thinking = |app: &App| match last(app) {
+            Message::Assistant { thinking, .. } => thinking.clone(),
+            _ => String::new(),
+        };
+
+        app.apply(&sid, "run-1", vec![Event::Reasoning("Read the ".into())]);
+        app.apply(&sid, "run-1", vec![Event::Reasoning("notes.".into())]);
+        assert_eq!(thinking(&app), "Read the notes.");
+
+        let long = "x".repeat(THINKING_LIMIT);
+        app.apply(&sid, "run-1", vec![Event::Reasoning(long.clone())]);
+        app.apply(&sid, "run-1", vec![Event::Reasoning(long)]);
+        let kept = thinking(&app);
+        assert!(kept.ends_with("\n\n…"), "it says where it stopped");
+        assert!(
+            kept.len() <= THINKING_LIMIT + "\n\n…".len(),
+            "{}",
+            kept.len()
+        );
     }
 
     #[test]
@@ -2058,6 +2176,7 @@ mod tests {
     fn tool_calls_and_their_answers_go_back_to_the_model_and_sample_calls_do_not() {
         let asked = Message::Assistant {
             text: "Let me check.".into(),
+            thinking: String::new(),
             thought_secs: None,
             tools: vec![
                 ToolCall {
@@ -2351,6 +2470,7 @@ data: [DONE]
         let mut app = db.open_with_samples();
         let pending = Message::Assistant {
             text: "Running it.".into(),
+            thinking: String::new(),
             thought_secs: None,
             tools: vec![ToolCall {
                 name: "shell".into(),
@@ -2389,14 +2509,26 @@ data: [DONE]
     }
 
     #[test]
-    fn an_agent_without_the_shell_tool_is_not_offered_it() {
+    fn every_agent_is_offered_the_built_in_tools_without_choosing_them() {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![(200, "text/event-stream", STREAM)]);
-        app.roster.current_mut().unwrap().tools = vec![crate::tools::ASK.into()];
+        app.roster.current_mut().unwrap().tools = Vec::new();
         app.composer.edit = TextEdit::new("hi");
         app.send();
         let request = seen.recv().unwrap();
-        assert!(request.contains("ask_user_question") && !request.contains("\"shell\""));
+        for tool in [
+            "ask_user_question",
+            "\"shell\"",
+            "web_fetch",
+            "read_file",
+            "agents",
+        ] {
+            assert!(request.contains(tool), "{tool} is offered");
+        }
+        assert!(
+            !request.contains("typesafe_"),
+            "TypeSafe's are still chosen"
+        );
     }
 
     #[cfg(unix)]

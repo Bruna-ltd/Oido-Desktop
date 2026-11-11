@@ -28,6 +28,8 @@ pub enum Route {
     Usage,
     /// MCP servers: other programs that give agents tools.
     Mcp,
+    /// Messaging apps (Telegram) through which paired people talk to agents.
+    Channels,
     /// The app's own settings: its appearance.
     Settings,
     /// The create, edit and team-member form (`Roster::editing` says which).
@@ -100,6 +102,10 @@ pub struct App {
     pub resuming: std::collections::HashSet<String>,
     /// Summaries opened in a chat, by chat and position.
     pub summaries_open: std::collections::HashSet<(String, usize)>,
+    /// Replies whose thinking you opened or closed yourself, by chat and position: open or not.
+    pub thinking_open: std::collections::HashMap<(String, usize), bool>,
+    /// A reply's picture opened large, by its source and alt text.
+    pub viewing: Option<(String, String)>,
     /// Every task handed over this launch, by the call that handed it over, with how it went.
     pub delegated: std::collections::HashMap<String, crate::delegate::Delegated>,
     /// Counts seconds while something works, so clocks on screen redraw.
@@ -173,10 +179,18 @@ pub struct App {
     pub run_schedules: bool,
     /// Schedules agents proposed with their `schedule` tool, waiting for approval in their chats.
     pub proposals: Vec<crate::schedule::Proposal>,
+    /// Agent changes agents asked for with their `agents` tool, waiting for approval in their chats.
+    pub agent_drafts: Vec<crate::agent_tool::Draft>,
+    /// Why approving an agent draft did not go through, by the draft's tool call.
+    pub agent_draft_notice: Option<(String, String)>,
     /// The Schedules page.
     pub schedule_page: crate::schedules::Page,
+    /// The channels (Telegram): each one's bot, the people paired with it and their chats.
+    pub channels: crate::channels::Channels,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
+    /// The window has the keyboard focus, so the person is looking at it: no notifications then.
+    pub focused: bool,
 }
 
 /// The running app, for worker threads to hand their results back through. Unset in tests and
@@ -259,6 +273,8 @@ impl App {
             summarizing: std::collections::HashMap::new(),
             resuming: std::collections::HashSet::new(),
             summaries_open: std::collections::HashSet::new(),
+            thinking_open: std::collections::HashMap::new(),
+            viewing: None,
             delegated: std::collections::HashMap::new(),
             tick: 0,
             workflows: Vec::new(),
@@ -305,8 +321,12 @@ impl App {
             chat_usage: std::collections::HashMap::new(),
             agent_spend: Vec::new(),
             proposals: Vec::new(),
+            agent_drafts: Vec::new(),
+            agent_draft_notice: None,
             schedule_page: crate::schedules::Page::default(),
+            channels: crate::channels::Channels::default(),
             store,
+            focused: false,
         };
         app.settle_interrupted_commands();
         app.load_workflows();
@@ -314,6 +334,7 @@ impl App {
         app.load_schedules();
         app.load_prices();
         app.load_chat_usage();
+        app.load_channels();
         app
     }
 
@@ -435,21 +456,27 @@ impl App {
         }
     }
 
-    /// Deletes the confirmed agent. If its form is open, that closes too.
+    /// Deletes the confirmed agent.
     pub fn confirm_delete(&mut self) {
         if let Some(t) = self.roster.confirm.clone() {
-            if let Some(a) = self.roster.find(&t) {
-                for id in Roster::session_ids(a) {
-                    self.cancel_session(&id);
-                }
+            self.delete_agent_now(&t);
+        }
+    }
+
+    /// Deletes an agent or team member, stopping what runs in its chats. If its form is open,
+    /// that closes too.
+    pub(crate) fn delete_agent_now(&mut self, t: &Target) {
+        if let Some(a) = self.roster.find(t) {
+            for id in Roster::session_ids(a) {
+                self.cancel_session(&id);
             }
-            self.roster.delete(&t);
-            self.delete_saved_agent(&t.id);
-            self.load_workflows();
-            self.save_selection();
-            if self.route == Route::AgentForm {
-                self.cancel_form();
-            }
+        }
+        self.roster.delete(t);
+        self.delete_saved_agent(&t.id);
+        self.load_workflows();
+        self.save_selection();
+        if self.route == Route::AgentForm {
+            self.cancel_form();
         }
     }
 

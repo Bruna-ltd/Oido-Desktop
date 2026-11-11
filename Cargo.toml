@@ -15,8 +15,8 @@ getrandom = "0.4.3"
 keyring-core = "1.0.1"
 # Rune is pre-release: pin a rev of `dev` (never rewritten) and bump it deliberately.
 rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b" }
-# Components and app shell (sidebar, split view, toolbar). `markdown` renders agent replies.
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown"] }
+# Components and app shell (sidebar, split view, toolbar). `markdown` renders agent replies; `mermaid` draws their diagrams and charts.
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown", "mermaid"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -26,8 +26,17 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-i
 zeroize = "1.9.1"
 sha2 = "0.11"
 percent-encoding = "2"
+# Replies' Markdown turned into the HTML Telegram reads (the same version rune-kit renders with).
+pulldown-cmark = { version = "0.13", default-features = false }
+# Slack's Socket Mode: a WebSocket the app opens, so Slack needs no public address. Blocking, on a
+# thread of its own like the rest; TLS through the rustls ureq already brings.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
 croner = "4"
+# The icon in the desktop bar's tray (StatusNotifierItem), on the zbus 5 and async-io the keyring already uses.
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+# Desktop notifications (org.freedesktop.Notifications): the same zbus the tray and keyring run on.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 
 # Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with one change, a
 # mouse wheel notch scrolls 100 points instead of 40. Drop this section when upstream lets the app

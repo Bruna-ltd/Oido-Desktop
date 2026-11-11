@@ -152,7 +152,7 @@ fn status_line(u: &Updates) -> String {
 }
 
 /// A titled group of setting rows on one card, rules between them.
-fn section(title: &str, rows: Vec<El>, k: &Kit) -> El {
+pub(super) fn section(title: &str, rows: Vec<El>, k: &Kit) -> El {
     let c = &k.c;
     let mut card = col()
         .w_full()
@@ -181,7 +181,7 @@ fn section(title: &str, rows: Vec<El>, k: &Kit) -> El {
 }
 
 /// One setting: its name and what it does on the left, its control on the right.
-fn setting(key: &str, name: &str, help: &str, control: El, k: &Kit) -> El {
+pub(super) fn setting(key: &str, name: &str, help: &str, control: El, k: &Kit) -> El {
     row()
         .key(format!("setting-{key}"))
         .w_full()

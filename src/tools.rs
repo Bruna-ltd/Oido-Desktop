@@ -1,6 +1,5 @@
-//! The tools every agent is given. For now there is one: it lets the agent stop and ask you, rather
-//! than guess. Its answer comes back as the tool's result, in a new run (so a question can wait as
-//! long as you like, even across a restart).
+//! The app's own tools, which every agent has without choosing them (see [`offered`]), and how any
+//! tool, the app's or another's, is shown to the person.
 
 use serde_json::{Value, json};
 
@@ -39,6 +38,9 @@ pub fn registered() -> Vec<ToolSpec> {
             }),
         },
         crate::schedule::tool::spec(),
+        crate::mcp::tool::spec(),
+        crate::agent_tool::spec(),
+        crate::web::spec(),
         file_tool(
             crate::files::READ,
             "Read a text file in the working folder. Long files are cut; use `offset` (first line, from 1) and `limit` (number of lines) to read the rest in parts.",
@@ -132,21 +134,36 @@ fn ask() -> ToolSpec {
     }
 }
 
-/// The registered tools an agent has chosen, in the register's order, then MCP servers' (`mcp`, as
-/// [`crate::mcp::specs`] gives them). A chosen name that is no longer registered is ignored, and so
-/// are TypeSafe's while TypeSafe is not connected (`typesafe`).
+/// Whether a tool is one of the app's own, which every agent has without choosing it. TypeSafe's
+/// and MCP servers' tools are chosen per agent.
+pub fn is_builtin(name: &str) -> bool {
+    !needs_typesafe(name) && registered().iter().any(|t| t.name == name)
+}
+
+/// What an agent is offered: every built-in tool, then the TypeSafe and MCP tools it has chosen,
+/// in the register's order, then MCP servers' (`mcp`, as [`crate::mcp::specs`] gives them). A
+/// chosen name that is no longer registered is ignored, and so are TypeSafe's while TypeSafe is
+/// not connected (`typesafe`).
 pub fn offered(chosen: &[String], typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolSpec> {
     registered()
         .into_iter()
         .chain(mcp.iter().cloned())
-        .filter(|t| chosen.contains(&t.name) && (typesafe || !needs_typesafe(&t.name)))
+        .filter(|t| {
+            is_builtin(&t.name)
+                || (chosen.contains(&t.name) && (typesafe || !needs_typesafe(&t.name)))
+        })
         .collect()
 }
 
-/// A tool that runs in the background and ends later: a command, a workflow, a question put to
-/// TypeSafe, or a call to an MCP server.
+/// A tool that runs in the background and ends later: a command, a workflow, a page fetched from
+/// the web, a question put to TypeSafe, a call to an MCP server, or a file sent on Telegram.
 pub fn is_job(name: &str) -> bool {
-    name == SHELL || name == RUN_WORKFLOW || needs_typesafe(name) || crate::mcp::is_tool(name)
+    name == SHELL
+        || name == RUN_WORKFLOW
+        || name == crate::web::NAME
+        || needs_typesafe(name)
+        || crate::mcp::is_tool(name)
+        || name == crate::channels::SEND_FILE
 }
 
 /// Whether a tool waits for you (an answer, or a go-ahead) before its result exists.
@@ -159,7 +176,9 @@ pub fn summary(name: &str, args: &str) -> String {
     match name {
         ASK => question(args).text,
         SHELL => crate::command::parse(args).map_or_else(|| args.to_owned(), |s| s.command),
-        n if crate::files::is_file_tool(n) => crate::files::path_of(args),
+        n if crate::files::is_file_tool(n) || n == crate::channels::SEND_FILE => {
+            crate::files::path_of(args)
+        }
         DELEGATE => crate::delegate::summary(args),
         RUN_WORKFLOW => serde_json::from_str::<Value>(args)
             .ok()
@@ -167,6 +186,9 @@ pub fn summary(name: &str, args: &str) -> String {
             .unwrap_or_else(|| args.to_owned()),
         TEACH => "Save this as a workflow".to_owned(),
         crate::schedule::tool::NAME => crate::schedule::tool::summary(args),
+        crate::mcp::tool::NAME => crate::mcp::tool::summary(args),
+        crate::agent_tool::NAME => crate::agent_tool::summary(args),
+        crate::web::NAME => crate::web::summary(args),
         n if needs_typesafe(n) => crate::typesafe::summary(args),
         _ => args.to_owned(),
     }
@@ -236,6 +258,18 @@ fn own(name: &str) -> Option<(&'static str, &'static str)> {
         crate::schedule::tool::NAME => (
             "Schedule itself",
             "Sets prompts or workflows to run at set times; new ones need your approval.",
+        ),
+        crate::mcp::tool::NAME => (
+            "Manage MCP servers",
+            "Lists MCP servers, and drafts adding, changing or removing them for your approval.",
+        ),
+        crate::agent_tool::NAME => (
+            "Manage agents",
+            "Lists agents, and drafts creating, changing or deleting them for your approval.",
+        ),
+        crate::web::NAME => (
+            "Fetch web pages",
+            "Reads web pages and other text from the internet.",
         ),
         crate::files::READ => ("Read files", "Reads text files in its working folder."),
         crate::files::WRITE => (
@@ -318,7 +352,10 @@ fn first_sentence(text: &str) -> String {
 }
 
 pub fn knows(name: &str) -> bool {
-    name == DELEGATE || registered().iter().any(|t| t.name == name)
+    // `send_file` is offered only in chats carried on from Telegram; elsewhere it says so.
+    name == DELEGATE
+        || name == crate::channels::SEND_FILE
+        || registered().iter().any(|t| t.name == name)
 }
 
 /// A question as the model wrote it.
@@ -394,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_is_offered_only_the_registered_tools_it_chose() {
+    fn every_agent_is_offered_the_built_in_tools_and_nothing_unregistered() {
         let names = |chosen: &[&str]| -> Vec<String> {
             let chosen: Vec<String> = chosen.iter().map(|c| (*c).to_owned()).collect();
             offered(&chosen, false, &[])
@@ -402,12 +439,19 @@ mod tests {
                 .map(|t| t.name)
                 .collect()
         };
-        assert!(names(&[]).is_empty(), "no tools by default");
-        assert_eq!(names(&[ASK]), [ASK.to_owned()]);
-        assert!(
-            names(&["shell.run"]).is_empty(),
+        let builtin: Vec<String> = registered()
+            .into_iter()
+            .map(|t| t.name)
+            .filter(|n| is_builtin(n))
+            .collect();
+        assert!(builtin.contains(&SHELL.to_owned()) && builtin.contains(&ASK.to_owned()));
+        assert_eq!(names(&[]), builtin, "without choosing any");
+        assert_eq!(
+            names(&["shell.run"]),
+            builtin,
             "an unregistered name is ignored"
         );
+        assert!(!is_builtin(crate::typesafe::YES_NO) && !is_builtin("mcp__x__y"));
         assert!(knows(ASK) && !knows("shell.run"));
     }
 
@@ -448,10 +492,11 @@ mod tests {
             offered(&chosen, on, &[])
                 .into_iter()
                 .map(|t| t.name)
+                .filter(|n| !is_builtin(n))
                 .collect()
         };
-        assert_eq!(names(false), [ASK]);
-        assert_eq!(names(true), [ASK, crate::typesafe::YES_NO]);
+        assert!(names(false).is_empty());
+        assert_eq!(names(true), [crate::typesafe::YES_NO]);
         assert!(is_job(crate::typesafe::SCORE) && knows(crate::typesafe::CHOOSE));
     }
 }

@@ -179,7 +179,7 @@ struct Outcome {
 
 /// Tools that work without a person there: commands and files.
 fn unattended(name: &str) -> bool {
-    name == tools::SHELL || crate::files::is_file_tool(name)
+    name == tools::SHELL || name == crate::web::NAME || crate::files::is_file_tool(name)
 }
 
 fn run_tool(job: &Job, call: &Call) -> String {
@@ -196,6 +196,9 @@ fn run_tool(job: &Job, call: &Call) -> String {
         let (Finish::Done(text) | Finish::Stopped(text)) =
             command::run(&spec, &job.prep.shell_dir, &job.cancel);
         return text;
+    }
+    if call.name == crate::web::NAME {
+        return crate::web::fetch(&call.args);
     }
     if crate::files::is_file_tool(&call.name) {
         return match &job.prep.workdir {
@@ -467,7 +470,7 @@ impl App {
             system: Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty()),
             brief,
             skills,
-            context: crate::context::now_text(),
+            context: crate::context::now_text(&prep.shell_dir),
             think: crate::run::think_of(self.effort).filter(|_| can_think),
             tools: tools::offered(&member.tools, false, &[])
                 .into_iter()

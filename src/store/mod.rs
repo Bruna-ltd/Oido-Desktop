@@ -14,6 +14,7 @@ use rusqlite::Connection;
 use crate::vault::{self, Vault};
 
 mod agents;
+mod channels;
 mod mcp;
 mod models;
 mod providers;
@@ -94,7 +95,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 14] = [
+const MIGRATIONS: [&str; 17] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -109,9 +110,12 @@ const MIGRATIONS: [&str; 14] = [
     include_str!("../../db/migrations/012_usage.sql"),
     include_str!("../../db/migrations/013_dense_chat_positions.sql"),
     include_str!("../../db/migrations/014_context.sql"),
+    include_str!("../../db/migrations/015_channels.sql"),
+    include_str!("../../db/migrations/016_channel_names.sql"),
+    include_str!("../../db/migrations/017_channel_agents.sql"),
 ];
 
-const QUERY_FILES: [&str; 9] = [
+const QUERY_FILES: [&str; 10] = [
     include_str!("../../db/queries/settings.sql"),
     include_str!("../../db/queries/providers.sql"),
     include_str!("../../db/queries/agents.sql"),
@@ -121,6 +125,7 @@ const QUERY_FILES: [&str; 9] = [
     include_str!("../../db/queries/mcp.sql"),
     include_str!("../../db/queries/schedules.sql"),
     include_str!("../../db/queries/usage.sql"),
+    include_str!("../../db/queries/channels.sql"),
 ];
 
 pub struct Store {
@@ -134,10 +139,9 @@ impl Store {
     /// The user's database: `$OIDO_DB` if set (`:memory:` for a throwaway one), else
     /// `oido.db` in the app's data folder.
     pub fn open_default() -> Result<Store> {
-        match std::env::var("OIDO_DB") {
-            Ok(p) if p == ":memory:" => Store::in_memory(Vault::os()),
-            Ok(p) => Store::open(Path::new(&p), Vault::os()),
-            Err(_) => Store::open(&default_path()?, Vault::os()),
+        match default_location()? {
+            None => Store::in_memory(Vault::os()),
+            Some(path) => Store::open(&path, Vault::os()),
         }
     }
 
@@ -172,6 +176,15 @@ impl Store {
             .find(|(n, _)| *n == name)
             .map(|(_, sql)| *sql)
             .ok_or(Error::MissingQuery(name))
+    }
+}
+
+/// Where [`Store::open_default`] keeps the user's database; `None` for a throwaway one in memory.
+pub fn default_location() -> Result<Option<PathBuf>> {
+    match std::env::var("OIDO_DB") {
+        Ok(p) if p == ":memory:" => Ok(None),
+        Ok(p) => Ok(Some(PathBuf::from(p))),
+        Err(_) => default_path().map(Some),
     }
 }
 

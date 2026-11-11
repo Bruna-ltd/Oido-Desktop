@@ -356,6 +356,11 @@ impl App {
         }
     }
 
+    /// Opens or closes a reply's thinking, which was `open`; from then on it stays as you left it.
+    pub fn toggle_thinking(&mut self, sid: &str, i: usize, open: bool) {
+        self.thinking_open.insert((sid.to_owned(), i), !open);
+    }
+
     /// The model's context limit, when anything states it.
     pub fn context_limit(&self, model: &ModelRef) -> Option<u32> {
         let declared = self.providers.model_info(model).and_then(|i| i.context);
