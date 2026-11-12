@@ -4,6 +4,19 @@ A native desktop app for running agents, written in Rust on the [Rune](https://g
 GPU UI framework. It is its own app: it does not talk to `oido-core`. It keeps its agents, chats,
 providers and settings in a local SQLite database, and talks to model providers directly.
 
+## Install
+
+```
+curl -fsSL https://raw.githubusercontent.com/Bruna-ltd/Oido-Desktop/main/scripts/install.sh | bash
+```
+
+Downloads the latest release for this machine, checks its SHA-256, and installs it at
+`~/.local/bin/oido-desktop` (`OIDO_INSTALL_DIR` for another folder, `OIDO_VERSION=0.2.0` for a
+particular release). Linux only; it needs OpenSSL 3 (`libcrypto.so.3`). The first launch adds Oido to
+the app launcher, and from then on it updates itself. The repository must be public for the script and
+the updater to see its releases. To remove it, delete the binary, `~/.local/share/applications/oido-desktop.desktop`
+and, if you want your agents and chats gone too, `~/.local/share/oido-desktop`.
+
 ## Run
 
 ```
