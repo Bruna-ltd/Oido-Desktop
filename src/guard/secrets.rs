@@ -2,7 +2,10 @@
 //! turned back into the real values on this computer.
 //!
 //! Only well-known shapes are looked for (a provider's key prefix, a private key block, a password
-//! written as `password = …`, the password in a URL), so ordinary text is left alone.
+//! written as `password = …`, the password in a URL), so ordinary text is left alone. Personal
+//! details (an email address, an international phone number, a card number that passes its check
+//! digit, an IBAN that passes its checksum) and words the person blocked are hidden the same way,
+//! each behind a placeholder that says what it is: `<<EMAIL_2>>`, `<<WORD_4>>`.
 
 use std::sync::LazyLock;
 
@@ -69,10 +72,114 @@ static DETECTORS: LazyLock<Vec<Detector>> = LazyLock::new(|| {
     ]
 });
 
-/// `<<SECRET_3>>`, as the model sees a hidden value.
-static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<<SECRET_(\d+)>>").unwrap_or_else(|e| panic!("bad placeholder pattern: {e}"))
+static PERSONAL: LazyLock<Vec<Detector>> = LazyLock::new(|| {
+    vec![
+        Detector {
+            accept: |v| !v.starts_with("git@"),
+            ..detector(
+                "email address",
+                r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
+                0,
+            )
+        },
+        // Only international numbers (`+357 99 123456`, `0044 20 7946 0958`): a bare run of
+        // digits is too often something else.
+        Detector {
+            accept: |v| (8..=15).contains(&digits(v).len()),
+            ..detector("phone number", r"(?:\+|\b00)\d[\d ().\-]{6,20}\d", 0)
+        },
+        Detector {
+            accept: card,
+            ..detector("card number", r"\b\d(?:[ \-]?\d){12,18}\b", 0)
+        },
+        Detector {
+            accept: iban,
+            ..detector("IBAN", r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b", 0)
+        },
+    ]
 });
+
+fn digits(v: &str) -> String {
+    v.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// Whether a run of digits is a card number: 13 to 19 digits, not all the same, whose last digit
+/// checks out.
+fn card(v: &str) -> bool {
+    let d = digits(v);
+    (13..=19).contains(&d.len()) && luhn(&d) && d.chars().any(|c| !d.starts_with(c))
+}
+
+/// Whether a card number's last digit checks out (Luhn).
+fn luhn(digits: &str) -> bool {
+    let sum: u32 = digits
+        .chars()
+        .rev()
+        .filter_map(|c| c.to_digit(10))
+        .enumerate()
+        .map(|(i, d)| match (i % 2, d * 2) {
+            (1, twice) if twice > 9 => twice - 9,
+            (1, twice) => twice,
+            _ => d,
+        })
+        .sum();
+    sum.is_multiple_of(10)
+}
+
+/// Whether an IBAN's check digits check out (ISO 13616: mod 97 of the rearranged number is 1).
+fn iban(v: &str) -> bool {
+    let compact: String = v.chars().filter(|c| !c.is_whitespace()).collect();
+    if !(15..=34).contains(&compact.len()) {
+        return false;
+    }
+    let (head, tail) = compact.split_at(4);
+    let mut rest = 0u32;
+    for c in tail.chars().chain(head.chars()) {
+        let n = match c.to_digit(36) {
+            Some(n) => n,
+            None => return false,
+        };
+        for d in n.to_string().chars().filter_map(|d| d.to_digit(10)) {
+            rest = (rest * 10 + d) % 97;
+        }
+    }
+    rest == 1
+}
+
+/// What a placeholder calls a kind of hidden value.
+fn label(kind: &str) -> &'static str {
+    match kind {
+        "email address" => "EMAIL",
+        "phone number" => "PHONE",
+        "card number" => "CARD",
+        "IBAN" => "IBAN",
+        BLOCKED => "WORD",
+        _ => "SECRET",
+    }
+}
+
+/// The kind of a word the person blocked.
+const BLOCKED: &str = "blocked word";
+
+/// `<<SECRET_3>>`, `<<EMAIL_4>>`: a hidden value as the model sees it.
+static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<<(?:SECRET|EMAIL|PHONE|CARD|IBAN|WORD)_(\d+)>>")
+        .unwrap_or_else(|e| panic!("bad placeholder pattern: {e}"))
+});
+
+/// A pattern for the words the person blocked, whole words and in any case, or `None` for none.
+pub fn words(blocked: &[String]) -> Option<Regex> {
+    let alternatives: Vec<String> = blocked
+        .iter()
+        .map(|w| w.trim())
+        .filter(|w| !w.is_empty())
+        .map(regex::escape)
+        .collect();
+    (!alternatives.is_empty()).then(|| {
+        Regex::new(&format!(r"(?i)\b(?:{})\b", alternatives.join("|")))
+            .unwrap_or_else(|e| panic!("escaped words always make a pattern: {e}"))
+    })
+}
 
 /// Whether a value caught by the `password = …` pattern is one: long enough, letters and digits,
 /// and not code, a variable or a placeholder.
@@ -93,8 +200,17 @@ pub struct Found {
 
 /// Every secret in `text`, in the order they appear, overlapping finds counted once (the longer).
 pub fn find(text: &str) -> Vec<Found> {
+    find_with(&DETECTORS, text)
+}
+
+/// Every personal detail in `text` (see [`PERSONAL`]), as [`find`].
+pub fn find_personal(text: &str) -> Vec<Found> {
+    find_with(&PERSONAL, text)
+}
+
+fn find_with(detectors: &[Detector], text: &str) -> Vec<Found> {
     let mut spans: Vec<(usize, usize, &'static str)> = Vec::new();
-    for d in DETECTORS.iter() {
+    for d in detectors {
         for caps in d.pattern.captures_iter(text) {
             let Some(m) = caps.get(d.group) else {
                 continue;
@@ -158,18 +274,32 @@ impl Hidden {
 
     /// Notes the secrets in `text` not already known.
     pub fn learn(&mut self, text: &str) {
-        for f in find(text) {
+        self.note(find(text));
+    }
+
+    /// Notes the personal details in `text` not already known.
+    pub fn learn_personal(&mut self, text: &str) {
+        self.note(find_personal(text));
+    }
+
+    /// Notes the blocked words (`blocked`, from [`words`]) in `text` as written there.
+    pub fn learn_words(&mut self, text: &str, blocked: &Regex) {
+        self.note(
+            blocked
+                .find_iter(text)
+                .map(|m| Found {
+                    kind: BLOCKED,
+                    value: m.as_str().to_owned(),
+                })
+                .collect(),
+        );
+    }
+
+    fn note(&mut self, found: Vec<Found>) {
+        for f in found {
             if !self.found.iter().any(|k| k.value == f.value) {
                 self.found.push(f);
             }
-        }
-    }
-
-    /// Notes the secrets in the strings of a tool call's JSON arguments.
-    pub fn learn_json(&mut self, args: &str) {
-        match serde_json::from_str::<Value>(args) {
-            Ok(v) => walk(&v, &mut |s| self.learn(s)),
-            Err(_) => self.learn(args),
         }
     }
 
@@ -243,7 +373,7 @@ impl Hidden {
         self.found
             .iter()
             .position(|f| f.value == value)
-            .map(|i| format!("<<SECRET_{}>>", i + 1))
+            .map(|i| format!("<<{}_{}>>", label(self.found[i].kind), i + 1))
     }
 }
 
@@ -295,6 +425,18 @@ pub fn has_placeholder(text: &str) -> bool {
 /// The first placeholder in `text`, if any.
 pub fn first_placeholder(text: &str) -> Option<&str> {
     PLACEHOLDER.find(text).map(|m| m.as_str())
+}
+
+/// The strings in a tool call's JSON arguments, or the arguments themselves when they are not JSON.
+pub fn json_strings(args: &str) -> Vec<String> {
+    match serde_json::from_str::<Value>(args) {
+        Ok(v) => {
+            let mut out = Vec::new();
+            walk(&v, &mut |s| out.push(s.to_owned()));
+            out
+        }
+        Err(_) => vec![args.to_owned()],
+    }
 }
 
 fn walk(v: &Value, f: &mut dyn FnMut(&str)) {
@@ -411,6 +553,73 @@ mod tests {
             r#"{"a":"plain"}"#,
             "untouched arguments keep their exact text"
         );
+    }
+
+    #[test]
+    fn personal_details_are_found_only_when_their_checks_pass() {
+        let found = |t: &str| -> Vec<(&str, String)> {
+            find_personal(t)
+                .into_iter()
+                .map(|f| (f.kind, f.value))
+                .collect()
+        };
+        assert_eq!(
+            found("write to ada.l@example.org today"),
+            [("email address", "ada.l@example.org".to_owned())]
+        );
+        assert_eq!(
+            found("call +357 99 123456 or 0044 20 7946 0958"),
+            [
+                ("phone number", "+357 99 123456".to_owned()),
+                ("phone number", "0044 20 7946 0958".to_owned())
+            ]
+        );
+        assert_eq!(
+            found("card 4111 1111 1111 1111 exp 12/29"),
+            [("card number", "4111 1111 1111 1111".to_owned())]
+        );
+        assert_eq!(
+            found("IBAN GB82 WEST 1234 5698 7654 32."),
+            [("IBAN", "GB82 WEST 1234 5698 7654 32".to_owned())]
+        );
+        for plain in [
+            "card 4111 1111 1111 1112",
+            "IBAN GB83 WEST 1234 5698 7654 32",
+            "version 1.2.3.4 and build 20261111",
+            "git@github.com:owner/repo.git",
+            "0000000000000000",
+            "+1 23",
+        ] {
+            assert!(
+                find_personal(plain).is_empty(),
+                "{plain:?}: {:?}",
+                found(plain)
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_words_are_hidden_as_written_in_any_case_and_only_as_whole_words() {
+        let pattern = words(&["Project Falcon".into(), " acme ".into(), "".into()]).unwrap();
+        let mut h = Hidden::default();
+        h.learn_words("Ask ACME about project falcon, not acmeville.", &pattern);
+        assert_eq!(h.len(), 2);
+        assert_eq!(
+            h.hide("ACME and project falcon"),
+            "<<WORD_1>> and <<WORD_2>>"
+        );
+        assert_eq!(h.describe(), "2 blocked words");
+        assert!(words(&[" ".into()]).is_none());
+    }
+
+    #[test]
+    fn each_kind_has_its_own_placeholder_and_all_come_back() {
+        let mut h = Hidden::default();
+        h.learn(KEY);
+        h.learn_personal("ada@example.org");
+        let hidden = h.hide(&format!("{KEY} for ada@example.org"));
+        assert_eq!(hidden, "<<SECRET_1>> for <<EMAIL_2>>");
+        assert_eq!(h.reveal(&hidden), format!("{KEY} for ada@example.org"));
     }
 
     #[test]

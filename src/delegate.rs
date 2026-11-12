@@ -239,8 +239,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
         home: dirs::home_dir(),
     };
     // Its calls whose results are outside text, and what each is; and what it has in view now.
-    let mut came_in: std::collections::HashMap<String, &'static str> =
-        std::collections::HashMap::new();
+    let mut came_in: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut in_view = job.outside.clone();
     // The last call's count, and whether the next goes again after a too-long refusal.
     let (mut measured, mut retry) = (None, false);
@@ -264,7 +263,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                         .call_id
                         .as_deref()
                         .filter(|_| !window::was_trimmed(&t.text))?;
-                    came_in.get(id).map(|what| (*what).to_owned())
+                    came_in.get(id).cloned()
                 })
             });
             let request = guard.request(request, &mut hidden);
@@ -399,12 +398,19 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 let result = match refused {
                     Some(told) => told,
                     None => {
-                        if let Some(what) =
-                            crate::guard::taint::result_source(&call.name, job.trust_folder)
-                        {
+                        let result = run_tool(job, call);
+                        let source =
+                            crate::guard::taint::result_source(&call.name, job.trust_folder);
+                        let what = if guard.on(crate::guard::Pack::Injection) {
+                            crate::guard::injection::describe(source, &result)
+                        } else {
+                            source.map(str::to_owned)
+                        };
+                        if let Some(what) = what {
+                            guard.learn_outside(&mut hidden, &result);
                             came_in.insert(call.id.clone(), what);
                         }
-                        run_tool(job, call)
+                        result
                     }
                 };
                 tell(Note::ToolDone {

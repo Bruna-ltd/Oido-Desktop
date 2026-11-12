@@ -196,6 +196,10 @@ pub struct App {
     pub tainted: std::collections::HashMap<String, String>,
     /// Calls from work nobody is watching (team members, workflows) waiting for your go-ahead.
     pub waiting: Vec<crate::guard::ask::Waiting>,
+    /// When each channel person's recent messages came, for the hourly limit (`guard::intake`).
+    pub intake: std::collections::HashMap<String, Vec<i64>>,
+    /// The blocked words as typed on the Guardrails screen, until saved.
+    pub guard_words: TextEdit,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
     /// The window has the keyboard focus, so the person is looking at it: no notifications then.
@@ -337,6 +341,8 @@ impl App {
             guard: crate::guard::Guard::load(store.as_ref()),
             tainted: std::collections::HashMap::new(),
             waiting: Vec::new(),
+            intake: std::collections::HashMap::new(),
+            guard_words: TextEdit::new(""),
             store,
             focused: false,
         };
@@ -347,6 +353,7 @@ impl App {
         app.load_prices();
         app.load_chat_usage();
         app.load_channels();
+        app.guard_words = TextEdit::new(app.guard.words().join(", "));
         app
     }
 

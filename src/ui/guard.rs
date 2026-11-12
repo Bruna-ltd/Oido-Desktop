@@ -2,7 +2,7 @@
 //! the Guardrails screen, where each pack of rules is switched on or off.
 
 use rune::{El, ScrollSpec, col, text};
-use rune_kit::{Button, ButtonVariant, Card, ControlSize, Kit, Switch};
+use rune_kit::{Button, ButtonVariant, Card, ControlSize, Kit, Switch, TextInput};
 
 use super::settings::{section, setting};
 use crate::app::App;
@@ -217,32 +217,161 @@ pub fn screen(s: &App, k: &Kit) -> El {
                         .wrap(),
                 )
                 .child(section("Rules", rows, k))
+                .child(section("Blocked words", vec![words_row(s, k)], k))
+                .child(section(
+                    "Channels",
+                    vec![length_row(s, k), rate_row(s, k)],
+                    k,
+                ))
                 .child(section("Go-ahead", vec![wait_row(s, k)], k)),
         )
 }
 
-/// How long a call held for your go-ahead waits before it is not run.
-fn wait_row(s: &App, k: &Kit) -> El {
-    let chosen = s.guard.wait();
-    let choices = rune::row()
+/// A row of buttons, one per choice (a value and its words), the chosen one marked.
+fn choices(
+    key: &str,
+    options: impl IntoIterator<Item = (u32, String)>,
+    chosen: u32,
+    pick: fn(&mut App, u32),
+    k: &Kit,
+) -> El {
+    rune::row()
         .gap(6.0)
-        .children(crate::guard::WAITS.iter().map(|&m| {
-            Button::new(format!("{m} min"))
-                .variant(if m == chosen {
+        .children(options.into_iter().map(|(value, words)| {
+            Button::new(words)
+                .variant(if value == chosen {
                     ButtonVariant::Contrast
                 } else {
                     ButtonVariant::Outline
                 })
                 .control_size(ControlSize::Small)
-                .on_press(move |s: &mut App| s.set_guard_wait(m))
+                .on_press(move |s: &mut App| pick(s, value))
                 .build(k)
-                .key(format!("guard-wait-{m}"))
-        }));
+                .key(format!("{key}-{value}"))
+        }))
+}
+
+/// How long a call held for your go-ahead waits before it is not run.
+fn wait_row(s: &App, k: &Kit) -> El {
     setting(
         "guard-wait",
         "Wait for your answer",
         "How long a call held for your go-ahead waits. Then it does not run, and the agent, or the person on a channel, is told.",
-        choices,
+        choices(
+            "guard-wait",
+            crate::guard::WAITS.map(|m| (m, format!("{m} min"))),
+            s.guard.wait(),
+            App::set_guard_wait,
+            k,
+        ),
         k,
     )
+}
+
+/// The longest message one channel person may send.
+fn length_row(s: &App, k: &Kit) -> El {
+    let limits = s.guard.limits();
+    setting(
+        "guard-length",
+        "Longest message",
+        "A longer message from someone on a channel is turned away with a short reply, before it reaches an agent.",
+        choices(
+            "guard-length",
+            crate::guard::LENGTHS.map(|n| {
+                (
+                    n,
+                    if n == 0 {
+                        "Off".to_owned()
+                    } else {
+                        format!("{n} chars")
+                    },
+                )
+            }),
+            limits.length,
+            |s, length| {
+                let limits = s.guard.limits();
+                s.set_channel_limits(crate::guard::Limits { length, ..limits });
+            },
+            k,
+        ),
+        k,
+    )
+}
+
+/// How many messages one channel person may send in an hour.
+fn rate_row(s: &App, k: &Kit) -> El {
+    let limits = s.guard.limits();
+    setting(
+        "guard-rate",
+        "Messages an hour, each person",
+        "Past it, someone on a channel is asked to try again later, so nobody can run up your costs.",
+        choices(
+            "guard-rate",
+            crate::guard::RATES.map(|n| {
+                (
+                    n,
+                    if n == 0 {
+                        "Off".to_owned()
+                    } else {
+                        n.to_string()
+                    },
+                )
+            }),
+            limits.per_hour,
+            |s, per_hour| {
+                let limits = s.guard.limits();
+                s.set_channel_limits(crate::guard::Limits { per_hour, ..limits });
+            },
+            k,
+        ),
+        k,
+    )
+}
+
+/// The words never sent to a model, nor shown to a channel person who did not write them.
+fn words_row(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let saved = s.guard.words().join(", ");
+    let changed = s.guard_words.text.trim() != saved;
+    col()
+        .key("setting-guard-words")
+        .w_full()
+        .padding(16.0)
+        .gap(10.0)
+        .child(
+            text("Names of clients or competitors, internal code names, words you do not want used: never sent to a model, and never shown to someone on a channel who did not write them. The agent sees a placeholder; your chat shows the word.")
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .wrap(),
+        )
+        .child(
+            rune::row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    col().grow(1.0).min_w(0.0).child(
+                        TextInput::new(&s.guard_words)
+                            .placeholder("e.g. Project Falcon, Acme")
+                            .label("Blocked words, split by commas")
+                            .on_edit(|s: &mut App| &mut s.guard_words)
+                            .build(k)
+                            .w_full()
+                            .key("guard-words-input"),
+                    ),
+                )
+                .child(
+                    Button::new("Save")
+                        .variant(ButtonVariant::Outline)
+                        .control_size(ControlSize::Small)
+                        .disabled(!changed)
+                        .on_press(|s: &mut App| {
+                            let text = s.guard_words.text.clone();
+                            s.set_guard_words(&text);
+                            s.guard_words = rune::TextEdit::new(s.guard.words().join(", "));
+                        })
+                        .build(k)
+                        .key("guard-words-save"),
+                ),
+        )
 }

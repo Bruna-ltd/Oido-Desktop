@@ -12,6 +12,9 @@
 pub mod actions;
 pub mod ask;
 mod gate;
+pub mod injection;
+mod intake;
+pub mod replies;
 pub mod secrets;
 pub mod taint;
 
@@ -20,6 +23,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use self::actions::Place;
+pub use self::intake::topics;
 pub use self::secrets::Hidden;
 use crate::completion::Request;
 use crate::model::Message;
@@ -29,6 +33,15 @@ use crate::store::Store;
 const PACKS: &str = "guard.packs";
 /// Where how long a go-ahead is waited for is saved, in minutes.
 const WAIT: &str = "guard.wait";
+/// Where the blocked words are saved.
+const WORDS: &str = "guard.words";
+/// Where the limits on channel messages are saved.
+const LIMITS: &str = "guard.channel_limits";
+
+/// The longest channel message choices on the Guardrails screen, in characters (0: no limit).
+pub const LENGTHS: [u32; 4] = [0, 500, 2000, 8000];
+/// The messages-an-hour choices for one channel person on the Guardrails screen (0: no limit).
+pub const RATES: [u32; 4] = [0, 10, 30, 100];
 
 /// How long a call held for a go-ahead waits, in minutes, until it is changed on the Guardrails
 /// screen; after it, the call does not run.
@@ -38,7 +51,7 @@ const DEFAULT_WAIT: u32 = 10;
 pub const WAITS: [u32; 4] = [5, 10, 30, 60];
 
 /// What the model is told when values are hidden from it.
-const PLACEHOLDER_NOTE: &str = "Some values, such as keys and passwords, are hidden from you as placeholders like <<SECRET_1>>. Where a value is needed, in a tool's arguments too, write its placeholder exactly as it is: it is replaced with the real value on the person's computer. Never guess or ask for a hidden value.";
+const PLACEHOLDER_NOTE: &str = "Some values, such as keys, passwords, personal details and certain words, are hidden from you as placeholders like <<SECRET_1>>, <<EMAIL_2>> or <<WORD_3>>. Where a value is needed, in a tool's arguments too, write its placeholder exactly as it is: it is replaced with the real value on the person's computer. Never guess or ask for a hidden value.";
 
 /// A group of rules switched on or off together.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
@@ -50,16 +63,38 @@ pub enum Pack {
     Actions,
     /// While outside text is in what a model is sent, every call that acts waits for a go-ahead.
     Taint,
+    /// Invisible characters are taken out of what a model is sent, and text that tries to give
+    /// orders counts as outside text whatever its source.
+    Injection,
+    /// Email addresses, phone numbers, card numbers and IBANs in outside text never reach a model.
+    Personal,
+    /// Replies to channel people are checked: no echo of the brief, no paths or internal addresses.
+    Replies,
 }
 
 impl Pack {
-    pub const ALL: [Pack; 3] = [Pack::Secrets, Pack::Actions, Pack::Taint];
+    pub const ALL: [Pack; 6] = [
+        Pack::Secrets,
+        Pack::Actions,
+        Pack::Taint,
+        Pack::Injection,
+        Pack::Personal,
+        Pack::Replies,
+    ];
+
+    /// Whether the pack is on until switched: the ones that could get in the way start off.
+    fn starts_on(self) -> bool {
+        !matches!(self, Self::Personal | Self::Replies)
+    }
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Secrets => "Hide secrets from models",
             Self::Actions => "Stop risky actions",
             Self::Taint => "Ask before acting on outside text",
+            Self::Injection => "Catch hidden instructions",
+            Self::Personal => "Hide personal details from models",
+            Self::Replies => "Check replies to channels",
         }
     }
 
@@ -74,6 +109,15 @@ impl Pack {
             Self::Taint => {
                 "While an agent has a web page, an MCP tool's result or a message from someone not trusted in front of it, it asks before it runs a command, changes a file, fetches a page, sends something or uses another tool that acts, so instructions hidden in that text cannot act on their own."
             }
+            Self::Injection => {
+                "Characters you cannot see are taken out of what goes to a model, and text that tries to give the agent orders (\"ignore your previous instructions\", a fake system message) counts as outside text even from a folder or person you trust. MCP tools' descriptions are checked too."
+            }
+            Self::Personal => {
+                "Email addresses, international phone numbers, card numbers and IBANs in outside text (web pages, MCP results, messages from people not trusted) are replaced with placeholders before anything goes to a model, and put back on this computer."
+            }
+            Self::Replies => {
+                "A reply to someone on a channel is held back if it repeats the agent's instructions, and paths on this computer and internal addresses (localhost, 192.168…) in it are left out."
+            }
         }
     }
 
@@ -82,6 +126,9 @@ impl Pack {
             Self::Secrets => "secrets",
             Self::Actions => "actions",
             Self::Taint => "taint",
+            Self::Injection => "injection",
+            Self::Personal => "personal",
+            Self::Replies => "replies",
         }
     }
 }
@@ -203,21 +250,79 @@ pub fn title(rule: &str) -> &'static str {
 
 /// A request that has been through the guard, and so may be sent to a model.
 #[derive(Clone, PartialEq, Debug)]
-pub struct Guarded(Request);
+pub struct Guarded {
+    req: Request,
+    /// How many invisible characters were taken out of it.
+    stripped: usize,
+}
 
 impl Guarded {
     pub fn request(&self) -> &Request {
-        &self.0
+        &self.req
+    }
+
+    /// How many characters a person cannot see were taken out of it.
+    pub fn stripped(&self) -> usize {
+        self.stripped
     }
 }
 
-/// Which packs are on: the rules every check applies.
+/// Limits on what one channel person may send (see `Guard::limits`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Limits {
+    /// The longest message, in characters; 0 for no limit.
+    #[serde(default)]
+    pub length: u32,
+    /// How many messages an hour; 0 for no limit.
+    #[serde(default)]
+    pub per_hour: u32,
+}
+
+/// The rules every check applies: which packs are on, how long a go-ahead is waited for, the
+/// blocked words and the limits on channel messages.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Guard {
-    /// Packs switched from how they start; any not here is on.
+    /// Packs switched from how they start (see [`Pack::starts_on`]).
     packs: BTreeMap<Pack, bool>,
     /// How long a go-ahead is waited for, in minutes, when changed from [`DEFAULT_WAIT`].
     wait: Option<u32>,
+    /// Words never sent to a model or shown to a channel person who did not write them.
+    words: Vec<String>,
+    limits: Limits,
+}
+
+/// What [`Guard`] looks for when it learns what to hide from a text.
+struct Learner {
+    secrets: bool,
+    personal: bool,
+    words: Option<regex::Regex>,
+}
+
+impl Learner {
+    fn active(&self) -> bool {
+        self.secrets || self.personal || self.words.is_some()
+    }
+
+    /// Notes what to hide in `text`: secrets and blocked words anywhere, personal details only in
+    /// `outside` text.
+    fn learn(&self, hidden: &mut Hidden, text: &str, outside: bool) {
+        if self.secrets {
+            hidden.learn(text);
+        }
+        if let Some(words) = &self.words {
+            hidden.learn_words(text, words);
+        }
+        if self.personal && outside {
+            hidden.learn_personal(text);
+        }
+    }
+
+    /// [`Learner::learn`] over the strings of a tool call's arguments.
+    fn learn_json(&self, hidden: &mut Hidden, args: &str, outside: bool) {
+        for s in secrets::json_strings(args) {
+            self.learn(hidden, &s, outside);
+        }
+    }
 }
 
 impl Guard {
@@ -233,18 +338,61 @@ impl Guard {
                     .unwrap_or_default()
             })
             .unwrap_or_default();
-        let wait = store.and_then(|db| {
-            db.setting::<u32>(WAIT).unwrap_or_else(|e| {
-                eprintln!("oido: could not read how long to wait for a go-ahead: {e}");
-                None
+        let read = |key: &str| {
+            store.and_then(|db| {
+                db.setting::<serde_json::Value>(key).unwrap_or_else(|e| {
+                    eprintln!("oido: could not read the guardrails' {key}: {e}");
+                    None
+                })
             })
-        });
+        };
+        let wait = read(WAIT).and_then(|v| serde_json::from_value::<u32>(v).ok());
         Guard {
             packs: Pack::ALL
                 .into_iter()
                 .filter_map(|p| saved.get(p.key()).map(|on| (p, *on)))
                 .collect(),
             wait: wait.filter(|w| *w > 0),
+            words: read(WORDS)
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
+            limits: read(LIMITS)
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The words never sent to a model or shown to a channel person who did not write them.
+    pub fn words(&self) -> &[String] {
+        &self.words
+    }
+
+    /// Sets the blocked words: each trimmed, empty ones and repeats left out.
+    pub fn set_words(&mut self, words: Vec<String>) {
+        let mut kept: Vec<String> = Vec::new();
+        for w in words {
+            let w = w.trim().to_owned();
+            if !w.is_empty() && !kept.iter().any(|k| k.eq_ignore_ascii_case(&w)) {
+                kept.push(w);
+            }
+        }
+        self.words = kept;
+    }
+
+    /// The limits on what one channel person may send.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+    }
+
+    fn learner(&self) -> Learner {
+        Learner {
+            secrets: self.on(Pack::Secrets),
+            personal: self.on(Pack::Personal),
+            words: secrets::words(&self.words),
         }
     }
 
@@ -258,7 +406,10 @@ impl Guard {
     }
 
     pub fn on(&self, pack: Pack) -> bool {
-        self.packs.get(&pack).copied().unwrap_or(true)
+        self.packs
+            .get(&pack)
+            .copied()
+            .unwrap_or_else(|| pack.starts_on())
     }
 
     pub fn set(&mut self, pack: Pack, on: bool) {
@@ -270,23 +421,34 @@ impl Guard {
         Pack::ALL.iter().map(|p| (p.key(), self.on(*p))).collect()
     }
 
-    /// The secrets of a chat with brief `system`: those in the brief first, then each in the
-    /// order the chat first has it, so the numbering of what was sent before does not change.
-    pub fn chat_hidden(&self, system: Option<&str>, messages: &[Message]) -> Hidden {
+    /// What to hide in a chat with brief `system`: what is in the brief first, then each value in
+    /// the order the chat first has it, so the numbering of what was sent before does not change.
+    /// Personal details count only in outside text: a result marked so, a summary of some, and
+    /// the messages of a channel person not trusted (`person_outside`).
+    pub fn chat_hidden(
+        &self,
+        system: Option<&str>,
+        messages: &[Message],
+        person_outside: bool,
+    ) -> Hidden {
         let mut hidden = Hidden::default();
-        if !self.on(Pack::Secrets) {
+        let l = self.learner();
+        if !l.active() {
             return hidden;
         }
-        hidden.learn(system.unwrap_or_default());
+        l.learn(&mut hidden, system.unwrap_or_default(), false);
         for m in messages {
             match m {
-                Message::User(p) => hidden.learn(&p.for_model()),
-                Message::Summary { text, .. } => hidden.learn(text),
+                Message::User(p) => l.learn(&mut hidden, &p.for_model(), person_outside),
+                Message::Summary { text, outside, .. } => {
+                    l.learn(&mut hidden, text, outside.is_some());
+                }
                 Message::Assistant { text, tools, .. } => {
-                    hidden.learn(text);
+                    l.learn(&mut hidden, text, false);
                     for t in tools {
-                        hidden.learn_json(&t.args);
-                        hidden.learn(t.output.as_deref().unwrap_or_default());
+                        l.learn_json(&mut hidden, &t.args, false);
+                        let output = t.output.as_deref().unwrap_or_default();
+                        l.learn(&mut hidden, output, t.outside.is_some());
                     }
                 }
                 Message::Divider(_) => {}
@@ -295,22 +457,51 @@ impl Guard {
         hidden
     }
 
-    /// `req`, ready to send: every secret in it, known to `hidden` or found now (and added to it),
-    /// replaced with its placeholder, and the model told what placeholders are.
-    pub fn request(&self, mut req: Request, hidden: &mut Hidden) -> Guarded {
-        if !self.on(Pack::Secrets) {
-            return Guarded(req);
+    /// A reply as a channel person may see it: with "Check replies to channels" on, held back if it
+    /// repeats `brief`, and with paths and local addresses left out (see [`replies`]).
+    pub fn check_reply(&self, text: &str, brief: Option<&str>) -> String {
+        if self.on(Pack::Replies) {
+            replies::check(text, brief)
+        } else {
+            text.to_owned()
         }
-        hidden.learn(req.system.as_deref().unwrap_or_default());
-        hidden.learn(req.context.as_deref().unwrap_or_default());
-        for t in &req.turns {
-            hidden.learn(&t.text);
-            for c in &t.calls {
-                hidden.learn_json(&c.args);
+    }
+
+    /// Notes what to hide in a result that is outside text, for work that keeps its own [`Hidden`]
+    /// (a team member).
+    pub fn learn_outside(&self, hidden: &mut Hidden, text: &str) {
+        self.learner().learn(hidden, text, true);
+    }
+
+    /// `req`, ready to send: characters a person cannot see taken out, every value to hide in it,
+    /// known to `hidden` or found now (and added to it), replaced with its placeholder, and the
+    /// model told what placeholders are.
+    pub fn request(&self, mut req: Request, hidden: &mut Hidden) -> Guarded {
+        let mut stripped = 0;
+        if self.on(Pack::Injection) {
+            for text in [&mut req.system, &mut req.context].into_iter().flatten() {
+                stripped += injection::strip_in(text);
+            }
+            for t in &mut req.turns {
+                stripped += injection::strip_in(&mut t.text);
+            }
+            for tool in &mut req.tools {
+                stripped += injection::strip_in(&mut tool.description);
+            }
+        }
+        let l = self.learner();
+        if l.active() {
+            l.learn(hidden, req.system.as_deref().unwrap_or_default(), false);
+            l.learn(hidden, req.context.as_deref().unwrap_or_default(), false);
+            for t in &req.turns {
+                l.learn(hidden, &t.text, false);
+                for c in &t.calls {
+                    l.learn_json(hidden, &c.args, false);
+                }
             }
         }
         if hidden.is_empty() {
-            return Guarded(req);
+            return Guarded { req, stripped };
         }
         let m = hidden.masker(hidden);
         req.system = req.system.map(|s| m.hide(&s));
@@ -324,7 +515,7 @@ impl Guard {
             Some(c) => format!("{}\n\n{PLACEHOLDER_NOTE}", m.hide(&c)),
             None => PLACEHOLDER_NOTE.to_owned(),
         });
-        Guarded(req)
+        Guarded { req, stripped }
     }
 
     /// A tool call the model asked for, before it runs: its arguments with the hidden values put
@@ -341,7 +532,7 @@ impl Guard {
         let mut found = Vec::new();
         // Put back whatever was hidden, even if the pack was turned off since.
         let revealed = hidden.reveal_json(args);
-        if self.on(Pack::Secrets) {
+        if self.on(Pack::Secrets) || !hidden.is_empty() {
             if let Some(unknown) = secrets::first_placeholder(&revealed) {
                 found.push(actions::Finding {
                     rule: "secrets.unknown",
@@ -382,22 +573,25 @@ impl Guard {
         (revealed, found.into_iter().next())
     }
 
-    /// A reply going to a channel person: every secret in it hidden but those they sent
-    /// themselves (in `theirs`), numbered as the model saw them.
+    /// A reply going to a channel person: every hidden value in it (a secret, a personal detail
+    /// from outside text, a blocked word) left as its placeholder but those they sent themselves
+    /// (in `theirs`), numbered as the model saw them.
     pub fn for_channel<'t>(
         &self,
         text: &str,
         hidden: &Hidden,
         theirs: impl IntoIterator<Item = &'t str>,
     ) -> String {
-        if !self.on(Pack::Secrets) {
+        let l = self.learner();
+        if hidden.is_empty() && !l.active() {
             return text.to_owned();
         }
+        // Secrets and blocked words it wrote itself count too; personal details only from the vault.
         let mut all = hidden.clone();
-        all.learn(text);
+        l.learn(&mut all, text, false);
         let mut own = Hidden::default();
         for t in theirs {
-            own.learn(t);
+            l.learn(&mut own, t, true);
         }
         let hide = all.except(|v| own.contains(v));
         hide.masker(&all).hide(text)
@@ -566,14 +760,30 @@ mod tests {
     }
 
     #[test]
-    fn packs_start_on_and_a_switch_is_saved() {
+    fn packs_start_as_agreed_and_switches_words_and_limits_are_saved() {
         let db = crate::testing::TempDb::new();
-        let app = db.open();
-        assert!(Pack::ALL.iter().all(|p| app.guard.on(*p)));
-        let mut app = app;
+        let mut app = db.open();
+        let on: Vec<Pack> = Pack::ALL.into_iter().filter(|p| app.guard.on(*p)).collect();
+        assert_eq!(
+            on,
+            [Pack::Secrets, Pack::Actions, Pack::Taint, Pack::Injection],
+            "personal details and reply checks start off"
+        );
         app.set_pack(Pack::Actions, false);
+        app.set_pack(Pack::Personal, true);
+        app.set_guard_words("Falcon, acme\n\n falcon ");
+        app.set_channel_limits(Limits {
+            length: 500,
+            per_hour: 10,
+        });
         drop(app);
         let back = db.open();
-        assert!(!back.guard.on(Pack::Actions) && back.guard.on(Pack::Secrets));
+        assert!(!back.guard.on(Pack::Actions) && back.guard.on(Pack::Personal));
+        assert_eq!(
+            back.guard.words(),
+            ["Falcon", "acme"],
+            "trimmed, repeats once"
+        );
+        assert_eq!(back.guard.limits().per_hour, 10);
     }
 }

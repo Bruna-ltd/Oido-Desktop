@@ -4,8 +4,10 @@ Checks made on this computer, on both sides of the model: what goes to a model, 
 asks to do, are looked at before either happens. Nothing here asks a model; the rules are patterns
 run locally, so they are fast, free and private.
 
-Status: phases 1 and 2 built 2026-11-11 (secrets hidden from models, risky actions held or refused;
-taint, trust switches, a time limit on go-aheads, and go-aheads for work nobody watches).
+Status: phases 1 to 3 built 2026-11-11 (secrets hidden from models, risky actions held or refused;
+taint, trust switches, a time limit on go-aheads, go-aheads for work nobody watches; personal
+details, hidden instructions, blocked words, limits and topics for channels, a check on replies to
+channels).
 
 ## Before
 
@@ -33,7 +35,8 @@ taint, trust switches, a time limit on go-aheads, and go-aheads for work nobody 
 ## The packs
 
 Each pack is switched on or off on the Guardrails screen (the shield on the rail), for every agent,
-chat, schedule, workflow and channel at once. All three start on.
+chat, schedule, workflow and channel at once. The first four start on; "Hide personal details" and
+"Check replies to channels" start off, since they can get in the way.
 
 **Hide secrets from models** (`Pack::Secrets`, `guard/secrets.rs`). Found by shape only, so ordinary
 text is left alone:
@@ -94,6 +97,36 @@ Two switches say what counts as yours:
   agent changing agents cannot.
 - **Trusted**, per paired person on the Channels screen (off). Their messages then count as yours.
 
+**Catch hidden instructions** (`Pack::Injection`, `guard/injection.rs`, on). Characters a person
+cannot see (the Unicode tag block, used to spell out words nobody sees; direction overrides;
+zero-width spaces) are taken out of everything a model is sent, MCP tools' descriptions included;
+the chat keeps them, and the run says how many went. Text that phrases an order to an agent
+("ignore all previous instructions", "you are now in developer mode", a fake `<system>` block,
+"do not tell the user") makes a result outside text even from a trusted folder, and says so: "a
+file it read that tries to give it orders (…)". An MCP tool whose description does it keeps outside
+text in view for as long as its server is there. Phrasings can change, so taint is what holds.
+
+**Hide personal details from models** (`Pack::Personal`, off). Email addresses, international
+phone numbers (`+357 …`, `0044 …`), card numbers that pass their check digit and IBANs that pass
+their checksum are hidden like secrets, as `<<EMAIL_2>>`, `<<PHONE_3>>`, `<<CARD_1>>`,
+`<<IBAN_4>>`, but only when they come in outside text: what you type yourself goes as it is.
+
+**Blocked words** (a list on the Guardrails screen, empty to start). Names of clients or
+competitors, internal code names, words you do not want used: matched as whole words in any case,
+hidden from every model as `<<WORD_n>>` and shown back in your chat, and left as the placeholder in
+a reply to a channel person who did not write them.
+
+**Channels.** Limits on what one paired person may send (Guardrails screen, off until set): the
+longest message (500, 2,000 or 8,000 characters) and how many an hour (10, 30 or 100). On an
+agent's form, "On channels, only answer about" lists its topics: a channel message that names none
+of them is turned away, unless it answers a question the agent asked. All of these answer with a
+short reply on the spot; no model is asked (`guard/intake.rs`).
+
+**Check replies to channels** (`Pack::Replies`, off, `guard/replies.rs`). A reply to a channel
+person that repeats 60 or more characters of the agent's brief and skills word for word is held
+back (they are told so; your chat has it). Paths on this computer (`/home/…`, `~/…`) and local
+network addresses (`localhost`, `192.168…`, `*.local`) in a reply are left out.
+
 ## What you see
 
 - A refused call has a "Refused by a guardrail" card under it; the model is told it did not run and
@@ -126,8 +159,12 @@ Two switches say what counts as yours:
 | Outside text, and which calls act | `src/guard/taint.rs` |
 | Reviewing a reply's calls, holding, deciding and timing them out; taint of a model call | `src/guard/gate.rs` |
 | Go-aheads for work nobody watches | `src/guard/ask.rs` |
+| Hidden characters and orders in text | `src/guard/injection.rs` |
+| Limits and topics for channel messages | `src/guard/intake.rs` |
+| What a reply to a channel must not carry | `src/guard/replies.rs` |
 | Trip cards and the Guardrails screen | `src/ui/guard.rs` |
-| Which packs are on; how long a go-ahead is waited for | settings `guard.packs`, `guard.wait` |
+| Which packs are on; how long a go-ahead is waited for; blocked words; channel limits | settings `guard.packs`, `guard.wait`, `guard.words`, `guard.channel_limits` |
+| An agent's channel topics | `agents.channel_topics` (migration 020) |
 | A call's trip, and whether its result is outside text | kept with the call in the chat (`ToolCall::trip`, `ToolCall::outside`) |
 | Trusted folders and people | `agents.trust_workdir`, `channel_users.trusted` (migration 019) |
 
@@ -137,11 +174,12 @@ Two switches say what counts as yours:
 - A command written to avoid the patterns, in a chat with no outside text in view: you, or a
   trusted person, asked for it.
 - What a workflow step fetches feeding a later step: the steps are yours, so taint does not hold them.
+- Personal details in what a workflow step fetches: a step's model call keeps its own hidden values,
+  and does not know which text came from outside.
+- Local phone numbers (`99 123456`): only international ones are recognised.
+- The hourly limit is counted in memory and starts again when Oido does.
 
 ## Next
 
-- **Phase 3.** Personal details (email, phone, card, IBAN) hidden in untrusted text; prompt-injection
-  phrases and hidden characters flagged; channel limits (message length, rate), a per-agent topic
-  allowlist, a blocklist, and a check that a reply to a channel does not echo the brief.
 - **Phase 4.** Your own rules (patterns and words), per-agent overrides, and "Always allow this"
   on a trip card.

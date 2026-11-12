@@ -445,7 +445,8 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(20.0)
                 .child(skills_field(s, k, layer))
                 .child(tools_field(s, k, layer))
-                .child(workdir_field(s, k, layer)),
+                .child(workdir_field(s, k, layer))
+                .child(topics_field(s, k)),
         );
     }
     out
@@ -536,6 +537,33 @@ fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         )
         .child(super::folder_picker::build(s, k, layer))
         .child(trust_field(s, k))
+}
+
+/// What the agent answers about on channels (see `guard::intake`).
+fn topics_field(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            text("On channels, only answer about")
+                .font(k.ty.body_medium)
+                .color(c.text_base),
+        )
+        .child(
+            text("Words or topics, split by commas. A message from Telegram, Slack or WhatsApp that names none of them is turned away before it reaches the agent. Empty, it answers anything.")
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .wrap(),
+        )
+        .child(
+            TextInput::new(&s.roster.form.topics)
+                .placeholder("e.g. billing, refunds, orders")
+                .label("Channel topics")
+                .on_edit(|s: &mut App| &mut s.roster.form.topics)
+                .build(k)
+                .key("channel-topics"),
+        )
 }
 
 /// Whether what the agent reads and runs in its folder counts as yours (see `guard::taint`).

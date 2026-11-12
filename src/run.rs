@@ -361,7 +361,11 @@ impl App {
         let (brief, skills) = self.brief_of(agent);
         let system = Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty());
         // The chat's secrets, numbered from its start, so each keeps its placeholder.
-        let mut hidden = self.guard.chat_hidden(system.as_deref(), &chat.messages);
+        let mut hidden = self.guard.chat_hidden(
+            system.as_deref(),
+            &chat.messages,
+            self.outside_person(&sid).is_some(),
+        );
         let can_think = self
             .providers
             .model_info(&model)
@@ -404,7 +408,9 @@ impl App {
             });
         let guarded = self.guard.request(request.clone(), &mut hidden);
         // Outside text still in what is sent: while it is, calls that act wait for you.
-        let outside = self.outside_in_sent(&sid, &chat.messages, &request.turns);
+        let outside = self
+            .outside_in_sent(&sid, &chat.messages, &request.turns)
+            .or_else(|| self.steering_tools(&request.tools));
         let refuse = (summary.is_none() && fitted.too_big(limit)).then(|| {
             let tokens = |n: u32| crate::ui::usage::tokens(u64::from(n));
             format!(
@@ -455,6 +461,7 @@ impl App {
             trace.resume();
         }
         setup.extend(trace.hid(hidden.len(), &hidden.describe()));
+        setup.extend(trace.stripped(guarded.stripped()));
         if taint_on {
             setup.extend(outside.as_deref().and_then(|what| trace.outside(what)));
         }
@@ -1174,6 +1181,7 @@ impl App {
         // command's output where the folder is not trusted, an answer from a person not trusted.
         let trust_folder = self.roster.owner_of(sid).is_none_or(|a| a.trust_workdir);
         let person = self.outside_person(sid);
+        let injection_on = self.guard.on(crate::guard::Pack::Injection);
         let Some(chat) = self
             .roster
             .owner_of_mut(sid)
@@ -1201,9 +1209,15 @@ impl App {
         // Only what actually ran brought anything in; a refusal is the app's own words.
         let ran = call.trip.as_ref().is_none_or(|t| !t.state.stopped());
         if call.outside.is_none() && ran {
-            call.outside = crate::guard::taint::result_source(&call.name, trust_folder)
+            let source = crate::guard::taint::result_source(&call.name, trust_folder)
                 .map(str::to_owned)
                 .or_else(|| person.filter(|_| call.name == crate::tools::ASK));
+            // Text that tries to give orders is outside text, whatever its source.
+            call.outside = if injection_on {
+                crate::guard::injection::describe(source.as_deref(), &output)
+            } else {
+                source
+            };
         }
         let waiting = tools.iter().any(|t| t.output.is_none());
         let saved = (chat.id.clone(), seq, chat.messages[seq].clone());

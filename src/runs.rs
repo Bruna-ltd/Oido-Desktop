@@ -380,6 +380,8 @@ pub struct Trace {
     hidden: usize,
     /// Whether the run has said outside text was in view.
     outside: bool,
+    /// Whether the run has said invisible characters were taken out.
+    stripped: bool,
 }
 
 fn ms(d: Duration) -> u32 {
@@ -395,6 +397,7 @@ impl Trace {
             pending: Vec::new(),
             hidden: 0,
             outside: false,
+            stripped: false,
         }
     }
 
@@ -450,6 +453,19 @@ impl Trace {
         Some(self.guard(
             "Outside text in view",
             &format!("What the model is sent holds {what}, which could be steering it. While it does, its calls that run, change or send something wait for your go-ahead."),
+        ))
+    }
+
+    /// The model call about to go had `count` characters a person cannot see taken out: a step
+    /// saying so, once a run.
+    pub fn stripped(&mut self, count: usize) -> Option<Step> {
+        if count == 0 || self.stripped {
+            return None;
+        }
+        self.stripped = true;
+        Some(self.guard(
+            "Invisible characters removed",
+            &format!("{count} characters that show nothing (used to hide instructions in text) were taken out of what the model is sent. The chat keeps them."),
         ))
     }
 

@@ -35,6 +35,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![member("fact-checker", "fact-checker", 60.0, "You check every number in a draft against its source before it goes out.")],
             workdir: None,
             trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![
@@ -109,6 +110,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![member("reviewer", "reviewer", 200.0, "You read a diff for unsafe code and missing tests, and report only what matters.")],
             workdir: None,
             trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat(
@@ -154,6 +156,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![],
             workdir: None,
             trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],
@@ -171,6 +174,7 @@ pub fn sample_agents() -> Vec<Agent> {
             subagents: vec![],
             workdir: None,
             trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],
@@ -501,6 +505,13 @@ pub static SCENES: &[Scene] = &[
     // The Guardrails screen, with risky actions switched off.
     ("guardrails", |s| {
         s.guard.set(crate::guard::Pack::Actions, false);
+        s.guard
+            .set_words(vec!["Project Falcon".into(), "Acme".into()]);
+        s.guard_words = TextEdit::new("Project Falcon, Acme");
+        s.guard.set_limits(crate::guard::Limits {
+            length: 2000,
+            per_hour: 30,
+        });
         s.route = Route::Guardrails;
     }),
     // A reply whose command waits for your go-ahead, after one a guardrail refused.

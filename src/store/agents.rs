@@ -72,6 +72,7 @@ impl Store {
                     subagents: Vec::new(),
                     workdir: r.get(11)?,
                     trust_workdir: r.get::<_, i64>(13)? != 0,
+                    channel_topics: Vec::new(),
                     description: r.get(12)?,
                     active: 0,
                     sessions: Vec::new(),
@@ -82,12 +83,14 @@ impl Store {
                     r.get::<_, String>(7)?,
                     r.get::<_, String>(8)?,
                     r.get::<_, i64>(9)?,
+                    r.get::<_, String>(14)?,
                 ))
             })?;
             for row in rows {
-                let (parent, mut agent, skills, tools, active) = row?;
+                let (parent, mut agent, skills, tools, active, topics) = row?;
                 agent.skills = serde_json::from_str(&skills)?;
                 agent.tools = serde_json::from_str(&tools)?;
+                agent.channel_topics = serde_json::from_str(&topics)?;
                 let mut chats = sessions.remove(&agent.id).unwrap_or_default();
                 if chats.is_empty() {
                     let first = chat("New chat", Vec::new());
@@ -133,6 +136,7 @@ impl Store {
                 &a.workdir,
                 &a.description,
                 i64::from(a.trust_workdir),
+                serde_json::to_string(&a.channel_topics)?,
             ))?;
         Ok(())
     }
@@ -253,6 +257,13 @@ mod tests {
         assert!(
             !loaded[0].trust_workdir && loaded[1].trust_workdir,
             "trusted unless turned off"
+        );
+        let mut a = loaded[0].clone();
+        a.channel_topics = vec!["billing".into(), "refunds".into()];
+        db.save_agent(&a, None, 0).unwrap();
+        assert_eq!(
+            db.load_agents().unwrap()[0].channel_topics,
+            ["billing", "refunds"]
         );
     }
 }
