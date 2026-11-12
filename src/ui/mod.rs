@@ -77,7 +77,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Workflows => ("Workflows".to_owned(), workflows::screen(s, &k)),
         Route::Schedules => ("Schedules".to_owned(), schedules::screen(s, &k, &mut layer)),
         Route::Usage => ("Usage".to_owned(), usage::screen(s, &k)),
-        Route::Mcp => ("MCP".to_owned(), mcp::screen(s, &k)),
+        Route::Mcp => ("MCP".to_owned(), mcp::screen(s, cx, &k)),
         Route::Channels => ("Channels".to_owned(), channels::screen(s, &k, &mut layer)),
         Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),

@@ -1,7 +1,7 @@
 //! MCP servers: other programs that give agents tools. Any number can be registered; each one's
 //! tools then show up in an agent's form to be given to it.
 
-use rune::{El, ScrollSpec, col, el, row, text};
+use rune::{Cx, El, ScrollSpec, col, el, row, text};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Divider, Kit, SegmentedControl, Switch, TextInput,
 };
@@ -12,12 +12,31 @@ use crate::app::App;
 use crate::mcp::{Auth, Kind, Preset, Server, Status, Transport};
 
 const PAGE: f32 = 960.0;
-/// Servers and presets sit in this many columns.
+const SIDE: f32 = 24.0;
+/// Servers and presets sit in as many columns as fit, up to this many.
 const COLUMNS: usize = 2;
+/// The narrowest a card is drawn before the grid gives up a column, so a name and a button fit.
+const CARD_MIN: f32 = 240.0;
 const GAP: f32 = 12.0;
+/// The widest the form's choices (remote or local, how it signs in) are drawn; narrower pages
+/// give them what they have.
+const CHOICE: f32 = 380.0;
 
-pub fn screen(s: &App, k: &Kit) -> El {
+/// How many columns of cards the page has room for. The window less its sidebars is the page's
+/// width, and a narrow one gets a single column instead of cards too thin to read.
+fn columns(cx: &Cx<App>) -> usize {
+    cx.layout_with("mcp", |[_, _, width, _]| {
+        let room = width.min(PAGE) - 2.0 * SIDE;
+        ((room + GAP) / (CARD_MIN + GAP))
+            .floor()
+            .clamp(1.0, COLUMNS as f32) as usize
+    })
+    .unwrap_or(COLUMNS)
+}
+
+pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
     let c = &k.c;
+    let columns = columns(cx);
     let m = &s.mcp;
     // A server answers to its name, its address and the names of its tools.
     let shown: Vec<&Server> = m
@@ -37,7 +56,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
     let mut page = col()
         .w_full()
         .max_w(PAGE)
-        .px(24.0)
+        .px(SIDE)
         .py(32.0)
         .gap(28.0)
         .child(
@@ -83,6 +102,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
         page = page.child(cards(
             "Servers",
             shown.iter().map(|x| server_card(s, x, k)).collect(),
+            columns,
             k,
         ));
     } else if m.servers.is_empty() {
@@ -106,6 +126,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
         page = page.child(cards(
             "Quick add",
             presets.iter().map(|p| preset_card(p, k)).collect(),
+            columns,
             k,
         ));
     }
@@ -140,7 +161,7 @@ fn state(s: &App, server: &Server) -> String {
 }
 
 /// A titled group of cards in columns.
-fn cards(title: &str, cards: Vec<El>, k: &Kit) -> El {
+fn cards(title: &str, cards: Vec<El>, columns: usize, k: &Kit) -> El {
     col()
         .w_full()
         .gap(10.0)
@@ -149,7 +170,7 @@ fn cards(title: &str, cards: Vec<El>, k: &Kit) -> El {
             col()
                 .w_full()
                 .gap(GAP)
-                .equal_columns(COLUMNS)
+                .equal_columns(columns)
                 .children(cards),
         )
 }
@@ -389,7 +410,8 @@ fn add_row(s: &App, k: &Kit) -> El {
                 text("Add a remote server or a program on this computer")
                     .font(k.ty.ui)
                     .color(k.c.text_base)
-                    .truncate()
+                    .wrap()
+                    .min_w(0.0)
                     .grow(1.0),
             )
             .child(pill(if open { "Close" } else { "Add" }, k)),
@@ -410,11 +432,12 @@ fn form(s: &App, k: &Kit) -> El {
         Some(usize::from(f.kind == Kind::Local)),
     )
     .label("What to add")
-    .width(Some(380.0))
+    .width(None)
     .on_pick(|s: &mut App, i, _| {
         s.mcp_set_kind(if i == 0 { Kind::Remote } else { Kind::Local });
     })
     .build(k)
+    .max_w(CHOICE)
     .key("mcp-kind");
     let submit = |s: &mut App, _: &mut rune::Tx| s.mcp_add();
     let name = TextInput::new(&f.name)
@@ -446,11 +469,12 @@ fn form(s: &App, k: &Kit) -> El {
             fields = fields.child(
                 SegmentedControl::new(&["No sign-in", "Key", "Browser sign-in"], Some(selected))
                     .label("How it knows you")
-                    .width(Some(380.0))
+                    .width(None)
                     .on_pick(|s: &mut App, i, _| {
                         s.mcp_set_auth([Auth::None, Auth::Key, Auth::OAuth][i.min(2)]);
                     })
                     .build(k)
+                    .max_w(CHOICE)
                     .key("mcp-auth"),
             );
             if f.auth == Auth::Key {
