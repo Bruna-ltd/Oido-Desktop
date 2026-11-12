@@ -44,7 +44,7 @@ jobs:
   release:
     if: ${{ !startsWith(github.event.head_commit.message, 'Release v') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90 # a cold build is two full compiles of the dependencies
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,10 +80,13 @@ jobs:
           fi
           echo "version=$next" >> "$GITHUB_OUTPUT"
 
-      # Tests get a step of their own, not release.sh's quiet run, so the log names each test as it
-      # finishes and a hung one shows by its absence. release.sh then runs them again, from cache.
+      # Tests get steps of their own, not release.sh's quiet run, so the log names each test as it
+      # finishes and a hung one shows by its absence. Built first, so the limit on running them
+      # does not count the compile. release.sh then runs them again, from that build.
+      - name: Build tests
+        run: cargo test --no-run
       - name: Test
-        timeout-minutes: 20
+        timeout-minutes: 10
         run: cargo test
 
       - name: Release
