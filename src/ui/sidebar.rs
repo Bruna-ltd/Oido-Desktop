@@ -219,6 +219,9 @@ fn entries(menu: Menu, target: &Target, a: &Agent) -> Menu {
 }
 
 pub(super) fn avatar(a: &Agent, k: &Kit, size: f32) -> El {
+    if let Some(face) = &a.avatar {
+        return super::avatar::picture(face, size, size / 4.0);
+    }
     row()
         .size(size, size)
         .radius(size / 4.0)

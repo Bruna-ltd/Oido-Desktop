@@ -458,6 +458,27 @@ impl App {
         }
     }
 
+    /// A picture dropped on the agent form becomes its face, or the form says why it cannot. Read
+    /// off the UI thread, since a big picture takes a moment to shrink.
+    pub fn avatar_dropped(&mut self, files: Vec<std::path::PathBuf>) {
+        let Some(path) = files.into_iter().next() else {
+            return;
+        };
+        self.spawn(
+            move || crate::avatars::Avatar::from_file(&path),
+            |app, result| {
+                // The form may have been left while the picture was being read.
+                if app.roster.editing.is_none() {
+                    return;
+                }
+                match result {
+                    Ok(face) => app.roster.pick_avatar(face),
+                    Err(why) => app.roster.form.avatar_error = Some(why),
+                }
+            },
+        );
+    }
+
     /// The form's title and its submit button's label, by what it is for.
     pub fn form_labels(&self) -> (String, &'static str) {
         let name = self.roster.form.name.text.trim();
@@ -861,6 +882,54 @@ mod tests {
             Some(keeper),
             "the selection is remembered"
         );
+    }
+
+    #[test]
+    fn a_picture_dropped_on_the_form_is_the_agents_face_across_a_restart() {
+        let db = TempDb::new();
+        let mut app = db.open();
+        app.new_agent();
+        app.roster.form.name = TextEdit::new("Face");
+        // A wide picture, as a person's photo is: the middle square of it is kept.
+        let file = std::env::temp_dir().join(format!("oido-face-{}.png", uuid::Uuid::new_v4()));
+        image::RgbImage::new(400, 200).save(&file).unwrap();
+        app.avatar_dropped(vec![file.clone()]);
+        assert!(app.roster.form.avatar_error.is_none());
+        let Some(crate::avatars::Avatar::Upload(face)) = app.roster.form.avatar.clone() else {
+            panic!("the picture is the face");
+        };
+        let shown = image::load_from_memory(&face.png).unwrap();
+        assert_eq!((shown.width(), shown.height()), (192, 192));
+        // Something that is not a picture says so and leaves the face as it was.
+        let notes = file.with_extension("txt");
+        std::fs::write(&notes, "hello").unwrap();
+        app.avatar_dropped(vec![notes.clone()]);
+        assert!(
+            app.roster
+                .form
+                .avatar_error
+                .as_deref()
+                .is_some_and(|e| e.contains("PNG or JPEG")),
+            "{:?}",
+            app.roster.form.avatar_error
+        );
+        assert!(matches!(
+            app.roster.form.avatar,
+            Some(crate::avatars::Avatar::Upload(_))
+        ));
+        app.submit_form();
+        drop(app);
+        let _ = (std::fs::remove_file(&file), std::fs::remove_file(&notes));
+        let again = db.open();
+        assert_eq!(
+            again.roster.list[0].avatar,
+            Some(crate::avatars::Avatar::Upload(face))
+        );
+        // Dropped with no form open, it is ignored.
+        let mut closed = db.open();
+        closed.cancel_form();
+        closed.avatar_dropped(vec![std::path::PathBuf::from("/nonexistent/me.png")]);
+        assert!(closed.roster.form.avatar_error.is_none());
     }
 
     #[test]

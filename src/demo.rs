@@ -16,6 +16,7 @@ fn member(id: &str, name: &str, hue: f32, prompt: &str) -> Agent {
         name: name.into(),
         prompt: prompt.into(),
         hue: Some(hue),
+        avatar: None,
         ..Agent::blank(id.into())
     }
 }
@@ -28,6 +29,7 @@ pub fn sample_agents() -> Vec<Agent> {
             prompt: "You research a topic thoroughly and write short briefings. Cite where each number came from, and say so when you are unsure.".into(),
             model: None,
             hue: Some(150.0),
+            avatar: None,
             pinned: true,
             status: AgentStatus::Waiting,
             skills: vec!["web-research".into(), "summarize".into(), "wiki".into()],
@@ -103,6 +105,7 @@ pub fn sample_agents() -> Vec<Agent> {
             prompt: "You review pull requests and run the test suite. Be specific about what to change and why.".into(),
             model: None,
             hue: Some(250.0),
+            avatar: None,
             pinned: true,
             status: AgentStatus::Running,
             skills: vec!["github".into(), "code-review".into(), "tests".into()],
@@ -149,6 +152,7 @@ pub fn sample_agents() -> Vec<Agent> {
             prompt: "You triage the inbox: flag what needs a reply today and summarise the rest.".into(),
             model: None,
             hue: Some(30.0),
+            avatar: None,
             pinned: false,
             status: AgentStatus::Idle,
             skills: vec!["gmail".into(), "calendar".into()],
@@ -167,6 +171,7 @@ pub fn sample_agents() -> Vec<Agent> {
             prompt: "You reconcile invoices against payments and report anything that does not match.".into(),
             model: None,
             hue: Some(330.0),
+            avatar: None,
             pinned: false,
             status: AgentStatus::Idle,
             skills: vec!["stripe".into(), "sheets".into()],
@@ -316,6 +321,20 @@ fn demo_schedules(app: &mut App) {
             "The previous fire was still running.",
         ),
     ];
+}
+
+/// Waits for every face a screen of the agent form can show, for a headless picture of it.
+fn wait_for_faces(s: &App) {
+    use crate::avatars::{Avatar, PRESETS};
+    let faces: Vec<Avatar> = s
+        .roster
+        .list
+        .iter()
+        .filter_map(|a| a.avatar.clone())
+        .chain(s.roster.form.avatar.clone())
+        .chain(PRESETS.iter().map(|p| Avatar::Preset(p.id)))
+        .collect();
+    crate::ui::wait_for_avatars(&faces);
 }
 
 /// Thirty days of usage across three models (one with no price), three agents and every source.
@@ -996,6 +1015,35 @@ pub static SCENES: &[Scene] = &[
         s.live.insert("demo".into(), crate::run::Live::demo());
     }),
     ("agent-new", |s| s.new_agent()),
+    // Pictures as faces: in the sidebar, and on the form with one chosen.
+    ("agent-avatars", |s| {
+        use crate::avatars::Avatar;
+        load_samples(s);
+        for (id, face) in [
+            ("atlas", "analyst"),
+            ("scout", "researcher"),
+            ("forge", "engineer"),
+        ] {
+            if let Some(a) = s.roster.list.iter_mut().find(|a| a.id == id) {
+                a.avatar = Some(Avatar::Preset(face));
+            }
+        }
+        s.edit_agent(&Target::agent("atlas"));
+        s.roster.form.picker = true;
+        wait_for_faces(s);
+    }),
+    // A picture the person dropped: it leads the pictures and is the one chosen.
+    ("agent-avatar-own", |s| {
+        use crate::avatars::{Avatar, PRESETS};
+        load_samples(s);
+        s.edit_agent(&Target::agent("atlas"));
+        s.roster.form.picker = true;
+        // Any picture will do for one that was dropped; the app crops it to a square.
+        if let Ok(own) = Avatar::from_bytes("me.png", PRESETS[7].png) {
+            s.roster.pick_avatar(own);
+        }
+        wait_for_faces(s);
+    }),
     ("agent-new-models", |s| {
         demo_models(s);
         s.new_agent();

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use super::{Result, Store};
 use crate::agents::Agent;
+use crate::avatars::Avatar;
 use crate::model::{AgentStatus, Message, Session, chat};
 use crate::models::ModelRef;
 
@@ -74,6 +75,7 @@ impl Store {
                     trust_workdir: r.get::<_, i64>(13)? != 0,
                     channel_topics: Vec::new(),
                     description: r.get(12)?,
+                    avatar: Avatar::from_columns(r.get(15)?, r.get(16)?),
                     active: 0,
                     sessions: Vec::new(),
                 };
@@ -118,9 +120,10 @@ impl Store {
 
     /// The agent's own row (not its chats). `position` is its place among its siblings.
     pub fn save_agent(&self, a: &Agent, parent: Option<&str>, position: usize) -> Result<()> {
+        let (avatar_preset, avatar_image) = Avatar::columns(a.avatar.as_ref());
         self.conn
             .prepare_cached(self.sql("UpsertAgent")?)?
-            .execute((
+            .execute(rusqlite::params![
                 &a.id,
                 parent,
                 &a.name,
@@ -137,7 +140,9 @@ impl Store {
                 &a.description,
                 i64::from(a.trust_workdir),
                 serde_json::to_string(&a.channel_topics)?,
-            ))?;
+                avatar_preset,
+                avatar_image,
+            ])?;
         Ok(())
     }
 
@@ -241,6 +246,41 @@ mod tests {
         assert_eq!(again[0].sessions.len(), 1, "no second chat is made up");
         assert_eq!(again[0].chat().id, chat, "the same chat comes back");
         assert_eq!(again[0].chat().messages.len(), 1);
+    }
+
+    #[test]
+    fn an_agents_picture_is_saved_whether_it_came_with_the_app_or_from_the_person() {
+        use crate::avatars::Avatar;
+        let db = Store::in_memory(Vault::fixed([1; 32])).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(30, 20)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let own = Avatar::from_bytes("me.png", png.get_ref()).unwrap();
+        let faces = [Some(Avatar::Preset("chef")), Some(own), None];
+        let list: Vec<Agent> = faces
+            .iter()
+            .enumerate()
+            .map(|(i, face)| {
+                let mut a = Agent::blank(format!("a{i}"));
+                a.name = format!("A{i}");
+                a.avatar = face.clone();
+                a
+            })
+            .collect();
+        db.save_roster(&list).unwrap();
+        let loaded: Vec<_> = db
+            .load_agents()
+            .unwrap()
+            .into_iter()
+            .map(|a| a.avatar)
+            .collect();
+        assert_eq!(loaded, faces);
+        // Taking it off is saved too.
+        let mut bare = list[0].clone();
+        bare.avatar = None;
+        db.save_agent(&bare, None, 0).unwrap();
+        assert_eq!(db.load_agents().unwrap()[0].avatar, None);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 mod agent_tool;
 mod agents;
 mod app;
+mod avatars;
 mod browser;
 mod channels;
 mod command;
