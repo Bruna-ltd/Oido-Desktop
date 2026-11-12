@@ -1,9 +1,11 @@
-//! What a provider is asked with: its own API key, or a Claude Pro/Max subscription's OAuth token,
-//! and the sign-in and refresh that keep a subscription current.
+//! What a provider is asked with: its own API key, or a subscription's OAuth token, and the
+//! sign-in and refresh that keep a subscription current.
 //!
-//! The subscription signs in as Claude Code's OAuth client, because Anthropic routes that client to
-//! subscription inference. The sign-in is a PKCE flow with no local listener: the browser lands on
-//! Anthropic's callback page, which shows a code to paste back, so the app needs no port.
+//! A Claude Pro/Max subscription signs in as Claude Code's OAuth client, because Anthropic routes
+//! that client to subscription inference. The sign-in is a PKCE flow with no local listener: the
+//! browser lands on Anthropic's callback page, which shows a code to paste back, so the app needs
+//! no port. A ChatGPT plan signs in through [`crate::chatgpt`], which shares this module's tokens
+//! and token requests.
 
 use std::fmt;
 use std::time::Duration;
@@ -21,14 +23,24 @@ const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE: &str = "https://claude.ai/oauth/authorize";
 const REDIRECT: &str = "https://console.anthropic.com/oauth/code/callback";
 const SCOPES: &str = "org:create_api_key user:profile user:inference";
-/// The live token host, then the one that still answers if it moves.
-const TOKEN_URLS: [&str; 2] = [
-    "https://platform.claude.com/v1/oauth/token",
-    "https://console.anthropic.com/v1/oauth/token",
-];
-/// Anthropic 429s token requests that introduce themselves as `claude-code/`; Claude Code's own
-/// token client sends bare axios.
-const TOKEN_USER_AGENT: &str = "axios/1.7.9";
+/// Where an OAuth client trades and renews tokens, and what its errors call the service.
+pub struct TokenHost {
+    pub who: &'static str,
+    /// Tried in order: the live host, then the one that still answers if it moves.
+    pub urls: &'static [&'static str],
+    pub user_agent: &'static str,
+}
+
+const ANTHROPIC: TokenHost = TokenHost {
+    who: "Anthropic",
+    urls: &[
+        "https://platform.claude.com/v1/oauth/token",
+        "https://console.anthropic.com/v1/oauth/token",
+    ],
+    // Anthropic 429s token requests that introduce themselves as `claude-code/`; Claude Code's own
+    // token client sends bare axios.
+    user_agent: "axios/1.7.9",
+};
 /// OAuth inference must introduce itself as Claude Code, and say it is the CLI.
 pub const CLAUDE_CODE_USER_AGENT: &str = "claude-code/2.1.74 (external, cli)";
 /// The betas an OAuth request needs; without them Anthropic refuses the call.
@@ -46,7 +58,7 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 pub enum Credential {
     /// A provider's own API key, sent the way that provider expects it.
     Key(Zeroizing<String>),
-    /// A Claude Pro/Max subscription's OAuth access token.
+    /// A subscription's OAuth access token: Claude Pro/Max, or a ChatGPT plan.
     Subscription(Zeroizing<String>),
 }
 
@@ -126,6 +138,7 @@ impl Tokens {
 
 /// A sign-in in progress: what the browser is asked to approve, and what proves the code that comes
 /// back belongs to this request.
+#[derive(Clone)]
 pub struct SignIn {
     pub verifier: String,
     pub state: String,
@@ -134,9 +147,11 @@ pub struct SignIn {
 
 /// Starts a subscription sign-in: a PKCE verifier and the address to approve it at.
 pub fn sign_in() -> Result<SignIn, String> {
-    let verifier = URL_SAFE_NO_PAD.encode(random::<32>()?);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let state = URL_SAFE_NO_PAD.encode(random::<32>()?);
+    let Pkce {
+        verifier,
+        challenge,
+        state,
+    } = Pkce::new()?;
     let url = format!(
         "{AUTHORIZE}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={challenge}&code_challenge_method=S256&state={state}",
         encode(CLIENT_ID),
@@ -150,6 +165,25 @@ pub fn sign_in() -> Result<SignIn, String> {
     })
 }
 
+/// What a PKCE sign-in is made of: a secret kept here, its challenge sent to the browser, and a
+/// `state` that the way back must repeat.
+pub struct Pkce {
+    pub verifier: String,
+    pub challenge: String,
+    pub state: String,
+}
+
+impl Pkce {
+    pub fn new() -> Result<Pkce, String> {
+        let verifier = URL_SAFE_NO_PAD.encode(random::<32>()?);
+        Ok(Pkce {
+            challenge: URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+            state: URL_SAFE_NO_PAD.encode(random::<32>()?),
+            verifier,
+        })
+    }
+}
+
 /// Trades the code the browser showed for tokens. `state` must be the one [`sign_in`] made.
 pub fn exchange(code: &str, state: &str, verifier: &str) -> Result<Tokens, String> {
     let body = json!({
@@ -160,21 +194,37 @@ pub fn exchange(code: &str, state: &str, verifier: &str) -> Result<Tokens, Strin
         "redirect_uri": REDIRECT,
         "code_verifier": verifier,
     });
-    post(&body.to_string(), "application/json", "sign-in")
+    post(&ANTHROPIC, &body.to_string(), "application/json", "sign-in")
 }
 
 /// Replaces an expiring access token. The refresh token may rotate; the new pair must be saved, or
 /// the next refresh spends a token that is already gone.
 pub fn refresh(tokens: &Tokens) -> Result<Tokens, String> {
-    if tokens.refresh_token.is_empty() {
-        return Err("the sign-in has no refresh token; sign in again".to_owned());
-    }
     // As Claude Code asks: form-encoded, unlike the sign-in's JSON.
     let body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={CLIENT_ID}",
         encode(&tokens.refresh_token),
     );
-    let mut fresh = post(&body, "application/x-www-form-urlencoded", "refresh")?;
+    renew(
+        &ANTHROPIC,
+        tokens,
+        &body,
+        "application/x-www-form-urlencoded",
+    )
+}
+
+/// Posts a refresh request, `body` made by the caller for `host`, and keeps the old refresh token
+/// when the answer brings no new one.
+pub fn renew(
+    host: &TokenHost,
+    tokens: &Tokens,
+    body: &str,
+    content_type: &str,
+) -> Result<Tokens, String> {
+    if tokens.refresh_token.is_empty() {
+        return Err("the sign-in has no refresh token; sign in again".to_owned());
+    }
+    let mut fresh = post(host, body, content_type, "refresh")?;
     if fresh.refresh_token.is_empty() {
         fresh.refresh_token = tokens.refresh_token.clone();
     }
@@ -182,32 +232,40 @@ pub fn refresh(tokens: &Tokens) -> Result<Tokens, String> {
 }
 
 /// Posts to the token hosts in order. A dead grant is not replayed at the second host.
-fn post(body: &str, content_type: &str, what: &str) -> Result<Tokens, String> {
+pub fn post(
+    host: &TokenHost,
+    body: &str,
+    content_type: &str,
+    what: &str,
+) -> Result<Tokens, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .http_status_as_error(false)
         .build()
         .into();
     let mut last = String::new();
-    for url in TOKEN_URLS {
+    for url in host.urls {
         let sent = agent
-            .post(url)
+            .post(*url)
             .header("Content-Type", content_type)
-            .header("User-Agent", TOKEN_USER_AGENT)
+            .header("User-Agent", host.user_agent)
             .send(body);
         let mut resp = match sent {
             Ok(resp) => resp,
             Err(_) => {
-                last = "could not reach Anthropic (check the connection and try again)".to_owned();
+                last = format!(
+                    "could not reach {} (check the connection and try again)",
+                    host.who
+                );
                 continue;
             }
         };
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
         if (200..300).contains(&status) {
-            return tokens_from(&text, what);
+            return tokens_from(&text, host.who, what);
         }
-        last = refused(status, &text, what);
+        last = refused(status, &text, host.who, what);
         if status == 400 || status == 401 {
             break;
         }
@@ -216,16 +274,16 @@ fn post(body: &str, content_type: &str, what: &str) -> Result<Tokens, String> {
 }
 
 /// The token endpoint's answer, as tokens. `expires_in` is taken as seconds from now.
-fn tokens_from(text: &str, what: &str) -> Result<Tokens, String> {
+fn tokens_from(text: &str, who: &str, what: &str) -> Result<Tokens, String> {
     let v: Value = serde_json::from_str(text)
-        .map_err(|_| format!("Anthropic's {what} answer was not understood; try again."))?;
+        .map_err(|_| format!("{who}'s {what} answer was not understood; try again."))?;
     let access = v
         .get("access_token")
         .and_then(Value::as_str)
         .unwrap_or_default();
     if access.is_empty() {
         return Err(format!(
-            "Anthropic's {what} answer had no access token; try again."
+            "{who}'s {what} answer had no access token; try again."
         ));
     }
     let refresh = v
@@ -244,8 +302,8 @@ fn tokens_from(text: &str, what: &str) -> Result<Tokens, String> {
     })
 }
 
-/// Why a token request was refused, in Anthropic's own words where it gave them.
-fn refused(status: u16, body: &str, what: &str) -> String {
+/// Why a token request was refused, in the service's own words where it gave them.
+fn refused(status: u16, body: &str, who: &str, what: &str) -> String {
     let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let code = v.get("error").and_then(Value::as_str).unwrap_or_default();
     let detail = v
@@ -258,9 +316,9 @@ fn refused(status: u16, body: &str, what: &str) -> String {
         .collect::<Vec<_>>()
         .join(": ");
     if said.is_empty() {
-        format!("Anthropic refused the {what} (HTTP {status}); try again.")
+        format!("{who} refused the {what} (HTTP {status}); try again.")
     } else {
-        format!("Anthropic refused the {what} (HTTP {status}): {said}")
+        format!("{who} refused the {what} (HTTP {status}): {said}")
     }
 }
 
@@ -271,7 +329,7 @@ const QUERY: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-fn encode(s: &str) -> String {
+pub fn encode(s: &str) -> String {
     utf8_percent_encode(s, QUERY).to_string()
 }
 
@@ -335,6 +393,7 @@ mod tests {
         let why = refused(
             400,
             r#"{"error":"invalid_grant","error_description":"code expired"}"#,
+            "Anthropic",
             "sign-in",
         );
         assert!(

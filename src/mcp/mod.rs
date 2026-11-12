@@ -14,7 +14,6 @@ pub mod client;
 mod flow;
 mod manage;
 pub mod oauth;
-mod page;
 pub mod tool;
 
 use std::collections::BTreeMap;

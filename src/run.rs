@@ -743,7 +743,7 @@ impl App {
             && self.subscription_is_stale(provider)
         {
             return Err(format!(
-                "{label}'s Claude Pro/Max sign-in has expired. Disconnect it on the Providers page, then sign in again."
+                "{label}'s sign-in has expired. Disconnect it on the Providers page, then sign in again."
             ));
         }
         if credential.is_none() && !p.is_some_and(|p| p.custom) {

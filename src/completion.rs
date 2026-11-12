@@ -1,7 +1,7 @@
 //! Asking a model for a reply, streamed: where to ask, how each provider family wants the request
 //! (and how it spells "think harder"), and how to read the stream back. Gemini is asked through
-//! its OpenAI-compatible endpoint, as `oido-core` does, so there are two formats: OpenAI's, which
-//! most providers copy, and Anthropic's.
+//! its OpenAI-compatible endpoint, as `oido-core` does, so there are three formats: OpenAI's, which
+//! most providers copy, Anthropic's, and the Responses API that ChatGPT's Codex backend speaks.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::chatgpt;
 use crate::credentials::{
     CLAUDE_CODE_SYSTEM, CLAUDE_CODE_USER_AGENT, Credential, OAUTH_BETA, TOOL_PREFIX,
 };
@@ -21,6 +22,9 @@ pub enum Api {
     OpenAi,
     /// `POST {base}/messages`, server-sent events of typed blocks.
     Anthropic,
+    /// `POST {base}/responses`, OpenAI's Responses API: server-sent events of typed response
+    /// events. It is what a ChatGPT plan is spent on.
+    Codex,
 }
 
 /// How a provider takes "think harder", from `oido-core`'s provider profiles.
@@ -36,6 +40,8 @@ pub enum Thinking {
     OpenRouter,
     /// `"enable_thinking": true, "thinking_budget": N` (Qwen).
     Qwen,
+    /// `"reasoning": {"effort": "low", "summary": "auto"}` (the Responses API).
+    Responses,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -89,6 +95,7 @@ pub fn endpoint(id: &str, custom: bool, base_url: Option<&str>) -> Option<Endpoi
             "https://api.anthropic.com/v1",
             Thinking::Budget,
         ),
+        "codex" => make(Api::Codex, chatgpt::BASE, Thinking::Responses),
         _ => None,
     }
 }
@@ -397,6 +404,14 @@ fn prepare(
             headers.push(("anthropic-version", ANTHROPIC_VERSION.to_owned()));
             ("messages", anthropic_body(req, oauth))
         }
+        Api::Codex => {
+            if let Some(Credential::Subscription(token)) =
+                credential.filter(|c| !c.token().is_empty())
+            {
+                headers.extend(chatgpt::headers(token));
+            }
+            ("responses", codex_body(ep.thinking, req))
+        }
     };
     (format!("{}/{path}", ep.base), headers, body.to_string())
 }
@@ -475,7 +490,7 @@ fn openai_body(thinking: Thinking, req: &Request) -> Value {
         }
         if let Some(think) = req.think {
             match thinking {
-                Thinking::None => {}
+                Thinking::None | Thinking::Responses => {}
                 Thinking::Effort => {
                     map.insert("reasoning_effort".into(), json!(think.name()));
                 }
@@ -493,6 +508,80 @@ fn openai_body(thinking: Thinking, req: &Request) -> Value {
                     map.insert("thinking_budget".into(), json!(think.budget()));
                 }
             }
+        }
+    }
+    body
+}
+
+/// The Responses API's input: the chat as a list of items, a tool call and its result each an item
+/// of their own, matched by `call_id`.
+fn codex_input(req: &Request) -> Vec<Value> {
+    let mut input = Vec::new();
+    for t in &req.turns {
+        match t.role {
+            Role::User => {
+                let mut parts = Vec::new();
+                if !t.text.is_empty() || t.images.is_empty() {
+                    parts.push(json!({"type": "input_text", "text": t.text}));
+                }
+                for i in &t.images {
+                    let url = format!("data:{};base64,{}", i.media_type, i.data);
+                    parts.push(json!({"type": "input_image", "image_url": url}));
+                }
+                input.push(json!({"type": "message", "role": "user", "content": parts}));
+            }
+            Role::Assistant => {
+                if !t.text.is_empty() {
+                    input.push(json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": t.text}]}));
+                }
+                for c in &t.calls {
+                    let args = if args_object(&c.args).is_some() {
+                        c.args.as_str()
+                    } else {
+                        "{}"
+                    };
+                    input.push(json!({"type": "function_call", "call_id": c.id, "name": c.name, "arguments": args}));
+                }
+            }
+            Role::Tool => input.push(
+                json!({"type": "function_call_output", "call_id": t.call_id, "output": t.text}),
+            ),
+        }
+    }
+    input
+}
+
+/// A Responses request as ChatGPT's Codex backend takes it: always streamed, and never stored there
+/// (the chat is sent whole each time, as with every other provider).
+fn codex_body(thinking: Thinking, req: &Request) -> Value {
+    // This backend has no system message: the brief goes in `instructions`, the stable part first.
+    let instructions: Vec<&str> = [req.system.as_deref(), req.context.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut body = json!({
+        "model": req.model,
+        "instructions": instructions.join("\n\n"),
+        "input": codex_input(req),
+        "stream": true,
+        "store": false,
+    });
+    if let Some(map) = body.as_object_mut() {
+        if !req.tools.is_empty() {
+            let tools: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.schema}))
+                .collect();
+            map.insert("tools".into(), json!(tools));
+            map.insert("tool_choice".into(), json!("auto"));
+        }
+        if let (Some(think), Thinking::Responses) = (req.think, thinking) {
+            map.insert(
+                "reasoning".into(),
+                json!({"effort": think.name(), "summary": "auto"}),
+            );
         }
     }
     body
@@ -634,14 +723,15 @@ fn refusal(status: u16, body: &str) -> Error {
     }
 }
 
-/// The message in an error body (`{"error": {"message": ..}}`, `{"error": ".."}`, `{"message": ..}`),
-/// shortened.
+/// The message in an error body (`{"error": {"message": ..}}`, `{"error": ".."}`, `{"message": ..}`,
+/// `{"detail": ..}`), shortened.
 fn error_message(body: &str) -> String {
     let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let found = v
         .pointer("/error/message")
         .or_else(|| v.get("error").filter(|e| e.is_string()))
         .or_else(|| v.get("message"))
+        .or_else(|| v.get("detail").filter(|d| d.is_string()))
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| {
@@ -691,8 +781,9 @@ fn read_stream(
         finished |= match api {
             Api::OpenAi => openai_chunk(&v, &mut pending, emit),
             Api::Anthropic => anthropic_event(&v, oauth, tools, &mut pending, emit)?,
+            Api::Codex => codex_event(&v, emit)?,
         };
-        if finished && api == Api::Anthropic {
+        if finished && api != Api::OpenAi {
             break;
         }
     }
@@ -771,6 +862,87 @@ fn openai_chunk(v: &Value, pending: &mut Pending, emit: &mut dyn FnMut(Event)) -
     choice
         .and_then(|c| c.get("finish_reason"))
         .is_some_and(|f| !f.is_null())
+}
+
+/// One event of a Responses stream. `Ok(true)` when the response is complete; a failure is an
+/// `Err`. A tool call arrives whole, in the event that closes its item.
+fn codex_event(v: &Value, emit: &mut dyn FnMut(Event)) -> Result<bool, Error> {
+    let text = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    };
+    match v.get("type").and_then(Value::as_str) {
+        Some("response.output_text.delta") => {
+            if let Some(t) = text("delta") {
+                emit(Event::Text(t));
+            }
+        }
+        Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
+            if let Some(t) = text("delta") {
+                emit(Event::Reasoning(t));
+            }
+        }
+        Some("response.output_item.done") => {
+            let item = v
+                .get("item")
+                .filter(|i| i.get("type").and_then(Value::as_str) == Some("function_call"));
+            if let Some(item) = item {
+                let field = |k: &str| {
+                    item.get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                let index = v.get("output_index").and_then(Value::as_u64).unwrap_or(0);
+                emit(call_event(
+                    index,
+                    field("call_id"),
+                    field("name"),
+                    field("arguments"),
+                ));
+            }
+        }
+        Some("response.completed" | "response.incomplete") => {
+            let u = v.pointer("/response/usage");
+            let n = |k: &str| {
+                u.and_then(|u| u.pointer(k))
+                    .and_then(Value::as_u64)
+                    .map(|n| n as u32)
+            };
+            emit(Event::Usage(Tokens {
+                input: n("/input_tokens"),
+                output: n("/output_tokens"),
+                cache_read: n("/input_tokens_details/cached_tokens"),
+                cache_write: None,
+            }));
+            return Ok(true);
+        }
+        Some("response.failed") => return Err(codex_failure(v.pointer("/response/error"))),
+        Some("error") => return Err(codex_failure(Some(v))),
+        _ => {}
+    }
+    Ok(false)
+}
+
+/// What a failed Responses stream says went wrong, by its error `code`.
+fn codex_failure(error: Option<&Value>) -> Error {
+    let field = |k: &str| {
+        error
+            .and_then(|e| e.get(k))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    let message = field("message").to_owned();
+    match field("code") {
+        "rate_limit_exceeded" | "usage_limit_reached" | "insufficient_quota" => {
+            Error::RateLimited(message)
+        }
+        "context_length_exceeded" => Error::TooLong,
+        "invalid_api_key" | "token_expired" | "invalid_token" => Error::Rejected,
+        _ => Error::Provider(500, message),
+    }
 }
 
 /// One Anthropic event. `Ok(true)` when the message is complete; an error event is an `Err`.
@@ -1442,5 +1614,201 @@ data: {"type":"message_stop"}
             .map(|m| &m["content"][0]["input"])
             .collect();
         assert_eq!(inputs, [&json!({}); 3]);
+    }
+    fn codex_chat() -> Request {
+        Request {
+            model: "gpt-5.3-codex".into(),
+            system: Some("Be brief.".into()),
+            context: Some("It is Friday.".into()),
+            turns: vec![
+                Turn::user_with(
+                    "Look",
+                    vec![Image {
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    }],
+                ),
+                Turn::assistant(
+                    "Reading it.",
+                    vec![Call {
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                        args: r#"{"path":"a"}"#.into(),
+                    }],
+                ),
+                Turn::tool("call_1", "contents"),
+                Turn::user("Thanks"),
+            ],
+            think: Some(Think::Medium),
+            tools: vec![ToolSpec {
+                name: "read_file".into(),
+                description: "Reads a file".into(),
+                schema: json!({"type": "object"}),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_codex_request_puts_the_brief_in_instructions_and_the_chat_in_items() {
+        let b = codex_body(Thinking::Responses, &codex_chat());
+        assert_eq!(b["instructions"], "Be brief.\n\nIt is Friday.");
+        assert_eq!((&b["stream"], &b["store"]), (&json!(true), &json!(false)));
+        assert!(
+            b.get("messages").is_none(),
+            "the Responses API has no messages"
+        );
+        assert_eq!(
+            b["reasoning"],
+            json!({"effort": "medium", "summary": "auto"})
+        );
+        assert_eq!(b["tools"][0]["name"], "read_file");
+        assert_eq!(b["tools"][0]["type"], "function");
+        assert_eq!(b["tool_choice"], "auto");
+
+        let input = b["input"].as_array().unwrap();
+        let kinds: Vec<(&str, &str)> = input
+            .iter()
+            .map(|i| {
+                (
+                    i["type"].as_str().unwrap(),
+                    i["role"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("message", "user"),
+                ("message", "assistant"),
+                ("function_call", ""),
+                ("function_call_output", ""),
+                ("message", "user"),
+            ]
+        );
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            input[0]["content"][1],
+            json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA"})
+        );
+        assert_eq!(input[1]["content"][0]["type"], "output_text");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[2]["arguments"], r#"{"path":"a"}"#);
+        assert_eq!(
+            input[3],
+            json!({"type": "function_call_output", "call_id": "call_1", "output": "contents"})
+        );
+
+        let mut quiet = codex_chat();
+        (quiet.think, quiet.tools) = (None, Vec::new());
+        let b = codex_body(Thinking::Responses, &quiet);
+        assert!(
+            b.get("reasoning").is_none()
+                && b.get("tools").is_none()
+                && b.get("tool_choice").is_none(),
+            "off and no tools send nothing: {b}"
+        );
+    }
+
+    #[test]
+    fn a_codex_request_goes_to_responses_with_the_plans_token_and_account() {
+        let token = crate::testing::access_token(Some("acct-1"));
+        let ep = Endpoint {
+            api: Api::Codex,
+            base: "https://chatgpt.com/backend-api/codex".into(),
+            thinking: Thinking::Responses,
+        };
+        let (url, headers, _) =
+            prepare(&ep, Some(&Credential::subscription(&token)), &codex_chat());
+        assert_eq!(url, "https://chatgpt.com/backend-api/codex/responses");
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("Authorization"), Some(format!("Bearer {token}")));
+        assert_eq!(get("chatgpt-account-id").as_deref(), Some("acct-1"));
+        assert!(get("OpenAI-Beta").is_some());
+        let at = endpoint("codex", false, None).unwrap();
+        assert_eq!((at.api, at.thinking), (Api::Codex, Thinking::Responses));
+    }
+
+    #[test]
+    fn a_codex_stream_gives_text_thinking_whole_tool_calls_and_usage() {
+        let stream = [
+            r#"{"type":"response.created","response":{}}"#,
+            r#"{"type":"response.reasoning_summary_text.delta","delta":"Checking."}"#,
+            r#"{"type":"response.output_text.delta","delta":"Hel"}"#,
+            r#"{"type":"response.output_text.delta","delta":"lo"}"#,
+            r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant"}}"#,
+            r#"{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","call_id":"call_9","name":"read_file","arguments":"{\"path\":\"a\"}"}}"#,
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":120,"output_tokens":30,"input_tokens_details":{"cached_tokens":100}}}}"#,
+        ]
+        .map(|data| format!("event: x\ndata: {data}\n\n"))
+        .concat();
+        let (events, done) = read(Api::Codex, &stream);
+        assert_eq!(done, Ok(()));
+        assert_eq!(
+            events,
+            [
+                Event::Reasoning("Checking.".into()),
+                Event::Text("Hel".into()),
+                Event::Text("lo".into()),
+                Event::ToolCall(Call {
+                    id: "call_9".into(),
+                    name: "read_file".into(),
+                    args: r#"{"path":"a"}"#.into(),
+                }),
+                Event::Usage(Tokens {
+                    input: Some(120),
+                    output: Some(30),
+                    cache_read: Some(100),
+                    cache_write: None,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_codex_stream_that_ends_without_completing_was_cut_and_failures_are_told_apart() {
+        let (_, done) = read(
+            Api::Codex,
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+        );
+        assert_eq!(done, Err(Error::Cut));
+
+        let failed = |code: &str| {
+            let data = json!({"type": "response.failed", "response": {"error": {"code": code, "message": "m"}}});
+            read(Api::Codex, &format!("data: {data}\n\n")).1
+        };
+        assert_eq!(
+            failed("usage_limit_reached"),
+            Err(Error::RateLimited("m".into()))
+        );
+        assert_eq!(failed("context_length_exceeded"), Err(Error::TooLong));
+        assert_eq!(
+            failed("something_else"),
+            Err(Error::Provider(500, "m".into()))
+        );
+        let plain = json!({"type": "error", "code": "rate_limit_exceeded", "message": "slow down"});
+        assert_eq!(
+            read(Api::Codex, &format!("data: {plain}\n\n")).1,
+            Err(Error::RateLimited("slow down".into()))
+        );
+    }
+
+    #[test]
+    fn a_refusal_reads_the_detail_chatgpts_backend_gives() {
+        assert_eq!(
+            refusal(400, r#"{"detail":"Instructions are required"}"#),
+            Error::Provider(400, "Instructions are required".into())
+        );
+        assert_eq!(
+            refusal(
+                429,
+                r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#
+            ),
+            Error::RateLimited("The usage limit has been reached".into())
+        );
     }
 }

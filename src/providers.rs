@@ -2,6 +2,8 @@
 //! `/api/providers`; the shapes and rules mirror Studio's `ProvidersClient`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::TextEdit;
 
@@ -11,7 +13,8 @@ use crate::picker::{Group, PickerState};
 /// The id Studio gives a user-added server before it has a name; the form's slot for "new".
 pub const NEW_SERVER: &str = "llama-server:new";
 
-/// How a provider is asked: with its own API key, or with a Claude Pro/Max subscription.
+/// How a provider is asked: with its own API key, or with a subscription (Claude Pro/Max, or a
+/// ChatGPT plan).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ProviderAuth {
     #[default]
@@ -33,10 +36,22 @@ pub struct Provider {
     pub auth: ProviderAuth,
 }
 
-/// A subscription sign-in waiting for the code the browser showed.
+/// A subscription sign-in waiting on the browser: for the code it showed, or, when it comes back to
+/// this computer by itself, for the browser to do so.
 pub struct SigningIn {
     pub id: String,
     pub sign: crate::credentials::SignIn,
+    /// Set for a sign-in that waits on this computer's port. Letting the sign-in go, by closing its
+    /// form or signing the provider out, ends that wait.
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for SigningIn {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 pub struct Providers {
@@ -67,13 +82,18 @@ pub struct Providers {
 /// connected like a provider, but its models are never listed for agents (see [`serves_chat`]).
 pub const TYPESAFE: &str = "typesafe";
 
+/// ChatGPT's Codex: a ChatGPT plan's models, signed in to rather than given a key (see
+/// [`crate::chatgpt`]).
+pub const CODEX: &str = "codex";
+
 /// Whether a provider's models can run an agent's chat, and so are listed, refreshed and picked.
 pub fn serves_chat(id: &str) -> bool {
     id != TYPESAFE
 }
 
-const BUILT_IN: [(&str, &str, &str); 10] = [
+const BUILT_IN: [(&str, &str, &str); 11] = [
     ("openai", "OpenAI", "#10A37F"),
+    (CODEX, "OpenAI Codex", "#7C6CF6"),
     ("anthropic", "Anthropic", "#CC785C"),
     ("gemini", "Gemini", "#4285F4"),
     ("openrouter", "OpenRouter", "#6566F1"),
@@ -379,7 +399,12 @@ impl Providers {
     pub fn set_subscription_hint(&mut self, id: &str) {
         if let Some(p) = self.list.iter_mut().find(|p| p.id == id) {
             p.auth = ProviderAuth::Subscription;
-            p.key_masked = Some("Claude Pro/Max".to_owned());
+            let plan = if id == CODEX {
+                "ChatGPT plan"
+            } else {
+                "Claude Pro/Max"
+            };
+            p.key_masked = Some(plan.to_owned());
         }
     }
 
@@ -686,5 +711,68 @@ mod tests {
         assert_eq!(s.base_url.as_deref(), Some("http://box.local:9000/v1"));
         p.disconnect("llama-server:my-box");
         assert!(p.get("llama-server:my-box").is_none());
+    }
+
+    fn waiting(id: &str, cancel: &Arc<AtomicBool>) -> SigningIn {
+        SigningIn {
+            id: id.to_owned(),
+            sign: crate::credentials::SignIn {
+                verifier: "v".to_owned(),
+                state: "s".to_owned(),
+                url: "https://auth.openai.com/oauth/authorize".to_owned(),
+            },
+            cancel: Some(Arc::clone(cancel)),
+        }
+    }
+
+    #[test]
+    fn letting_a_chatgpt_sign_in_go_ends_its_wait() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut p = init();
+        p.signing_in = Some(waiting(CODEX, &cancel));
+        p.toggle("openai");
+        assert!(
+            p.signing_in.is_none() && cancel.load(Ordering::Relaxed),
+            "closing the form"
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        p.signing_in = Some(waiting(CODEX, &cancel));
+        p.disconnect(CODEX);
+        assert!(cancel.load(Ordering::Relaxed), "signing the provider out");
+    }
+
+    #[test]
+    fn codex_is_offered_to_everyone_and_signed_in_as_a_plan() {
+        let mut p = init();
+        assert!(
+            p.get(CODEX)
+                .is_some_and(|c| !c.connected && c.label == "OpenAI Codex")
+        );
+        p.set_subscription_hint(CODEX);
+        assert_eq!(
+            p.get(CODEX).unwrap().key_masked.as_deref(),
+            Some("ChatGPT plan")
+        );
+
+        // A list saved before Codex existed still gets it, ahead of the user's own servers.
+        let mut saved: Vec<Provider> = init().list.into_iter().filter(|p| p.id != CODEX).collect();
+        saved.push(Provider {
+            id: "llama-server:box".into(),
+            label: "Box".into(),
+            color: SERVER_COLOR,
+            connected: true,
+            key_masked: None,
+            base_url: Some("http://box/v1".into()),
+            custom: true,
+            auth: ProviderAuth::ApiKey,
+        });
+        let p = Providers::from_saved(saved, HashMap::new(), None);
+        let ids: Vec<&str> = p.list.iter().map(|p| p.id.as_str()).collect();
+        let (codex, server) = (
+            ids.iter().position(|i| *i == CODEX).unwrap(),
+            ids.iter().position(|i| *i == "llama-server:box").unwrap(),
+        );
+        assert!(codex < server, "{ids:?}");
     }
 }

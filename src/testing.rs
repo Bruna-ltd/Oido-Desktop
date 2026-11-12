@@ -10,6 +10,23 @@ use crate::app::App;
 use crate::store::Store;
 use crate::vault::Vault;
 
+/// A ChatGPT access token in the shape the backend issues (header, claims, signature), naming
+/// `account` if there is one.
+pub fn access_token(account: Option<&str>) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let claims = match account {
+        Some(id) => serde_json::json!({"https://api.openai.com/auth": {"chatgpt_account_id": id}}),
+        None => serde_json::json!({"sub": "someone"}),
+    };
+    let part = |v: &serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
+    format!(
+        "{}.{}.sig",
+        part(&serde_json::json!({"alg": "RS256"})),
+        part(&claims)
+    )
+}
+
 /// Serves one canned JSON reply per connection, in order, and reports each request it saw
 /// (lowercased).
 pub fn serve(replies: Vec<(u16, &'static str)>) -> (String, mpsc::Receiver<String>) {

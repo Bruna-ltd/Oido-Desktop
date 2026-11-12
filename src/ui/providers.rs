@@ -8,7 +8,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Divider, Kit, TextInput};
 use super::model_picker::ModelPicker;
 
 use crate::app::{App, now};
-use crate::providers::{NEW_SERVER, Provider, Providers, serves_chat};
+use crate::providers::{CODEX, NEW_SERVER, Provider, Providers, serves_chat};
 
 const PAGE: f32 = 768.0;
 
@@ -385,7 +385,9 @@ fn available_row(s: &App, p: &Provider, k: &Kit) -> El {
                 .grow(1.0)
         };
         let mut body = col().gap(8.0);
-        if let Some(url) = &signing_in {
+        if p.id == CODEX {
+            body = body.child(chatgpt_panel(s, &id, signing_in.as_deref(), k));
+        } else if let Some(url) = &signing_in {
             body = body.child(subscription_panel(s, &id, url, k));
         } else {
             body = body.child(
@@ -431,21 +433,83 @@ fn available_row(s: &App, p: &Provider, k: &Kit) -> El {
     )
 }
 
+/// Opens the sign-in page again, for a browser that did not take it the first time.
+fn open_again(url: &str, k: &Kit) -> El {
+    let url = url.to_owned();
+    Button::new("Open the page again")
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press(move |_: &mut App| {
+            if let Err(e) = crate::browser::open(&url) {
+                eprintln!("oido: could not open the sign-in page: {e}");
+            }
+        })
+        .build(k)
+        .key("subscribe-again")
+}
+
+/// ChatGPT's whole form: there is no key to type and no code to paste. It signs in, and once the
+/// browser has the page (`waiting` holds its address) it waits for it to come back by itself.
+fn chatgpt_panel(s: &App, id: &str, waiting: Option<&str>, k: &Kit) -> El {
+    let Some(url) = waiting else {
+        let busy = s.providers.busy.contains(id);
+        let start = id.to_owned();
+        return col()
+            .gap(8.0)
+            .child(
+                text(
+                    "Run Codex models on your ChatGPT Plus, Pro or Business plan, with no API key.",
+                )
+                .font(k.ty.small)
+                .color(k.c.text_muted)
+                .wrap(),
+            )
+            .child(
+                Button::new(if busy {
+                    "Signing in…"
+                } else {
+                    "Sign in with ChatGPT"
+                })
+                .variant(ButtonVariant::Contrast)
+                .disabled(busy)
+                .on_press(move |s: &mut App| s.start_subscription_sign_in(&start))
+                .build(k)
+                .key("subscribe"),
+            );
+    };
+    let cancel = ghost("Cancel", "subscribe-cancel".to_owned(), k, |s: &mut App| {
+        s.providers.signing_in = None
+    });
+    col()
+        .gap(8.0)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Approve Oido in your browser. This continues by itself once you have.")
+                        .font(k.ty.small)
+                        .color(k.c.text_muted)
+                        .wrap()
+                        .grow(1.0),
+                )
+                .child(open_again(url, k))
+                .child(cancel),
+        )
+        .child(
+            text(url.to_owned())
+                .font(k.ty.small)
+                .color(k.c.text_faint)
+                .wrap_anywhere()
+                .selectable(true)
+                .key("subscribe-url"),
+        )
+}
+
 /// The second half of a subscription sign-in: the page to approve, and where its code goes.
 fn subscription_panel(s: &App, id: &str, url: &str, k: &Kit) -> El {
-    let again = {
-        let url = url.to_owned();
-        Button::new("Open the page again")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Small)
-            .on_press(move |_: &mut App| {
-                if let Err(e) = crate::browser::open(&url) {
-                    eprintln!("oido: could not open the sign-in page: {e}");
-                }
-            })
-            .build(k)
-            .key("subscribe-again")
-    };
+    let again = open_again(url, k);
     let finish = {
         let id = id.to_owned();
         let busy = s.providers.busy.contains(id.as_str());
@@ -491,7 +555,7 @@ fn subscription_panel(s: &App, id: &str, url: &str, k: &Kit) -> El {
             text(url.to_owned())
                 .font(k.ty.small)
                 .color(k.c.text_faint)
-                .wrap()
+                .wrap_anywhere()
                 .selectable(true)
                 .key("subscribe-url"),
         )

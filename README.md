@@ -86,13 +86,23 @@ the user cannot write to (a package manager's) reports why it cannot.
 A provider is connected only after its key has listed models: a key that cannot is not saved. If the
 system keyring is unavailable, no key is stored.
 
+Two providers can also be signed in to with a subscription instead of a key, and their sign-in is
+sealed and renewed like a key: Anthropic with a Claude Pro/Max plan (paste back the code the browser
+shows), and OpenAI Codex with a ChatGPT Plus, Pro or Business plan. Codex signs in as the Codex CLI's
+own OAuth client, so the browser comes back to port 1455 of this computer (nothing to paste, but the
+port must be free, which a Codex CLI sign-in waiting in a terminal is not), and its calls go to
+ChatGPT's Codex backend, which OpenAI does not document, so it may change without notice.
+
 ## Layout
 
 - `src/agents.rs`, `src/providers.rs`, `src/models.rs`: the domain (agents and teams, providers,
   models and what they can do).
 - `src/store/`: SQLite, migrations and typed queries. `src/vault.rs`: sealing keys.
 - `src/listing.rs`: asking a provider for its models. `src/connect.rs`: connecting, refreshing.
-- `src/completion.rs`: streaming chat requests (OpenAI-compatible and Anthropic). `src/run.rs`: sending,
+  `src/credentials.rs`, `src/chatgpt.rs`: subscription sign-ins (Claude, ChatGPT) and their token
+  renewal. `src/loopback/`: the port a browser sign-in comes back to.
+- `src/completion.rs`: streaming chat requests (OpenAI-compatible, Anthropic, and the Responses API
+  Codex speaks). `src/run.rs`: sending,
   streaming into the chat, stop and retry. `src/runs.rs`: what a run records.
   `src/prompt.rs`: what you send, your words and attachments (text files inlined, pictures shrunk to
   1568 px and sent as image parts). `src/composer.rs`: the message box's logic: `/` commands, `@` files
