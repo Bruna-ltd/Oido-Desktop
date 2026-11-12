@@ -80,6 +80,12 @@ jobs:
           fi
           echo "version=$next" >> "$GITHUB_OUTPUT"
 
+      # Tests get a step of their own, not release.sh's quiet run, so the log names each test as it
+      # finishes and a hung one shows by its absence. release.sh then runs them again, from cache.
+      - name: Test
+        timeout-minutes: 20
+        run: cargo test
+
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
