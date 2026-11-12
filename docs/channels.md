@@ -1,7 +1,6 @@
 # Channels
 
-Paired people talk to chosen agents from a messaging app: Telegram and Slack so far; WhatsApp
-follows.
+Paired people talk to chosen agents from a messaging app: Telegram, Slack and WhatsApp.
 
 **Code.** `src/channels/mod.rs` is the part no channel owns: pairing, which agent each person talks
 to, their chats, commands, and what goes back when a turn is over. A channel turns what it hears
@@ -9,8 +8,9 @@ into `Heard` (a message, a command, a button press) and sends each `Out` (say, t
 answered) its own way, from its own thread; replies go to a `Place` (a chat, and a thread in it).
 `press.rs` is the buttons (questions, drafts), `send.rs` the `send_file` tool. Each channel lives
 in its own folder: `telegram/` (`api.rs` the Bot API, `format.rs` Markdown to Telegram HTML,
-`mod.rs` connecting, its threads, and updates turned into `Heard`) and `slack/` (the same, for
-Slack's Web API, mrkdwn and Socket Mode). Storage is
+`mod.rs` connecting, its threads, and updates turned into `Heard`), `slack/` (the same, for
+Slack's Web API, mrkdwn and Socket Mode) and `whatsapp/` (a linked device, below). `mrkdwn.rs`
+is the Markdown shape Slack and WhatsApp share, each with its own escaping and links. Storage is
 `src/store/channels.rs` (rows name their channel), the screen `src/ui/channels.rs`.
 
 ## Telegram
@@ -114,7 +114,48 @@ the bytes, then the file shared in the person's private chat), up to 50 MB. Neve
 thread. Both need the `files:read` and `files:write` scopes in the manifest; an app made from an
 older manifest says `missing_scope` until it is updated and reinstalled.
 
+## WhatsApp
+
+**Unofficial.** Oido links to a WhatsApp number as a device, the way WhatsApp Web does, through
+`whatsapp-rust` (WhatsApp Web's protocol, reverse-engineered). WhatsApp's official API only
+delivers messages to a webhook, so a public address; a linked device needs none, but WhatsApp may
+ban a number used this way. The Channels screen says so before linking: link a number of its own,
+never your personal one.
+
+**Linking.** "Link…" starts the client with a new key, and the Channels screen shows the QR code
+WhatsApp hands out (a new one every few seconds) to scan from the phone (Settings → Linked devices
+→ Link a device). Once it signs in, the number is saved like a bot: `channel_bots` holds the key,
+sealed, and the name `+<number>`. The client keeps its session (the keys its messages are
+encrypted with) in a file of its own beside the database, `whatsapp-<id>.db`, encrypted with that
+key (SQLCipher: the SQLite Oido links is SQLCipher, and a database opened without a key, like
+`oido.db`, is plain SQLite as before). Cancelling, a code never scanned, disconnecting (which
+unlinks the device on the phone too) and unlinking on the phone all remove the file; one left by
+a link never finished is removed at the next start. The number's past chats are not brought in.
+
+**Listening.** The client runs on Tokio, on a thread of its own, while the app runs; WhatsApp
+keeps what is sent while Oido is closed and hands it over on the next start (older than 10 minutes:
+the sender is asked to send it again). The connection comes back on its own after a drop.
+
+**Who is answered.** Private chats only. A stranger is not answered at all: the number may be one
+people know, so nobody gets a pairing code. "Invite by QR" shows a code holding
+`wa.me/<number>?text=pair <token>`: scanned with a phone's camera, it opens a chat with the number,
+the invite written in. Whoever sends it first is paired, at once, and a desktop notification says
+so. An invite is 80 random bits, works once, for 10 minutes, one on show at a time; taking it back
+or a restart ends it. A person is known by their LID (WhatsApp's own id for them) where WhatsApp
+gives it, else by their number.
+
+**A turn, commands, buttons.** As on Telegram: `/agent`, `/new`, `/stop`, `/help`, "typing…" while
+the agent works, replies in WhatsApp's markup (`*bold*`, `_italic_`, `~struck~`, `` `code` ``, fenced
+code; links as their words with the address after; at most 4000 characters a message). WhatsApp
+has no buttons for a number like this, so the buttons go as a poll under the message ("Choose
+one"), and a vote presses one. A poll cannot be taken back; each still works once, and a note on a
+press comes as a message. Polls live while the app runs.
+
+**Pictures.** A picture from someone paired goes to the agent with its caption, up to 10 MB;
+voice notes, stickers and files are turned away in words. `send_file` is not offered on WhatsApp
+yet.
+
 ## Not yet
 
 - Voice notes (would need speech to text), other files in, Telegram groups.
-- WhatsApp (the Cloud API needs a webhook, so a public address).
+- `send_file` on WhatsApp (a file would go through the running client).

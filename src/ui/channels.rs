@@ -1,15 +1,18 @@
-//! The Channels screen: connecting a Telegram bot and a Slack app, approving the people who ask to
-//! pair with them, and the people paired. See `src/channels`.
+//! The Channels screen: connecting a Telegram bot and a Slack app, linking a WhatsApp number by
+//! its QR code and inviting people to it, approving the people who ask to pair, and the people
+//! paired. See `src/channels`.
 
 use rune::{El, ScrollSpec, Tx, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Switch, TextInput};
 
 use super::settings::{section, setting};
-use crate::app::App;
+use crate::app::{App, now};
 use crate::channels::{Kind, Paired, Pairing, Status, slack};
 use crate::picker::{Item, MultiPicker};
 
 const TOKEN_WIDTH: f32 = 280.0;
+/// How big a QR code to scan shows.
+const QR_SIDE: f32 = 220.0;
 const COLUMN: f32 = 760.0;
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -19,6 +22,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         let mut rows = match kind {
             Kind::Telegram => vec![telegram_row(s, k)],
             Kind::Slack => slack_rows(s, k),
+            Kind::WhatsApp => whatsapp_rows(s, k),
         };
         if c.get(kind).connected() {
             rows.push(agents_row(s, kind, k, layer));
@@ -102,6 +106,12 @@ fn agents_row(s: &App, kind: Kind, k: &Kit, layer: &mut Vec<El>) -> El {
             |s| &s.channels.slack.picker,
             |s| &mut s.channels.slack.picker,
             |s, id| s.toggle_channel_agent(Kind::Slack, id),
+        ),
+        Kind::WhatsApp => spec(
+            "whatsapp-agents",
+            |s| &s.channels.whatsapp.picker,
+            |s| &mut s.channels.whatsapp.picker,
+            |s, id| s.toggle_channel_agent(Kind::WhatsApp, id),
         ),
     };
     // The picker under its words, full width: beside them it would squeeze them.
@@ -249,13 +259,139 @@ fn slack_rows(s: &App, k: &Kit) -> Vec<El> {
     vec![make, tokens]
 }
 
+/// WhatsApp: linking a number by its QR code, or the number linked and inviting people to it.
+fn whatsapp_rows(s: &App, k: &Kit) -> Vec<El> {
+    let c = &s.channels.whatsapp;
+    if c.connected() {
+        return vec![connected_row(s, Kind::WhatsApp, k), invite_row(s, k)];
+    }
+    let cancel = || {
+        button("Cancel")
+            .variant(ButtonVariant::Ghost)
+            .on_press(|s: &mut App| s.cancel_whatsapp_link())
+            .build(k)
+            .key("whatsapp-cancel")
+    };
+    let row = match &c.status {
+        Status::Linking(qr) => qr_row(
+            "whatsapp-link",
+            "Scan this code",
+            "On the phone with the number Oido will use, open WhatsApp → Settings → Linked devices → Link a device, and point it at this code. The code changes every few seconds.",
+            qr,
+            cancel(),
+            k,
+        ),
+        Status::Connecting | Status::Listening | Status::Retrying(_) => setting(
+            "whatsapp-link",
+            "Link a number",
+            "Getting a code to scan…",
+            cancel(),
+            k,
+        ),
+        Status::Off | Status::Failed(_) => {
+            let warning = "Oido links to a WhatsApp number as a device, the way WhatsApp Web does. This is not WhatsApp's official way, and WhatsApp may ban a number used like this: link a number of its own, never your personal one.";
+            let help = match &c.status {
+                Status::Failed(why) => format!("{why}\n\n{warning}"),
+                _ => warning.to_owned(),
+            };
+            setting(
+                "whatsapp-link",
+                "Link a number",
+                &help,
+                button("Link…")
+                    .variant(ButtonVariant::Submit)
+                    .on_press(|s: &mut App| s.link_whatsapp())
+                    .build(k)
+                    .key("whatsapp-link-start"),
+                k,
+            )
+        }
+    };
+    vec![row]
+}
+
+/// Inviting someone to the linked number: a QR code that opens a chat with it, the invite
+/// written in. Whoever sends it first is paired.
+fn invite_row(s: &App, k: &Kit) -> El {
+    let c = &s.channels.whatsapp;
+    let bot = c.bot.as_deref().unwrap_or_default();
+    let live = c
+        .invite
+        .as_ref()
+        .filter(|i| i.expires > now())
+        .and_then(|i| Kind::WhatsApp.invite_link(bot, i).map(|link| (i, link)));
+    let invite = || {
+        button("Invite by QR")
+            .variant(ButtonVariant::Outline)
+            .on_press(|s: &mut App| s.invite(Kind::WhatsApp))
+            .build(k)
+            .key("whatsapp-invite")
+    };
+    let Some((i, link)) = live else {
+        return setting(
+            "whatsapp-invite",
+            "Invite someone",
+            "Strangers who write to the number get no answer. To let someone talk to your agents, show them an invite: they can then use the agents' tools on this computer.",
+            invite(),
+            k,
+        );
+    };
+    let minutes = ((i.expires - now()) / 60).max(1);
+    qr_row(
+        "whatsapp-invite",
+        "Invite someone",
+        &format!(
+            "They scan this with their phone's camera, and WhatsApp opens with the invite written to {bot}: they send it, and they are paired. It works once, for the next {minutes} min."
+        ),
+        &link,
+        button("Take it back")
+            .variant(ButtonVariant::Ghost)
+            .on_press(|s: &mut App| s.cancel_invite(Kind::WhatsApp))
+            .build(k)
+            .key("whatsapp-invite-cancel"),
+        k,
+    )
+}
+
+/// A row whose control is a QR code holding `data`: the words, then the code under them with
+/// `action` beside it (beside the words the code would leave them floating in a tall row).
+fn qr_row(key: &str, name: &str, help: &str, data: &str, action: El, k: &Kit) -> El {
+    col()
+        .key(format!("setting-{key}"))
+        .w_full()
+        .padding(16.0)
+        .gap(12.0)
+        .child(
+            col()
+                .gap(2.0)
+                .child(
+                    text(name.to_owned())
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base),
+                )
+                .child(
+                    text(help.to_owned())
+                        .font(k.ty.small)
+                        .color(k.c.text_muted)
+                        .wrap(),
+                ),
+        )
+        .child(
+            row()
+                .gap(16.0)
+                .items_end()
+                .child(super::qr::code(data, QR_SIDE, k))
+                .child(action),
+        )
+}
+
 /// A connected channel: its bot, where it stands, its switch, and disconnecting.
 fn connected_row(s: &App, kind: Kind, k: &Kit) -> El {
     let c = s.channels.get(kind);
     let id = kind.as_str();
     let help = match &c.status {
         Status::Listening => "Listening. Paired people can talk to agents while Oido is open.".to_owned(),
-        Status::Connecting => "Connecting…".to_owned(),
+        Status::Connecting | Status::Linking(_) => "Connecting…".to_owned(),
         Status::Retrying(why) => format!("Cannot reach {}, trying again: {why}.", kind.title()),
         Status::Failed(why) => why.clone(),
         Status::Off => "Off. Messages sent now are answered if they are under 10 minutes old when it is turned on.".to_owned(),
@@ -301,7 +437,12 @@ fn connected_row(s: &App, kind: Kind, k: &Kit) -> El {
         )
         .child(disconnect);
     let name = c.bot.as_deref().unwrap_or_default();
-    setting(id, &format!("@{name}"), &help, control, k)
+    // A WhatsApp number is written as it is dialled; bots and apps go by their handle.
+    let title = match kind {
+        Kind::WhatsApp => name.to_owned(),
+        Kind::Telegram | Kind::Slack => format!("@{name}"),
+    };
+    setting(id, &title, &help, control, k)
 }
 
 fn who(name: &str, handle: Option<&str>) -> String {

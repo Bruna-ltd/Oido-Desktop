@@ -17,7 +17,13 @@ keyring-core = "1.0.1"
 rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b" }
 # Components and app shell (sidebar, split view, toolbar). `markdown` renders agent replies; `mermaid` draws their diagrams and charts.
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", features = ["markdown", "mermaid"] }
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+# 0.39, not newer: it links the same SQLite library (libsqlite3-sys 0.37) as WhatsApp's session store
+# below, and only one copy can be linked. Bump together with `whatsapp-rust`.
+rusqlite = { version = "0.39", features = ["bundled"] }
+# The SQLite linked is SQLCipher (system OpenSSL for its crypto), so WhatsApp's session file is
+# encrypted with a key sealed like a token. A database opened without a key, like Oido's own, is
+# plain SQLite as before.
+libsqlite3-sys = { version = "0.37", features = ["bundled-sqlcipher"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 ureq = "3.5.1"
@@ -31,6 +37,14 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # Slack's Socket Mode: a WebSocket the app opens, so Slack needs no public address. Blocking, on a
 # thread of its own like the rest; TLS through the rustls ureq already brings.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+# WhatsApp as a channel: Oido linked as a device of a WhatsApp number by scanning a QR code
+# (WhatsApp Web's protocol, unofficial). It runs on Tokio, on a thread of its own.
+whatsapp-rust = { version = "0.7", default-features = false, features = ["tokio-runtime", "tokio-native", "tokio-transport", "ureq-client", "sqlite-storage"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "macros"] }
+# The session store's database connection, to key it (`PRAGMA key`) before anything else runs.
+diesel = { version = "2.3", default-features = false, features = ["sqlite"] }
+# The QR codes on the Channels screen: linking WhatsApp, and inviting someone to it.
+qrcode = { version = "0.14", default-features = false }
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
 croner = "4"
 # The icon in the desktop bar's tray (StatusNotifierItem), on the zbus 5 and async-io the keyring already uses.

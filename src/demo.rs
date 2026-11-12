@@ -477,6 +477,34 @@ pub static SCENES: &[Scene] = &[
         );
         s.route = Route::Channels;
     }),
+    // A WhatsApp number being linked: the code to scan.
+    ("channels-whatsapp-link", |s| {
+        s.channels.whatsapp.status = crate::channels::Status::Linking(
+            "2@3Fh8sAe0x1wE5vQk9yZb7nP2dLmR4tUjc,0cE1b2A3d4F5g6H7i8J9k0L1m2N3o4P5q6R7s8T9u0=,AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=".into(),
+        );
+        s.route = Route::Channels;
+    }),
+    // A WhatsApp number linked, an invite on show and Ada paired.
+    ("channels-whatsapp", |s| {
+        load_samples(s);
+        let w = &mut s.channels.whatsapp;
+        w.bot = Some("+35799123456".into());
+        w.agents = vec!["atlas".into()];
+        w.enabled = true;
+        w.status = crate::channels::Status::Listening;
+        w.invite = Some(crate::channels::Invite {
+            token: "3f9a0c7e21b4d58a6c0f".into(),
+            expires: crate::app::now() + 9 * 60 + 30,
+        });
+        w.users.push(crate::channels::Paired {
+            id: "123456789@lid".into(),
+            name: "Ada Lovelace".into(),
+            handle: None,
+            agent: Some("atlas".into()),
+            trusted: false,
+        });
+        s.route = Route::Channels;
+    }),
     // A chat Ada carries on from Telegram, open beside the agent's own.
     ("chat-telegram", |s| {
         load_samples(s);

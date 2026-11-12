@@ -481,8 +481,9 @@ fn id(s: &str) -> Value {
 
 fn send_once(agent: &ureq::Agent, base: &str, token: &Token, out: &Out) -> Result<(), Error> {
     match out {
-        // Telegram has no mark for a message being worked on; "typing…" stands in.
-        Out::Working { on: false, .. } => Ok(()),
+        // Telegram has no mark for a message being worked on; "typing…" stands in. A bot keeps no
+        // session to sign out of.
+        Out::Working { on: false, .. } | Out::Unlink => Ok(()),
         Out::Typing { to } | Out::Working { to, on: true, .. } => call::<bool>(
             agent,
             base,

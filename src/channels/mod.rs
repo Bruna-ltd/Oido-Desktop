@@ -10,10 +10,12 @@
 //! chat is over, what the agent wrote goes back to them, whoever wrote the message it answers,
 //! there or here; no desktop notification is raised for it.
 
+mod mrkdwn;
 mod press;
 mod send;
 pub mod slack;
 pub mod telegram;
+pub mod whatsapp;
 
 pub use send::{NAME as SEND_FILE, spec as send_file_spec};
 
@@ -42,6 +44,8 @@ pub const COMMANDS: [(&str, &str); 4] = [
 const PAIRING_SECS: i64 = 600;
 /// A message older than this when it is heard was sent while Oido was closed.
 const STALE_SECS: i64 = 600;
+/// How long an invite is good for, in seconds.
+const INVITE_SECS: i64 = 600;
 /// The most people waiting to be paired at once; more are turned away until some expire.
 const MAX_PENDING: usize = 10;
 
@@ -53,16 +57,18 @@ const NO_AGENTS: &str = "No agent is available here yet. In Oido, choose agents 
 pub enum Kind {
     Telegram,
     Slack,
+    WhatsApp,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 2] = [Kind::Telegram, Kind::Slack];
+    pub const ALL: [Kind; 3] = [Kind::Telegram, Kind::Slack, Kind::WhatsApp];
 
     /// Its name in the database.
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Telegram => "telegram",
             Kind::Slack => "slack",
+            Kind::WhatsApp => "whatsapp",
         }
     }
 
@@ -71,14 +77,31 @@ impl Kind {
         match self {
             Kind::Telegram => "Telegram",
             Kind::Slack => "Slack",
+            Kind::WhatsApp => "WhatsApp",
         }
     }
 
     /// How command `name` is written there.
     pub fn command(self, name: &str) -> String {
         match self {
-            Kind::Telegram => format!("/{name}"),
+            Kind::Telegram | Kind::WhatsApp => format!("/{name}"),
             Kind::Slack => format!("/oido {name}"),
+        }
+    }
+
+    /// Whether a stranger who writes is answered with a code to have approved. On WhatsApp the
+    /// bot is a phone number people may know already, so a stranger is not answered at all: only
+    /// an invite pairs there.
+    fn answers_strangers(self) -> bool {
+        self != Kind::WhatsApp
+    }
+
+    /// What to scan to take up `invite`, for a bot called `bot`; `None` where invites are not
+    /// made.
+    pub fn invite_link(self, bot: &str, invite: &Invite) -> Option<String> {
+        match self {
+            Kind::WhatsApp => Some(whatsapp::invite_link(bot, &invite.token)),
+            Kind::Telegram | Kind::Slack => None,
         }
     }
 }
@@ -183,11 +206,18 @@ pub enum Out {
         callback: String,
         note: Option<String>,
     },
+    /// Ends the link for good where the channel keeps a session of its own: a linked WhatsApp
+    /// device is unlinked from its phone.
+    Unlink,
 }
 
 /// How a channel's link stands, as its listener reports it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Health {
+    /// It waits for this QR code to be scanned, to sign in (a WhatsApp device being linked).
+    Linking(String),
+    /// It signed in as this name (a WhatsApp device linked by its QR code).
+    SignedIn(String),
     Listening,
     /// It cannot reach the channel for now and keeps trying.
     Retrying(String),
@@ -200,6 +230,7 @@ pub enum Health {
 pub enum Creds {
     Telegram(telegram::Token),
     Slack(slack::Tokens),
+    WhatsApp(whatsapp::Key),
 }
 
 impl Creds {
@@ -208,6 +239,7 @@ impl Creds {
         match kind {
             Kind::Telegram => telegram::Token::parse(secret).map(Creds::Telegram),
             Kind::Slack => slack::Tokens::from_secret(secret).map(Creds::Slack),
+            Kind::WhatsApp => whatsapp::Key::parse(secret).map(Creds::WhatsApp),
         }
     }
 }
@@ -272,12 +304,21 @@ pub struct Pairing {
     pub expires: i64,
 }
 
+/// A one-time invite: whoever sends its token first is paired, without a code to approve.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Invite {
+    pub token: String,
+    pub expires: i64,
+}
+
 /// Where a channel stands, in words for the Channels screen.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Status {
     #[default]
     Off,
     Connecting,
+    /// It waits for this QR code to be scanned (a WhatsApp device being linked).
+    Linking(String),
     Listening,
     /// It cannot reach the channel for now and keeps trying.
     Retrying(String),
@@ -295,6 +336,8 @@ pub struct Channel {
     pub status: Status,
     pub users: Vec<Paired>,
     pub pending: Vec<Pairing>,
+    /// The invite on show, if any: one at a time, and it works once.
+    pub invite: Option<Invite>,
     pub chats: Vec<Binding>,
     /// The agents people here may pick, by id, chosen on the Channels screen.
     pub agents: Vec<String>,
@@ -400,6 +443,9 @@ impl Channel {
                 Creds::Slack(tokens) => {
                     slack::start(app.clone(), tokens, allowlist, self.generation)
                 }
+                Creds::WhatsApp(key) => {
+                    whatsapp::start(app.clone(), key, allowlist, self.generation)
+                }
             });
         }
     }
@@ -430,6 +476,7 @@ pub struct Channels {
     /// and its bot token (`xoxb-`).
     pub slack_app_token: TextEdit,
     pub slack_bot_token: TextEdit,
+    pub whatsapp: Channel,
 }
 
 impl Channels {
@@ -437,6 +484,7 @@ impl Channels {
         match kind {
             Kind::Telegram => &self.telegram,
             Kind::Slack => &self.slack,
+            Kind::WhatsApp => &self.whatsapp,
         }
     }
 
@@ -444,6 +492,7 @@ impl Channels {
         match kind {
             Kind::Telegram => &mut self.telegram,
             Kind::Slack => &mut self.slack,
+            Kind::WhatsApp => &mut self.whatsapp,
         }
     }
 
@@ -460,6 +509,24 @@ impl Channels {
         let user = c.user_of(sid)?;
         (send::takes_files(kind) && c.place_of(sid, &user).thread.is_none()).then_some(kind)
     }
+}
+
+/// An invite's token: 80 random bits, in hex; empty when there is no randomness.
+fn invite_token() -> String {
+    let mut bytes = [0u8; 10];
+    if getrandom::fill(&mut bytes).is_err() {
+        return String::new();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The token in `text` if it is written as an invite is sent: `pair <token>`.
+fn invite_in(text: &str) -> Option<&str> {
+    let mut words = text.split_whitespace();
+    let (Some(verb), Some(token), None) = (words.next(), words.next(), words.next()) else {
+        return None;
+    };
+    verb.eq_ignore_ascii_case("pair").then_some(token)
 }
 
 /// A six-digit code, random.
@@ -499,7 +566,17 @@ impl App {
             Ok(list) => c.agents = list,
             Err(e) => eprintln!("oido: could not load {what}'s agents: {e}"),
         }
-        match db.channel_bot(kind) {
+        let saved = db.channel_bot(kind);
+        if kind == Kind::WhatsApp {
+            // Sessions left by a link never finished, or not unlinked: nothing can open them.
+            let keep = saved
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .and_then(|bot| whatsapp::Key::parse(&bot.secret));
+            whatsapp::sweep(keep.as_ref());
+        }
+        match saved {
             Ok(Some(bot)) => {
                 c.bot = Some(bot.name);
                 c.enabled = bot.enabled;
@@ -560,15 +637,46 @@ impl App {
         }
     }
 
-    /// Stops listening and forgets the bot. Paired people stay paired for the next one.
+    /// Stops listening and forgets the bot, signing out where the channel keeps a session (a
+    /// linked WhatsApp device is unlinked). Paired people stay paired for the next one.
     pub fn disconnect_channel(&mut self, kind: Kind) {
+        let saved = self
+            .store
+            .as_ref()
+            .and_then(|db| db.channel_bot(kind).ok().flatten());
         self.save("the bot", |db| db.delete_channel_bot(kind));
         let c = self.channels.get_mut(kind);
+        if c.link.is_some() {
+            c.send(Out::Unlink);
+        } else if let Some(Creds::WhatsApp(key)) =
+            saved.and_then(|bot| Creds::parse(kind, &bot.secret))
+        {
+            // Not listening, so nothing can tell the phone; the session is forgotten here.
+            whatsapp::forget(&key);
+        }
         c.stop();
         c.bot = None;
         c.enabled = false;
         c.pending.clear();
+        c.invite = None;
         c.confirm_disconnect = false;
+    }
+
+    /// Makes a new invite for `kind`, in place of the one on show.
+    pub fn invite(&mut self, kind: Kind) {
+        let token = invite_token();
+        if token.is_empty() {
+            return;
+        }
+        self.channels.get_mut(kind).invite = Some(Invite {
+            token,
+            expires: now() + INVITE_SECS,
+        });
+    }
+
+    /// Takes the invite on show back: it no longer works.
+    pub fn cancel_invite(&mut self, kind: Kind) {
+        self.channels.get_mut(kind).invite = None;
     }
 
     /// Pairs the person who asked with this code: from now on they are answered.
@@ -578,11 +686,16 @@ impl App {
             return;
         };
         let p = c.pending.remove(i);
+        self.pair(kind, p.user, p.name, p.handle);
+    }
+
+    /// Pairs `user`: from now on they are answered.
+    fn pair(&mut self, kind: Kind, user: String, name: String, handle: Option<String>) {
         let available = self.channel_agents(kind);
         let paired = Paired {
-            id: p.user.clone(),
-            name: p.name,
-            handle: p.handle,
+            id: user.clone(),
+            name,
+            handle,
             agent: match available.as_slice() {
                 [(id, _)] => Some(id.clone()),
                 _ => None,
@@ -597,10 +710,38 @@ impl App {
         c.users.push(paired);
         c.sync_allowlist();
         c.say(
-            &p.user,
+            &user,
             "You are paired with Oido. Send a message to talk to an agent.",
         );
-        self.offer_agents(kind, &p.user);
+        self.offer_agents(kind, &user);
+    }
+
+    /// Pairs `from` if `text` takes up the invite on show, which then stops working. Says
+    /// whether it did.
+    fn take_invite(&mut self, kind: Kind, from: &Person, text: &str, at: i64) -> bool {
+        let c = self.channels.get_mut(kind);
+        let taken = c.invite.as_ref().is_some_and(|i| {
+            i.expires > at && invite_in(text).is_some_and(|t| t.eq_ignore_ascii_case(&i.token))
+        });
+        if !taken {
+            return false;
+        }
+        c.invite = None;
+        crate::notify::post(crate::notify::Note {
+            title: kind.title().into(),
+            body: format!(
+                "{} took up your invite and can talk to your agents.",
+                from.name
+            ),
+            chat: None,
+        });
+        self.pair(
+            kind,
+            from.id.clone(),
+            from.name.clone(),
+            from.handle.clone(),
+        );
+        true
     }
 
     /// Turns down a request to pair.
@@ -654,6 +795,8 @@ impl App {
             return;
         }
         c.status = match health {
+            Health::SignedIn(name) => return self.channel_signed_in(kind, name),
+            Health::Linking(qr) => Status::Linking(qr),
             Health::Listening => Status::Listening,
             Health::Retrying(why) => Status::Retrying(why),
             Health::Stopped(why) => {
@@ -662,6 +805,30 @@ impl App {
                 Status::Failed(format!("Stopped: {why}. Connect again."))
             }
         };
+    }
+
+    /// `kind`'s link signed in as `name`. One linked just now (by its QR code) is saved, with what
+    /// it signs in with sealed, and listens from here on.
+    fn channel_signed_in(&mut self, kind: Kind, name: String) {
+        let c = self.channels.get(kind);
+        if c.bot.is_none() {
+            let Some(Creds::WhatsApp(key)) = &c.creds else {
+                return;
+            };
+            let secret = key.secret();
+            if let Some(db) = &self.store
+                && let Err(e) = db.save_channel_bot(kind, &secret, &name, true)
+            {
+                let c = self.channels.get_mut(kind);
+                c.stop();
+                c.status = Status::Failed(format!("It could not be saved: {e}."));
+                return;
+            }
+        }
+        let c = self.channels.get_mut(kind);
+        c.bot = Some(name);
+        c.enabled = true;
+        c.status = Status::Listening;
     }
 
     pub(crate) fn channel_send_failed(&mut self, kind: Kind, generation: u64, why: String) {
@@ -708,7 +875,14 @@ impl App {
             }
         };
         if self.channels.get(kind).user(&from.id).is_none() {
-            if sent.is_some() {
+            let text = match &heard {
+                Heard::Message { text, .. } => text.as_str(),
+                Heard::Command { .. } | Heard::Press { .. } => "",
+            };
+            if sent.is_some()
+                && !self.take_invite(kind, &from, text, at)
+                && kind.answers_strangers()
+            {
                 self.ask_to_pair(kind, &from, at);
             }
             return;
@@ -2270,5 +2444,129 @@ mod tests {
         let back = db.open();
         assert_eq!(back.channels.telegram.agents, std::slice::from_ref(&a));
         assert_eq!(back.channels.slack.agents, [a]);
+    }
+
+    const W: Kind = Kind::WhatsApp;
+
+    /// The sample agents, a WhatsApp number linked, and the open agent on it.
+    fn whatsapp(db: &TempDb) -> App {
+        let (mut app, _) = app_with_server(db, vec![]);
+        let open = app.current().unwrap().id.clone();
+        app.channels.whatsapp.agents = vec![open];
+        app.channels.whatsapp.bot = Some("+35799123456".into());
+        app
+    }
+
+    fn whatsapp_said(app: &mut App) -> Vec<String> {
+        std::mem::take(&mut app.channels.whatsapp.sent)
+            .into_iter()
+            .filter_map(|o| match o {
+                Out::Say { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn write_whatsapp(app: &mut App, id: &str, text: &str) {
+        let at = now();
+        app.hear(W, heard(id, text, at), at);
+    }
+
+    #[test]
+    fn on_whatsapp_a_stranger_gets_no_answer_and_only_an_invite_pairs_once() {
+        let db = TempDb::new();
+        let mut app = whatsapp(&db);
+        write_whatsapp(&mut app, ADA, "hi");
+        assert!(app.channels.whatsapp.pending.is_empty(), "no code is made");
+        assert!(whatsapp_said(&mut app).is_empty(), "nothing is said");
+
+        app.invite(W);
+        let token = app.channels.whatsapp.invite.clone().unwrap().token;
+        assert_eq!(token.len(), 20, "80 bits in hex");
+        let link = W
+            .invite_link(
+                "+35799123456",
+                app.channels.whatsapp.invite.as_ref().unwrap(),
+            )
+            .unwrap();
+        assert!(link.ends_with(&format!("?text=pair%20{token}")), "{link}");
+        write_whatsapp(&mut app, ADA, "pair 00000000000000000000");
+        assert!(
+            app.channels.whatsapp.users.is_empty(),
+            "a wrong token pairs no one"
+        );
+        assert!(whatsapp_said(&mut app).is_empty());
+
+        write_whatsapp(&mut app, ADA, &format!("Pair {}", token.to_uppercase()));
+        assert_eq!(app.channels.whatsapp.users.len(), 1);
+        assert_eq!(app.channels.whatsapp.users[0].id, ADA);
+        assert!(app.channels.whatsapp.invite.is_none(), "it works once");
+        assert!(whatsapp_said(&mut app)[0].contains("You are paired"));
+        let saved = db.open();
+        assert_eq!(
+            saved.channels.whatsapp.users.len(),
+            1,
+            "the pairing is kept"
+        );
+
+        write_whatsapp(&mut app, "43", &format!("pair {token}"));
+        assert_eq!(app.channels.whatsapp.users.len(), 1, "not twice");
+        assert!(whatsapp_said(&mut app).is_empty());
+    }
+
+    #[test]
+    fn an_invite_past_its_time_or_taken_back_pairs_no_one() {
+        let db = TempDb::new();
+        let mut app = whatsapp(&db);
+        app.invite(W);
+        let token = app.channels.whatsapp.invite.clone().unwrap().token;
+        app.channels.whatsapp.invite.as_mut().unwrap().expires = now() - 1;
+        write_whatsapp(&mut app, ADA, &format!("pair {token}"));
+        assert!(app.channels.whatsapp.users.is_empty());
+
+        app.invite(W);
+        let token = app.channels.whatsapp.invite.clone().unwrap().token;
+        app.cancel_invite(W);
+        write_whatsapp(&mut app, ADA, &format!("pair {token}"));
+        assert!(app.channels.whatsapp.users.is_empty());
+    }
+
+    #[test]
+    fn a_number_linked_by_its_code_is_saved_and_unlinked_when_disconnected() {
+        let db = TempDb::new();
+        let (mut app, _) = app_with_server(&db, vec![]);
+        let key = whatsapp::Key::parse(&"ab".repeat(32)).unwrap();
+        let c = &mut app.channels.whatsapp;
+        c.creds = Some(Creds::WhatsApp(key.clone()));
+        let generation = c.generation;
+        app.channel_health(W, generation, Health::Linking("2@qr".into()));
+        assert_eq!(app.channels.whatsapp.status, Status::Linking("2@qr".into()));
+        assert!(!app.channels.whatsapp.connected());
+
+        app.channel_health(W, generation, Health::SignedIn("+35799123456".into()));
+        let c = &app.channels.whatsapp;
+        assert_eq!(c.bot.as_deref(), Some("+35799123456"));
+        assert_eq!(c.status, Status::Listening);
+        let saved = app.store.as_ref().unwrap().channel_bot(W).unwrap().unwrap();
+        assert_eq!(
+            saved.secret.as_str(),
+            key.secret(),
+            "the key is kept, sealed"
+        );
+        assert_eq!(saved.name, "+35799123456");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.channels.whatsapp.link = Some(Link::new(Arc::new(AtomicBool::new(false)), tx));
+        app.disconnect_channel(W);
+        assert_eq!(rx.try_recv(), Ok(Out::Unlink), "the device is unlinked");
+        assert!(!app.channels.whatsapp.connected());
+        assert!(
+            app.store
+                .as_ref()
+                .unwrap()
+                .channel_bot(W)
+                .unwrap()
+                .is_none()
+        );
     }
 }

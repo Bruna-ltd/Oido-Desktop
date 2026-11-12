@@ -18,6 +18,7 @@ mod model_picker;
 mod multi_picker;
 mod picture;
 mod providers;
+mod qr;
 mod rail;
 mod runs;
 pub(crate) mod schedules;
