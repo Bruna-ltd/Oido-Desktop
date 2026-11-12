@@ -1,10 +1,11 @@
 //! Making and changing agents: one form for a new agent, an edit, and a new team member, and the
 //! delete confirmation. The name is the page; everything else is optional and can change later.
 
-use rune::{Color, El, ScrollSpec, TextStyle, col, row, text};
+use rune::{Color, El, ScrollSpec, TextStyle, col, icon, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Kit, TextArea, TextInput};
 
+use super::icons;
 use super::model_picker::ModelPicker;
 use crate::agents::{FormKind, HUES, TEMPLATES, hue_of, initial_of};
 use crate::app::App;
@@ -134,7 +135,7 @@ fn hero(s: &App, kind: &FormKind, member: bool, k: &Kit) -> El {
         FormKind::Edit(t) if t.is_member() => "Edit team member",
         FormKind::Edit(_) => "Edit agent",
     };
-    let face = match &f.avatar {
+    let tile = match &f.avatar {
         Some(a) => super::avatar::picture(a, 56.0, 16.0),
         None => row()
             .size(56.0, 56.0)
@@ -146,12 +147,26 @@ fn hero(s: &App, kind: &FormKind, member: bool, k: &Kit) -> El {
                     .font(k.ty.body_medium)
                     .color(c.white),
             ),
-    }
-    .key("avatar")
-    .expanded(f.picker)
-    .role("button")
-    .label("Change picture")
-    .on_press(|s: &mut App| s.roster.form.picker ^= true);
+    };
+    // A pencil on the corner says the picture can be changed. It sits inside the box that takes the
+    // press, so all of it can be pressed.
+    let pencil = row()
+        .size(22.0, 22.0)
+        .radius(11.0)
+        .center()
+        .fill(c.bg_inverse)
+        .border(2.0, c.page)
+        .pin(None, None, Some(0.0), Some(0.0))
+        .child(icon(&icons::EDIT, 12.0).color(c.icon_inverse));
+    let face = row()
+        .key("avatar")
+        .size(62.0, 62.0)
+        .expanded(f.picker)
+        .role("button")
+        .label("Change picture")
+        .on_press(|s: &mut App| s.roster.form.picker ^= true)
+        .child(tile)
+        .child(pencil);
     let name = TextInput::new(&f.name)
         .placeholder(if member {
             "Name this team member"
