@@ -44,10 +44,12 @@ cargo clippy --all-targets
 
 ## Release
 
-Every merge to `main` publishes a release (`.github/workflows/release.yml`; not for changes to only
-docs, the workflows or `scripts/install.sh`). Its version is `Cargo.toml`'s when no release has it
-yet, so bump it in a pull request for a minor or major release; otherwise it is the latest release's
-with the patch number one higher. The Actions tab's "Run workflow" releases `main` as it is.
+`.github/workflows/release.yml` can publish a release for every merge to `main` (not for changes to
+only docs, the workflows or `scripts/install.sh`). **It is off:** the tests locked up the runner, so
+until that is fixed only the Actions tab's "Run workflow" releases `main` as it is. To turn merges on:
+`gh variable set AUTO_RELEASE --body true`. Its version is `Cargo.toml`'s when no release has it yet,
+so bump it in a pull request for a minor or major release; otherwise it is the latest release's with
+the patch number one higher.
 
 By hand, from a clean `main` with `../rune` in place (see below):
 

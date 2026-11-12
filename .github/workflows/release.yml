@@ -1,5 +1,9 @@
 # Publishes a release for every merge to main: scripts/release.sh, on a runner.
 #
+# OFF until the repository variable AUTO_RELEASE is "true" (gh variable set AUTO_RELEASE --body true):
+# without it a merge or a pull request starts a run whose job is skipped, and only "Run workflow"
+# releases. It is off because the tests locked up the runner (see the Test step).
+#
 # The version is Cargo.toml's when no release has it yet (bump it in a pull request for a minor or
 # major release), else the latest release's with its patch number one higher. The release commit
 # is pushed by GITHUB_TOKEN, which starts no further run; the check below is for one pushed by hand.
@@ -42,7 +46,7 @@ permissions:
 
 jobs:
   release:
-    if: ${{ !startsWith(github.event.head_commit.message, 'Release v') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (vars.AUTO_RELEASE == 'true' && !startsWith(github.event.head_commit.message, 'Release v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90 # a cold build is two full compiles of the dependencies
     steps:
