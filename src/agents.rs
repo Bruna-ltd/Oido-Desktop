@@ -2,6 +2,7 @@
 //! Mock data until `oido-core` serves `/api/agents`; the rules mirror Studio's sidebar and its
 //! `create-form`, `edit-form` and `add-subagent-form`.
 
+use crate::avatars::Avatar;
 use crate::models::ModelRef;
 use crate::picker::PickerState;
 use rune::TextEdit;
@@ -20,6 +21,8 @@ pub struct Agent {
     pub model: Option<ModelRef>,
     /// The avatar's colour; `None` derives it from the name.
     pub hue: Option<f32>,
+    /// A picture in place of the initial on that colour.
+    pub avatar: Option<Avatar>,
     pub pinned: bool,
     pub status: AgentStatus,
     pub skills: Vec<String>,
@@ -47,6 +50,7 @@ impl Agent {
             prompt: String::new(),
             model: None,
             hue: None,
+            avatar: None,
             pinned: false,
             status: AgentStatus::Idle,
             skills: Vec::new(),
@@ -193,6 +197,9 @@ pub struct Form {
     pub prompt: TextEdit,
     pub model: Option<ModelRef>,
     pub hue: Option<f32>,
+    pub avatar: Option<Avatar>,
+    /// Why the picture just dropped on the form could not be used.
+    pub avatar_error: Option<String>,
     pub skills: Vec<String>,
     pub tools: Vec<String>,
     pub workdir: Option<String>,
@@ -216,6 +223,8 @@ impl Form {
             prompt: TextEdit::new(""),
             model: None,
             hue: None,
+            avatar: None,
+            avatar_error: None,
             skills: Vec::new(),
             tools: Vec::new(),
             workdir: None,
@@ -480,6 +489,7 @@ impl Roster {
         form.prompt = TextEdit::new(a.prompt.clone());
         form.model = a.model.clone();
         form.hue = a.hue;
+        form.avatar = a.avatar.clone();
         form.skills = a.skills.clone();
         form.tools = a.tools.clone();
         form.workdir = a.workdir.clone();
@@ -512,6 +522,19 @@ impl Roster {
         self.form.template = Some(i);
     }
 
+    /// Gives the face a colour, which takes the picture off it: a face is one or the other.
+    pub fn pick_colour(&mut self, hue: Option<f32>) {
+        self.form.hue = hue;
+        self.form.avatar = None;
+        self.form.avatar_error = None;
+    }
+
+    /// Gives the face a picture. Its colour is left as it was.
+    pub fn pick_avatar(&mut self, avatar: Avatar) {
+        self.form.avatar = Some(avatar);
+        self.form.avatar_error = None;
+    }
+
     pub fn can_submit(&self) -> bool {
         self.editing.is_some() && !self.form.name.text.trim().is_empty()
     }
@@ -538,6 +561,7 @@ impl Roster {
             a.prompt = f.prompt.text.trim().to_owned();
             a.model = f.model.clone();
             a.hue = f.hue;
+            a.avatar = f.avatar.clone();
             a.skills = f.skills.clone();
             a.tools = f.tools.clone();
             a.workdir = f.workdir.clone();
@@ -659,6 +683,34 @@ mod tests {
         assert_eq!(a.name, "careful-reviewer");
         assert_eq!(a.skills, vec!["tests".to_owned()]);
         assert_eq!(r.list.len(), 4, "editing adds nobody");
+    }
+
+    #[test]
+    fn a_face_is_a_colour_or_a_picture_and_is_kept_with_the_agent() {
+        use crate::avatars::Avatar;
+        let mut r = roster();
+        let t = Target::agent("scout");
+        r.open_edit(&t);
+        r.pick_avatar(Avatar::Preset("chef"));
+        r.pick_colour(Some(HUES[2]));
+        assert!(r.form.avatar.is_none(), "a colour takes the picture off");
+        r.pick_avatar(Avatar::Preset("chef"));
+        r.submit().unwrap();
+        assert_eq!(r.find(&t).unwrap().avatar, Some(Avatar::Preset("chef")));
+        r.open_edit(&t);
+        assert_eq!(r.form.avatar, Some(Avatar::Preset("chef")));
+        r.form.avatar_error = Some("old trouble".into());
+        r.pick_colour(None);
+        assert!(
+            r.form.avatar_error.is_none(),
+            "a new choice forgets the last mistake"
+        );
+        r.submit().unwrap();
+        assert_eq!(
+            r.find(&t).unwrap().avatar,
+            None,
+            "and the colour comes back"
+        );
     }
 
     #[test]

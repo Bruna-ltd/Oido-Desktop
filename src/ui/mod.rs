@@ -2,6 +2,7 @@
 //! on the right) built from rune-kit's `SplitView`.
 
 mod agent_form;
+mod avatar;
 mod channels;
 mod chat;
 mod chat_header;
@@ -39,6 +40,12 @@ use crate::app::{App, Route};
 #[cfg(debug_assertions)]
 pub fn wait_for_logos(urls: &[&str]) {
     logo::wait_all(urls);
+}
+
+/// Waits for these agent pictures to decode, for a headless picture of the screen.
+#[cfg(debug_assertions)]
+pub fn wait_for_avatars<'a>(faces: impl IntoIterator<Item = &'a crate::avatars::Avatar>) {
+    avatar::wait_all(faces);
 }
 
 /// Waits for attached pictures to decode, for a headless picture of the screen.

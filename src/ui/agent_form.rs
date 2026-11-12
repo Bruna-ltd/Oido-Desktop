@@ -1,13 +1,15 @@
 //! Making and changing agents: one form for a new agent, an edit, and a new team member, and the
 //! delete confirmation. The name is the page; everything else is optional and can change later.
 
-use rune::{Color, El, ScrollSpec, TextStyle, col, row, text};
+use rune::{Color, El, ScrollSpec, TextStyle, col, icon, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Kit, TextArea, TextInput};
 
+use super::icons;
 use super::model_picker::ModelPicker;
 use crate::agents::{FormKind, HUES, TEMPLATES, hue_of, initial_of};
 use crate::app::App;
+use crate::avatars::{Avatar, PRESETS};
 use crate::picker::Item;
 use crate::theme;
 
@@ -119,6 +121,8 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .h_full()
         .min_h(0.0)
         .items_center()
+        // A picture dropped anywhere on the form becomes the agent's face.
+        .on_drop_files(|s: &mut App, files, _| s.avatar_dropped(files.to_vec()))
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
@@ -135,21 +139,38 @@ fn hero(s: &App, kind: &FormKind, member: bool, k: &Kit) -> El {
         FormKind::Edit(t) if t.is_member() => "Edit team member",
         FormKind::Edit(_) => "Edit agent",
     };
+    let tile = match &f.avatar {
+        Some(a) => super::avatar::picture(a, 56.0, 16.0),
+        None => row()
+            .size(56.0, 56.0)
+            .radius(16.0)
+            .center()
+            .fill(theme::avatar_color(hue))
+            .child(
+                text(initial_of(&f.name.text))
+                    .font(k.ty.body_medium)
+                    .color(c.white),
+            ),
+    };
+    // A pencil on the corner says the picture can be changed. It sits inside the box that takes the
+    // press, so all of it can be pressed.
+    let pencil = row()
+        .size(22.0, 22.0)
+        .radius(11.0)
+        .center()
+        .fill(c.bg_inverse)
+        .border(2.0, c.page)
+        .pin(None, None, Some(0.0), Some(0.0))
+        .child(icon(&icons::EDIT, 12.0).color(c.icon_inverse));
     let face = row()
         .key("avatar")
-        .size(56.0, 56.0)
-        .radius(16.0)
-        .center()
-        .fill(theme::avatar_color(hue))
+        .size(62.0, 62.0)
         .expanded(f.picker)
         .role("button")
         .label("Change picture")
         .on_press(|s: &mut App| s.roster.form.picker ^= true)
-        .child(
-            text(initial_of(&f.name.text))
-                .font(k.ty.body_medium)
-                .color(c.white),
-        );
+        .child(tile)
+        .child(pencil);
     let name = TextInput::new(&f.name)
         .placeholder(if member {
             "Name this team member"
@@ -200,18 +221,51 @@ fn hero(s: &App, kind: &FormKind, member: bool, k: &Kit) -> El {
         out = out.child(card(
             "Pick a face",
             "Shown next to it in your list.",
-            swatches(s, k),
+            face_picker(s, k),
             k,
         ));
     }
     out
 }
 
+/// The ways to give an agent a face: a colour behind its initial, one of the pictures that come
+/// with the app, or a picture of your own, dropped on the page.
+fn face_picker(s: &App, k: &Kit) -> El {
+    let f = &s.roster.form;
+    let c = &k.c;
+    let heading = |words: &str| {
+        text(words.to_owned())
+            .font(k.ty.small_medium)
+            .color(c.text_muted)
+    };
+    let mut col_ = col()
+        .w_full()
+        .gap(10.0)
+        .child(heading("Colour"))
+        .child(swatches(s, k))
+        .child(heading("Picture"))
+        .child(pictures(s, k))
+        .child(hint(
+            "Or drop your own picture anywhere on this page. PNG or JPEG: the middle square of it is used.",
+            k,
+        ));
+    if let Some(why) = &f.avatar_error {
+        col_ = col_.child(
+            text(why.clone())
+                .font(k.ty.small)
+                .color(c.warning.icon)
+                .wrap(),
+        );
+    }
+    col_
+}
+
 /// The auto colour (from the name) and a few to choose from.
 fn swatches(s: &App, k: &Kit) -> El {
     let f = &s.roster.form;
     let tile = |key: String, hue: Option<f32>| {
-        let on = f.hue == hue;
+        // A face is a colour or a picture, so a picture's colour is not shown as chosen.
+        let on = f.avatar.is_none() && f.hue == hue;
         let shown = hue.unwrap_or_else(|| hue_of(&f.name.text));
         k.interactive(
             row()
@@ -235,7 +289,7 @@ fn swatches(s: &App, k: &Kit) -> El {
                 } else {
                     "Use this colour".to_owned()
                 })
-                .on_press(move |s: &mut App| s.roster.form.hue = hue)
+                .on_press(move |s: &mut App| s.roster.pick_colour(hue))
                 .child(
                     text(initial_of(&f.name.text))
                         .font(k.ty.ui_medium)
@@ -248,6 +302,64 @@ fn swatches(s: &App, k: &Kit) -> El {
         r = r.child(tile(format!("hue-{i}"), Some(*h)));
     }
     r
+}
+
+/// Tiles in a row this many across; the picture the person gave leads, when there is one.
+const PER_ROW: usize = 7;
+
+/// The pictures that come with the app, and the one the person gave, to choose from.
+fn pictures(s: &App, k: &Kit) -> El {
+    let f = &s.roster.form;
+    let tile = |key: String, face: Avatar, label: String| {
+        let on = f.avatar.as_ref() == Some(&face);
+        let pressed = face.clone();
+        // The ring stands off from the picture: they are both light, so touching they would read
+        // as one bigger tile.
+        k.interactive(
+            row()
+                .key(key)
+                .size(48.0, 48.0)
+                .radius(14.0)
+                .center()
+                .border(
+                    2.0,
+                    if on {
+                        k.c.text_base
+                    } else {
+                        Color::TRANSPARENT
+                    },
+                )
+                .role("radio")
+                .checked(on)
+                .label(label)
+                .on_press(move |s: &mut App| s.roster.pick_avatar(pressed.clone()))
+                .child(super::avatar::picture(&face, 40.0, 10.0)),
+        )
+    };
+    let mut tiles = Vec::new();
+    if let Some(own @ Avatar::Upload(_)) = &f.avatar {
+        tiles.push(tile(
+            "face-upload".into(),
+            own.clone(),
+            "Your picture".into(),
+        ));
+    }
+    for p in &PRESETS {
+        tiles.push(tile(
+            format!("face-{}", p.id),
+            Avatar::Preset(p.id),
+            format!("Use this picture: {}", p.label),
+        ));
+    }
+    let mut grid = col().gap(10.0);
+    let mut rest = tiles.into_iter();
+    loop {
+        let line: Vec<El> = rest.by_ref().take(PER_ROW).collect();
+        if line.is_empty() {
+            return grid;
+        }
+        grid = grid.child(row().gap(10.0).children(line));
+    }
 }
 
 /// Four starting points. They fill the name and instructions and nothing else.
