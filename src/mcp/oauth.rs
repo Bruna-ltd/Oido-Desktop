@@ -11,7 +11,7 @@
 //! 4. The code is traded for tokens.
 
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -22,6 +22,9 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_perc
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+use super::page;
+use crate::theme::Colors;
 
 /// How long the person has to finish signing in.
 const WAIT: Duration = Duration::from_secs(300);
@@ -67,14 +70,16 @@ struct Endpoints {
 }
 
 /// Signs in to the server at `server_url`: opens the browser and waits for the person to finish.
-pub fn sign_in(server_url: &str, cancel: &AtomicBool) -> Result<Tokens, String> {
-    sign_in_with(server_url, cancel, crate::browser::open)
+/// The page the browser comes back to is drawn in `colors`, the app's own.
+pub fn sign_in(server_url: &str, cancel: &AtomicBool, colors: Colors) -> Result<Tokens, String> {
+    sign_in_with(server_url, cancel, colors, crate::browser::open)
 }
 
 /// [`sign_in`], with how the consent page is shown to the person chosen by the caller.
 fn sign_in_with(
     server_url: &str,
     cancel: &AtomicBool,
+    colors: Colors,
     open: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<Tokens, String> {
     let ep = discover(server_url)?;
@@ -110,7 +115,7 @@ fn sign_in_with(
         ])
     );
     open(&url)?;
-    let code = wait_for_code(&listener, &state, cancel)?;
+    let code = wait_for_code(&listener, &state, cancel, &colors)?;
     let mut pairs = vec![
         ("grant_type", "authorization_code"),
         ("code", code.as_str()),
@@ -348,6 +353,7 @@ fn wait_for_code(
     listener: &TcpListener,
     state: &str,
     cancel: &AtomicBool,
+    colors: &Colors,
 ) -> Result<String, String> {
     listener
         .set_nonblocking(true)
@@ -362,7 +368,7 @@ fn wait_for_code(
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                if let Some(result) = answer(stream, state) {
+                if let Some(result) = answer(stream, state, colors) {
                     return result;
                 }
             }
@@ -376,7 +382,7 @@ fn wait_for_code(
 
 /// Reads one request to the loopback port. `None` when it is not the way back (a favicon, a
 /// stray request, a wrong `state`): the wait goes on.
-fn answer(mut stream: TcpStream, state: &str) -> Option<Result<String, String>> {
+fn answer(mut stream: TcpStream, state: &str, colors: &Colors) -> Option<Result<String, String>> {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut head = Vec::new();
@@ -398,61 +404,34 @@ fn answer(mut stream: TcpStream, state: &str) -> Option<Result<String, String>> 
             .map(|(_, v)| decode(v))
     };
     if path != "/callback" {
-        reply(&mut stream, 404, "Not found.");
+        page::NOT_FOUND.send(&mut stream, colors);
         return None;
     }
     if get("state").as_deref() != Some(state) {
-        reply(
-            &mut stream,
-            400,
-            "This sign-in was not started by Oido. You can close this tab.",
-        );
+        page::NOT_OURS.send(&mut stream, colors);
         return None;
     }
     if let Some(error) = get("error") {
-        reply(
-            &mut stream,
-            200,
-            "Sign-in was refused. You can close this tab.",
-        );
+        page::REFUSED.send(&mut stream, colors);
         return Some(Err(format!("the server refused the sign-in: {error}")));
     }
     match get("code") {
         Some(code) => {
-            reply(
-                &mut stream,
-                200,
-                "Signed in. You can close this tab and go back to Oido.",
-            );
+            page::SIGNED_IN.send(&mut stream, colors);
             Some(Ok(code))
         }
         None => {
-            reply(
-                &mut stream,
-                400,
-                "No code came back. You can close this tab.",
-            );
+            page::NO_CODE.send(&mut stream, colors);
             None
         }
     }
 }
 
-fn reply(stream: &mut TcpStream, status: u16, message: &str) {
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Oido</title><body style=\"font-family:sans-serif;margin:3em\"><p>{message}</p>"
-    );
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status} {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        if status == 200 { "OK" } else { "Error" },
-        body.len()
-    );
-    let _ = stream.flush();
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
@@ -501,13 +480,15 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let got = std::thread::scope(|scope| {
             // A wrong-state request must not end the wait; a cancel does.
-            let waiting = scope.spawn(|| wait_for_code(&listener, state, &cancel));
+            let waiting = scope.spawn(|| wait_for_code(&listener, state, &cancel, &Colors::oido()));
             std::thread::sleep(Duration::from_millis(600));
             cancel.store(true, Ordering::Relaxed);
             waiting.join().unwrap()
         });
         let said = browser.join().unwrap();
         assert!(said.starts_with("HTTP/1.1"), "{said}");
+        // Whatever the answer, the page is Oido's.
+        assert!(said.contains(&Colors::oido().bg.hex()), "{said}");
         got
     }
 
@@ -582,7 +563,7 @@ mod tests {
         let url = format!("{base}/mcp");
 
         // The "browser" reads the consent address it is sent to, and comes back with a code.
-        let tokens = sign_in_with(&url, &AtomicBool::new(false), |auth| {
+        let tokens = sign_in_with(&url, &AtomicBool::new(false), Colors::oido(), |auth| {
             assert!(
                 auth.contains("code_challenge_method=S256") && auth.contains("client_id=cid"),
                 "{auth}"
