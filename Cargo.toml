@@ -54,9 +54,10 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 # Guardrails: the patterns that find secrets and risky commands before they reach a model or run.
 regex = "1.13"
 
-# Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with one change, a
-# mouse wheel notch scrolls 100 points instead of 40. Drop this section when upstream lets the app
-# set the step, and keep the `rev` above in step with the copy's base when bumping Rune.
+# Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with its scroll
+# speed raised on Linux, where the system gives no acceleration: a mouse wheel notch scrolls 180
+# points instead of 40, and a trackpad's pixels count 2.5 times. Drop this section when upstream
+# lets the app set them, and keep the `rev` above in step with the copy's base when bumping Rune.
 [patch."https://github.com/anomalyco/rune"]
 rune = { path = "../rune/crates/rune" }
 rune-kit = { path = "../rune/crates/rune-kit" }
