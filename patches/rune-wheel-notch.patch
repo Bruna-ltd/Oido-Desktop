@@ -1,0 +1,46 @@
+diff --git a/crates/rune/src/runtime/scroll/x.rs b/crates/rune/src/runtime/scroll/x.rs
+index 044ba182..60db02d4 100644
+--- a/crates/rune/src/runtime/scroll/x.rs
++++ b/crates/rune/src/runtime/scroll/x.rs
+@@ -57,14 +57,23 @@ impl WheelLock {
+     }
+ }
+ 
++/// Points one notch of a mouse wheel scrolls. Browsers move about 100, but a wheel applied 1:1
++/// with no glide or acceleration felt slow at that, and at 40 before it.
++pub(crate) const WHEEL_NOTCH: f32 = 180.0;
++
++/// Multiplier on pixel deltas (a trackpad, or a wheel the system smooths). macOS, Windows and
++/// browsers accelerate them before the app sees them. Wayland and X11 hand over raw finger travel,
++/// which applied 1:1 moved a whole swipe only about 140 points: scrolling felt slow and heavy.
++const PIXEL_GAIN: f32 = if cfg!(target_os = "linux") { 2.5 } else { 1.0 };
++
+ /// A wheel event's delta in points, positive moving content right and down. With Shift, a delta
+ /// with no horizontal part turns horizontal, as browsers and Windows and Linux apps do for a
+ /// mouse wheel. macOS turns it itself (`shift` is false there), and a delta that already has a
+ /// horizontal part was turned by the system or comes from a trackpad.
+ pub(crate) fn wheel_delta(delta: winit::event::MouseScrollDelta, scale: f32, shift: bool) -> (f32, f32) {
+     let (dx, dy) = match delta {
+-        winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32 / scale, p.y as f32 / scale),
+-        winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 40.0, y * 40.0),
++        winit::event::MouseScrollDelta::PixelDelta(p) => (p.x as f32 / scale * PIXEL_GAIN, p.y as f32 / scale * PIXEL_GAIN),
++        winit::event::MouseScrollDelta::LineDelta(x, y) => (x * WHEEL_NOTCH, y * WHEEL_NOTCH),
+     };
+     if shift && dx == 0.0 { (dy, 0.0) } else { (dx, dy) }
+ }
+@@ -290,11 +299,11 @@ mod tests {
+ 
+     #[test]
+     fn shift_turns_only_a_purely_vertical_wheel() {
+-        assert_eq!(wheel_delta(LineDelta(0.0, -1.0), 2.0, false), (0.0, -40.0));
+-        assert_eq!(wheel_delta(LineDelta(0.0, -1.0), 2.0, true), (-40.0, 0.0), "Shift + mouse wheel");
+-        assert_eq!(wheel_delta(LineDelta(1.0, 0.0), 2.0, false), (40.0, 0.0), "a horizontal wheel (WM_MOUSEHWHEEL, X11 buttons 6/7)");
++        assert_eq!(wheel_delta(LineDelta(0.0, -1.0), 2.0, false), (0.0, -WHEEL_NOTCH));
++        assert_eq!(wheel_delta(LineDelta(0.0, -1.0), 2.0, true), (-WHEEL_NOTCH, 0.0), "Shift + mouse wheel");
++        assert_eq!(wheel_delta(LineDelta(1.0, 0.0), 2.0, false), (WHEEL_NOTCH, 0.0), "a horizontal wheel (WM_MOUSEHWHEEL, X11 buttons 6/7)");
+         let trackpad = PixelDelta(PhysicalPosition::new(-8.0, 20.0));
+-        assert_eq!(wheel_delta(trackpad, 2.0, true), (-4.0, 10.0), "a delta with a horizontal part stays as it is");
++        assert_eq!(wheel_delta(trackpad, 2.0, true), (-4.0 * PIXEL_GAIN, 10.0 * PIXEL_GAIN), "a delta with a horizontal part stays as it is");
+         assert!(SHIFT_TURNS_WHEEL != cfg!(target_os = "macos"));
+     }
+ }

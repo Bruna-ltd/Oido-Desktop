@@ -44,10 +44,21 @@ cargo clippy --all-targets
 
 ## Release
 
+Every merge to `main` publishes a release (`.github/workflows/release.yml`; not for changes to only
+docs, the workflows or `scripts/install.sh`). Its version is `Cargo.toml`'s when no release has it
+yet, so bump it in a pull request for a minor or major release; otherwise it is the latest release's
+with the patch number one higher. The Actions tab's "Run workflow" releases `main` as it is.
+
+By hand, from a clean `main` with `../rune` in place (see below):
+
 ```
 scripts/release.sh 0.2.0       # bump Cargo.toml, test, build, tag v0.2.0, push, publish the GitHub release
 oido-desktop --version
 ```
+
+`Cargo.toml` patches Rune to `../rune`: the pinned revision with our scroll speed. A runner has no
+such folder, so the workflow fetches that revision and applies `patches/rune-wheel-notch.patch`.
+After changing the copy, refresh the patch: `git -C ../rune diff <rev> > patches/rune-wheel-notch.patch`.
 
 `Cargo.toml`'s version is the app's version. A release is a GitHub release tagged `vX.Y.Z` holding
 `oido-desktop-<arch>-linux` and its `.sha256`. Installed apps look for one at launch and every six

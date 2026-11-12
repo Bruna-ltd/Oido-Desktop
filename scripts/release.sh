@@ -3,7 +3,8 @@
 #
 # Sets the version in Cargo.toml, tests, builds, commits and tags vX.Y.Z, pushes, and creates the
 # GitHub release with this machine's binary and its SHA-256. Run it from a clean tree on the
-# branch you release from. Builds here, not in CI: Cargo.toml patches Rune to ../rune.
+# branch you release from. Cargo.toml patches Rune to ../rune, so that must be there: the
+# release workflow (.github/workflows/release.yml) puts it there and runs this on every merge.
 set -euo pipefail
 
 version=${1:-}
@@ -33,8 +34,17 @@ cp target/release/oido-desktop "$dist/$asset"
 (cd "$dist" && sha256sum "$asset" >"$asset.sha256")
 [[ $("$dist/$asset" --version) == "oido-desktop $version" ]]
 
-git commit -qam "Release v$version"
+# OIDO_DRY_RUN=1 stops here, with everything built and checked and nothing changed or published.
+if [[ -n ${OIDO_DRY_RUN:-} ]]; then
+    git checkout -- Cargo.toml Cargo.lock
+    echo "dry run: built and checked $dist/$asset for v$version; nothing committed, tagged, pushed or published"
+    exit 0
+fi
+
+# A version already in Cargo.toml (bumped in a pull request) has nothing to commit.
+git diff --quiet || git commit -qam "Release v$version"
 git tag -a "v$version" -m "v$version"
-git push origin HEAD "v$version"
+# Both or neither: a branch that moved on must not leave a tag with no release behind it.
+git push --atomic origin HEAD "v$version"
 gh release create "v$version" "$dist/$asset" "$dist/$asset.sha256" \
     --title "v$version" --generate-notes

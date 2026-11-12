@@ -58,6 +58,8 @@ regex = "1.13"
 # speed raised on Linux, where the system gives no acceleration: a mouse wheel notch scrolls 180
 # points instead of 40, and a trackpad's pixels count 2.5 times. Drop this section when upstream
 # lets the app set them, and keep the `rev` above in step with the copy's base when bumping Rune.
+# CI has no ../rune: the release workflow fetches that `rev` and applies patches/rune-wheel-notch.patch,
+# so after a change to the copy, refresh it: `git -C ../rune diff <rev> > patches/rune-wheel-notch.patch`.
 [patch."https://github.com/anomalyco/rune"]
 rune = { path = "../rune/crates/rune" }
 rune-kit = { path = "../rune/crates/rune-kit" }

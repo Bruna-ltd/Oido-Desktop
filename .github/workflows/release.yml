@@ -1,0 +1,90 @@
+# Publishes a release for every merge to main: scripts/release.sh, on a runner.
+#
+# The version is Cargo.toml's when no release has it yet (bump it in a pull request for a minor or
+# major release), else the latest release's with its patch number one higher. The release commit
+# is pushed by GITHUB_TOKEN, which starts no further run; the check below is for one pushed by hand.
+#
+# A pull request that touches what a release is made of, and a manual run with dry_run, build and
+# test it all and publish nothing (OIDO_DRY_RUN in scripts/release.sh).
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/**"
+      - "scripts/install.sh"
+      - "LICENSE*"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "patches/**"
+      - "scripts/release.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and test, but publish nothing
+        type: boolean
+        default: false
+
+# One release at a time, and a newer merge waits for the one running rather than stopping it. A
+# pull request's dry run has its own group, so it can neither hold up nor replace a release.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('release-pr-{0}', github.event.number) || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: ${{ !startsWith(github.event.head_commit.message, 'Release v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags, to find the latest release
+
+      # Cargo.toml patches Rune to ../rune: the revision it pins, with our scroll speed
+      # (patches/rune-wheel-notch.patch).
+      - name: Rune, as Cargo.toml expects it
+        run: |
+          rev=$(sed -n 's/^rune = .*rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml)
+          [[ -n $rev ]] || { echo "no rune rev in Cargo.toml" >&2; exit 1; }
+          git init -q ../rune
+          git -C ../rune fetch -q --depth 1 https://github.com/anomalyco/rune "$rev"
+          git -C ../rune checkout -q FETCH_HEAD
+          git -C ../rune apply "$GITHUB_WORKSPACE/patches/rune-wheel-notch.patch"
+
+      - name: Build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Next version
+        id: next
+        run: |
+          current=$(sed -n '0,/^version = "\(.*\)"/s//\1/p' Cargo.toml)
+          if git rev-parse -q --verify "refs/tags/v$current" >/dev/null; then
+            latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
+            IFS=. read -r major minor patch <<<"${latest#v}"
+            next="$major.$minor.$((patch + 1))"
+          else
+            next=$current
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OIDO_DRY_RUN: ${{ (github.event_name == 'pull_request' || inputs.dry_run) && '1' || '' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          scripts/release.sh "${{ steps.next.outputs.version }}"
