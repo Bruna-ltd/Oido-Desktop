@@ -267,7 +267,7 @@ fn templates(s: &App, k: &Kit) -> El {
                 .checked(on)
                 .on_press(move |s: &mut App| s.roster.pick_template(i))
                 .child(text(t.label).font(k.ty.ui_medium).color(c.text_base))
-                .child(text(t.hint).font(k.ty.small).color(c.text_muted)),
+                .child(hint(t.hint, k)),
         )
     };
     col()
@@ -280,6 +280,14 @@ fn templates(s: &App, k: &Kit) -> El {
         )
         .child(row().w_full().gap(8.0).child(one(0)).child(one(1)))
         .child(row().w_full().gap(8.0).child(one(2)).child(one(3)))
+}
+
+/// The muted line under a section's title. It wraps: a long description must stay inside its card.
+fn hint(words: impl Into<String>, k: &Kit) -> El {
+    text(words)
+        .font(k.ty.small)
+        .color(k.c.text_muted)
+        .wrap()
 }
 
 fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
@@ -299,12 +307,7 @@ fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
                         .font(k.ty.body_medium)
                         .color(c.text_base),
                 )
-                .child(
-                    text(description.to_owned())
-                        .font(k.ty.small)
-                        .color(c.text_muted)
-                        .wrap(),
-                ),
+                .child(hint(description, k)),
         )
         .child(body)
 }
@@ -455,7 +458,7 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 /// The skills block: a title, what it is for, and the multi-select.
 fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let hint = if s.skills.is_empty() {
+    let about = if s.skills.is_empty() {
         "No skills found. Put them in ~/.agents/skills, one folder each with a SKILL.md."
     } else {
         "Ready-made know-how you can hand it. Its text goes to the model with the brief."
@@ -464,7 +467,7 @@ fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .w_full()
         .gap(8.0)
         .child(text("Skills").font(k.ty.body_medium).color(c.text_base))
-        .child(text(hint).font(k.ty.small).color(c.text_muted))
+        .child(hint(about, k))
         .child(super::multi_picker::build(
             s,
             k,
@@ -530,11 +533,10 @@ fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .font(k.ty.body_medium)
                 .color(c.text_base),
         )
-        .child(
-            text("Where its commands run. If you choose none, that is your home folder.")
-                .font(k.ty.small)
-                .color(c.text_muted),
-        )
+        .child(hint(
+            "Where its commands run. If you choose none, that is your home folder.",
+            k,
+        ))
         .child(super::folder_picker::build(s, k, layer))
         .child(trust_field(s, k))
 }
@@ -550,12 +552,10 @@ fn topics_field(s: &App, k: &Kit) -> El {
                 .font(k.ty.body_medium)
                 .color(c.text_base),
         )
-        .child(
-            text("Words or topics, split by commas. A message from Telegram, Slack or WhatsApp that names none of them is turned away before it reaches the agent. Empty, it answers anything.")
-                .font(k.ty.small)
-                .color(c.text_muted)
-                .wrap(),
-        )
+        .child(hint(
+            "Words or topics, split by commas. A message from Telegram, Slack or WhatsApp that names none of them is turned away before it reaches the agent. Empty, it answers anything.",
+            k,
+        ))
         .child(
             TextInput::new(&s.roster.form.topics)
                 .placeholder("e.g. billing, refunds, orders")
@@ -585,12 +585,10 @@ fn trust_field(s: &App, k: &Kit) -> El {
                         .font(k.ty.ui_medium)
                         .color(c.text_base),
                 )
-                .child(
-                    text("Off, a file it read or a command's output counts as outside text, like a web page: after reading one, it asks before it acts. Turn off for a folder of things you did not write, such as downloads or a cloned project.")
-                        .font(k.ty.small)
-                        .color(c.text_muted)
-                        .wrap(),
-                ),
+                .child(hint(
+                    "Off, a file it read or a command's output counts as outside text, like a web page: after reading one, it asks before it acts. Turn off for a folder of things you did not write, such as downloads or a cloned project.",
+                    k,
+                )),
         )
         .child(
             rune_kit::Switch::new(on)
@@ -613,11 +611,10 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .font(k.ty.body_medium)
                 .color(c.text_base),
         )
-        .child(
-            text("Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers or TypeSafe here.")
-                .font(k.ty.small)
-                .color(c.text_muted),
-        )
+        .child(hint(
+            "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers or TypeSafe here.",
+            k,
+        ))
         .child(super::multi_picker::build(
             s,
             k,
