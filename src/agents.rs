@@ -27,6 +27,12 @@ pub struct Agent {
     pub subagents: Vec<Agent>,
     /// The folder its commands run in; `None` is the home folder.
     pub workdir: Option<String>,
+    /// Whether what it reads and runs there counts as yours: off, a file it read or a command's
+    /// output is outside text (see `guard::taint`). Only you can change it, never an agent.
+    pub trust_workdir: bool,
+    /// What it answers about on channels; a channel message naming none of them is turned away
+    /// (see `guard::intake`). Empty, it answers anything. Only you can change it.
+    pub channel_topics: Vec<String>,
     /// For a team member: when its lead should hand it a task. The lead reads this to choose.
     pub description: String,
     pub active: usize,
@@ -47,6 +53,8 @@ impl Agent {
             tools: Vec::new(),
             subagents: Vec::new(),
             workdir: None,
+            trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", Vec::new())],
@@ -188,6 +196,9 @@ pub struct Form {
     pub skills: Vec<String>,
     pub tools: Vec<String>,
     pub workdir: Option<String>,
+    pub trust_workdir: bool,
+    /// Its channel topics, as typed: split on commas when saved.
+    pub topics: TextEdit,
     pub description: TextEdit,
     pub folders: crate::folders::Browser,
     pub template: Option<usize>,
@@ -208,6 +219,8 @@ impl Form {
             skills: Vec::new(),
             tools: Vec::new(),
             workdir: None,
+            trust_workdir: true,
+            topics: TextEdit::new(""),
             description: TextEdit::new(""),
             folders: crate::folders::Browser::default(),
             template: None,
@@ -470,8 +483,14 @@ impl Roster {
         form.skills = a.skills.clone();
         form.tools = a.tools.clone();
         form.workdir = a.workdir.clone();
+        form.trust_workdir = a.trust_workdir;
+        form.topics = TextEdit::new(a.channel_topics.join(", "));
         form.description = TextEdit::new(a.description.clone());
-        form.advanced = !(a.skills.is_empty() && a.tools.is_empty() && a.workdir.is_none());
+        form.advanced = !(a.skills.is_empty()
+            && a.tools.is_empty()
+            && a.workdir.is_none()
+            && a.trust_workdir
+            && a.channel_topics.is_empty());
         form.name.focused = true;
         self.form = form;
         self.editing = Some(FormKind::Edit(t.clone()));
@@ -522,6 +541,8 @@ impl Roster {
             a.skills = f.skills.clone();
             a.tools = f.tools.clone();
             a.workdir = f.workdir.clone();
+            a.trust_workdir = f.trust_workdir;
+            a.channel_topics = crate::guard::topics(&f.topics.text);
             a.description = f.description.text.trim().to_owned();
         };
         let target = match kind {

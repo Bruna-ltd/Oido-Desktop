@@ -4,8 +4,9 @@ use rusqlite::OptionalExtension;
 use zeroize::Zeroizing;
 
 use super::{Error, Result, Store};
+use crate::credentials::{Credential, Tokens};
 use crate::models::ModelInfo;
-use crate::providers::{Provider, color_of};
+use crate::providers::{Provider, ProviderAuth, color_of};
 
 /// A provider whose key just proved itself by listing models: what is written with it, together.
 pub struct Verified<'a> {
@@ -29,6 +30,7 @@ impl Store {
                 connected: r.get::<_, i64>(3)? != 0,
                 key_masked: r.get(4)?,
                 base_url: r.get(5)?,
+                auth: auth_of(&r.get::<_, String>(6)?),
                 id,
             })
         })?;
@@ -45,6 +47,7 @@ impl Store {
                 i64::from(p.connected),
                 &p.key_masked,
                 &p.base_url,
+                auth_str(p.auth),
                 position as i64,
             ))?;
         Ok(())
@@ -106,18 +109,56 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// The provider's key, opened. `None` when it has none. It is wiped from memory when dropped,
-    /// so hold it only as long as a request needs it.
+    /// The provider's credential, opened, or `None` when it has none. A key is wiped from memory
+    /// when dropped, so hold it only as long as a request needs it.
+    pub fn provider_credential(&self, id: &str) -> Result<Option<Credential>> {
+        let Some((stored, auth)) = self.stored(id)? else {
+            return Ok(None);
+        };
+        Ok(Some(match auth {
+            ProviderAuth::ApiKey => Credential::Key(stored),
+            ProviderAuth::Subscription => {
+                Credential::Subscription(Zeroizing::new(self.tokens_of(id, &stored)?.access_token))
+            }
+        }))
+    }
+
+    /// The provider's own API key, opened. `None` when it has none, or signs in with a subscription.
     pub fn provider_key(&self, id: &str) -> Result<Option<Zeroizing<String>>> {
-        let sealed: Option<Option<Vec<u8>>> = self
-            .conn
-            .prepare_cached(self.sql("GetProviderKey")?)?
-            .query_row([id], |r| r.get(0))
-            .optional()?;
-        match sealed.flatten() {
-            None => Ok(None),
-            Some(blob) => Ok(Some(self.vault.open(&key_context(id), &blob)?)),
+        Ok(match self.provider_credential(id)? {
+            Some(Credential::Key(key)) => Some(key),
+            _ => None,
+        })
+    }
+
+    /// A subscription's tokens, refresh token included, for keeping them current. `None` for a
+    /// provider that is not signed in with a subscription.
+    pub fn subscription_tokens(&self, id: &str) -> Result<Option<Tokens>> {
+        let Some((stored, auth)) = self.stored(id)? else {
+            return Ok(None);
+        };
+        match auth {
+            ProviderAuth::Subscription => Ok(Some(self.tokens_of(id, &stored)?)),
+            ProviderAuth::ApiKey => Ok(None),
         }
+    }
+
+    /// Writes a refreshed or newly signed-in subscription's tokens, sealed like a key.
+    pub fn save_subscription_tokens(&self, id: &str, tokens: &Tokens) -> Result<()> {
+        let sealed = self.seal_provider_key(
+            id,
+            &tokens
+                .json()
+                .map_err(|_| Error::BadCredential(id.to_owned()))?,
+        )?;
+        let changed = self
+            .conn
+            .prepare_cached(self.sql("SetProviderSubscription")?)?
+            .execute((id, sealed))?;
+        if changed == 0 {
+            return Err(Error::NoSuchProvider(id.to_owned()));
+        }
+        Ok(())
     }
 
     /// Writes the whole list and the active one in one step: for the first launch.
@@ -129,9 +170,44 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    /// The sealed credential and how it is used, opened, or `None` when the provider has neither.
+    fn stored(&self, id: &str) -> Result<Option<(Zeroizing<String>, ProviderAuth)>> {
+        let row: Option<(Option<Vec<u8>>, String)> = self
+            .conn
+            .prepare_cached(self.sql("GetProviderCredential")?)?
+            .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        match row {
+            Some((Some(blob), auth)) => Ok(Some((
+                self.vault.open(&key_context(id), &blob)?,
+                auth_of(&auth),
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    /// The tokens in a subscription's sealed value.
+    fn tokens_of(&self, id: &str, stored: &str) -> Result<Tokens> {
+        Tokens::parse(stored).map_err(|_| Error::BadCredential(id.to_owned()))
+    }
 }
 
-/// What a sealed key is bound to, so one provider's key cannot be moved to another's row.
+/// What a sealed credential is bound to, so one provider's key cannot be moved to another's row.
 fn key_context(id: &str) -> String {
     format!("provider-key:{id}")
+}
+
+fn auth_of(stored: &str) -> ProviderAuth {
+    match stored {
+        "subscription" => ProviderAuth::Subscription,
+        _ => ProviderAuth::ApiKey,
+    }
+}
+
+fn auth_str(auth: ProviderAuth) -> &'static str {
+    match auth {
+        ProviderAuth::ApiKey => "api_key",
+        ProviderAuth::Subscription => "subscription",
+    }
 }

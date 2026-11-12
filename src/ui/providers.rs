@@ -107,19 +107,26 @@ pub(super) fn section(title: &str, count: usize, rows: Vec<El>, k: &Kit) -> El {
     col()
         .w_full()
         .gap(10.0)
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .child(
-                    text(title.to_owned())
-                        .font(k.ty.small_medium)
-                        .color(c.text_muted),
-                )
-                .child(el().grow(1.0))
-                .child(text(count.to_string()).font(k.ty.small).color(c.text_faint)),
-        )
+        .child(section_header(title, count, k))
         .child(group)
+}
+
+/// A section's title with how many it holds at the far end.
+pub(super) fn section_header(title: &str, count: usize, k: &Kit) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .child(
+            text(title.to_owned())
+                .font(k.ty.small_medium)
+                .color(k.c.text_muted),
+        )
+        .child(el().grow(1.0))
+        .child(
+            text(count.to_string())
+                .font(k.ty.small)
+                .color(k.c.text_faint),
+        )
 }
 
 /// The brand tile: the provider's own colour with its initial, like an app icon.
@@ -347,6 +354,12 @@ fn expandable(
 fn available_row(s: &App, p: &Provider, k: &Kit) -> El {
     let open = s.providers.open.as_deref() == Some(p.id.as_str());
     let id = p.id.clone();
+    let signing_in = s
+        .providers
+        .signing_in
+        .as_ref()
+        .filter(|x| x.id == id)
+        .map(|x| x.sign.url.clone());
     let form = open.then(|| {
         let connect = {
             let id = id.clone();
@@ -371,18 +384,37 @@ fn available_row(s: &App, p: &Provider, k: &Kit) -> El {
                 .key("key")
                 .grow(1.0)
         };
-        form_box(
-            s,
-            k,
-            col().gap(8.0).child(
+        let mut body = col().gap(8.0);
+        if let Some(url) = &signing_in {
+            body = body.child(subscription_panel(s, &id, url, k));
+        } else {
+            body = body.child(
                 row()
                     .w_full()
                     .gap(8.0)
                     .center_y()
                     .child(field)
                     .child(connect),
-            ),
-        )
+            );
+            if p.id == "anthropic" {
+                let start = id.clone();
+                body = body
+                    .child(
+                        text("or use a Claude Pro/Max subscription, with no API key.")
+                            .font(k.ty.small)
+                            .color(k.c.text_faint),
+                    )
+                    .child(
+                        Button::new("Sign in with Claude Pro/Max")
+                            .variant(ButtonVariant::Outline)
+                            .disabled(s.providers.busy.contains(&id))
+                            .on_press(move |s: &mut App| s.start_subscription_sign_in(&start))
+                            .build(k)
+                            .key("subscribe"),
+                    );
+            }
+        }
+        form_box(s, k, body)
     });
     let toggle = {
         let id = id.clone();
@@ -397,6 +429,73 @@ fn available_row(s: &App, p: &Provider, k: &Kit) -> El {
         form,
         k,
     )
+}
+
+/// The second half of a subscription sign-in: the page to approve, and where its code goes.
+fn subscription_panel(s: &App, id: &str, url: &str, k: &Kit) -> El {
+    let again = {
+        let url = url.to_owned();
+        Button::new("Open the page again")
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .on_press(move |_: &mut App| {
+                if let Err(e) = crate::browser::open(&url) {
+                    eprintln!("oido: could not open the sign-in page: {e}");
+                }
+            })
+            .build(k)
+            .key("subscribe-again")
+    };
+    let finish = {
+        let id = id.to_owned();
+        let busy = s.providers.busy.contains(id.as_str());
+        Button::new(if busy {
+            "Signing in…"
+        } else {
+            "Finish sign-in"
+        })
+        .variant(ButtonVariant::Contrast)
+        .disabled(busy || s.providers.code.text.trim().is_empty())
+        .on_press(move |s: &mut App| s.finish_subscription_sign_in(&id))
+        .build(k)
+        .key("finish-sign-in")
+    };
+    let code = {
+        let id = id.to_owned();
+        TextInput::new(&s.providers.code)
+            .placeholder("Paste the code the page shows")
+            .label("Code")
+            .width(None)
+            .on_edit(|s: &mut App| &mut s.providers.code)
+            .on_submit(move |s: &mut App, _| s.finish_subscription_sign_in(&id))
+            .build(k)
+            .key("subscription-code")
+            .grow(1.0)
+    };
+    col()
+        .gap(8.0)
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text("Approve Oido in your browser, then paste the code Anthropic shows.")
+                        .font(k.ty.small)
+                        .color(k.c.text_muted)
+                        .wrap(),
+                )
+                .child(again),
+        )
+        .child(
+            text(url.to_owned())
+                .font(k.ty.small)
+                .color(k.c.text_faint)
+                .wrap()
+                .selectable(true)
+                .key("subscribe-url"),
+        )
+        .child(row().w_full().gap(8.0).center_y().child(code).child(finish))
 }
 
 /// A form's frame: the fields, why it failed if it did, and where the key goes.

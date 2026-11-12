@@ -17,6 +17,8 @@ use crate::app::{App, now};
 use crate::command::{self, Finish};
 use crate::completion::{self, Call, Event, Request, Tokens, ToolSpec, Turn};
 use crate::flows::Prep;
+use crate::guard::TripState;
+use crate::guard::ask::Where;
 use crate::model::{AgentStatus, Message, ToolCall, new_id};
 use crate::models::{self, ModelRef};
 use crate::runs::{Reply, Run, Setup, Status, Step, Trace};
@@ -157,6 +159,10 @@ struct Job {
     think: Option<completion::Think>,
     tools: Vec<ToolSpec>,
     task: String,
+    /// Outside text its lead had in view when it handed the task over: the task may carry it.
+    outside: Option<String>,
+    /// Whether what it reads and runs in its folder counts as the person's own.
+    trust_folder: bool,
     /// The model's context limit, when known.
     limit: Option<u32>,
     /// Stops this task.
@@ -171,6 +177,8 @@ enum End {
 
 struct Outcome {
     end: End,
+    /// Outside text it had in view when it wrote its answer, which the answer may carry.
+    outside: Option<String>,
     steps: Vec<Step>,
     /// What all its model calls used together.
     tokens: Tokens,
@@ -222,7 +230,17 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
         user_name: None,
     });
     let mut turns = vec![Turn::user(job.task.clone())];
-    let key = job.prep.key.as_deref().map(String::as_str);
+    let credential = job.prep.credential.as_ref();
+    let guard = &job.prep.guard;
+    // Its secrets, numbered as first seen, hidden from its model and put back for its tools.
+    let mut hidden = crate::guard::Hidden::default();
+    let place = crate::guard::Place {
+        root: job.prep.shell_dir.clone(),
+        home: dirs::home_dir(),
+    };
+    // Its calls whose results are outside text, and what each is; and what it has in view now.
+    let mut came_in: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut in_view = job.outside.clone();
     // The last call's count, and whether the next goes again after a too-long refusal.
     let (mut measured, mut retry) = (None, false);
     let end = 'rounds: {
@@ -239,13 +257,27 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 tools: job.tools.clone(),
             };
             let trimmed = window::fit(&mut request, job.limit, measured, retry).trimmed;
+            in_view = job.outside.clone().or_else(|| {
+                request.turns.iter().find_map(|t| {
+                    let id = t
+                        .call_id
+                        .as_deref()
+                        .filter(|_| !window::was_trimmed(&t.text))?;
+                    came_in.get(id).cloned()
+                })
+            });
+            let request = guard.request(request, &mut hidden);
             tell(Note::Model);
             let round = Instant::now();
             let (mut text, mut reasoning, mut calls) = (String::new(), String::new(), Vec::new());
             let (mut used, mut first) = (Tokens::default(), None);
             let (mut shown, mut last) = (String::new(), Instant::now());
-            let result =
-                completion::run(&job.prep.endpoint, key, &request, &job.cancel, &mut |ev| {
+            let result = completion::run(
+                &job.prep.endpoint,
+                credential,
+                &request,
+                &job.cancel,
+                &mut |ev| {
                     if first.is_none() && !matches!(ev, Event::Usage(_)) {
                         first = Some(round.elapsed());
                     }
@@ -262,7 +294,8 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                         Event::ToolCall(c) => calls.push(c),
                         Event::Usage(t) => used.update(t),
                     }
-                });
+                },
+            );
             if !shown.is_empty() {
                 tell(Note::Text(shown));
             }
@@ -291,10 +324,12 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                     output: None,
                     id: c.id.clone(),
                     args: c.args.clone(),
+                    trip: None,
+                    outside: None,
                 })
                 .collect();
             steps.extend(trace.reply(&Reply {
-                sent: &crate::run::transcript(&request.turns),
+                sent: &crate::run::transcript(&request.request().turns),
                 text: &text,
                 reasoning: &reasoning,
                 calls: &called,
@@ -318,6 +353,8 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 context: input.saturating_add(used.output.unwrap_or(0)),
                 trimmed,
             });
+            // What it wrote, with the hidden values back: it stays on this computer.
+            let text = hidden.reveal(&text);
             if calls.is_empty() {
                 break 'rounds if text.trim().is_empty() {
                     End::Failed(format!("{} sent back an empty reply.", job.prep.who))
@@ -325,15 +362,64 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                     End::Done(text)
                 };
             }
-            turns.push(Turn::assistant(text, calls.clone()));
-            for call in &calls {
+            // Each call checked before it runs; nobody is here to give a go-ahead, so a call a
+            // rule questions does not run.
+            let reviewed: Vec<(Call, Option<crate::guard::actions::Finding>)> = calls
+                .into_iter()
+                .map(|c| {
+                    let (args, found) =
+                        guard.review(&hidden, &c.name, &c.args, &place, in_view.as_deref());
+                    (Call { args, ..c }, found)
+                })
+                .collect();
+            let calls: Vec<Call> = reviewed.iter().map(|(c, _)| c.clone()).collect();
+            turns.push(Turn::assistant(text, calls));
+            for (call, found) in &reviewed {
                 tell(Note::Tool {
                     name: call.name.clone(),
                     detail: tools::summary(&call.name, &call.args),
                 });
-                let result = run_tool(job, call);
+                // A call a rule questions waits for the person on a card in the lead's chat.
+                let refused = found.as_ref().and_then(|f| {
+                    let (state, told) = crate::guard::unattended(
+                        &job.prep.asker,
+                        &call.name,
+                        &call.args,
+                        f,
+                        &job.cancel,
+                    );
+                    let ended = match state {
+                        TripState::Allowed => "you allowed it",
+                        TripState::TimedOut => "nobody answered in time",
+                        TripState::Denied => "you said no",
+                        _ => "refused",
+                    };
+                    steps.push(
+                        trace.guard(&format!("{}: {ended}", crate::guard::title(f.rule)), &f.why),
+                    );
+                    told
+                });
+                let ran = refused.is_none();
+                let result = match refused {
+                    Some(told) => told,
+                    None => {
+                        let result = run_tool(job, call);
+                        let source =
+                            crate::guard::taint::result_source(&call.name, job.trust_folder);
+                        let what = if guard.on(crate::guard::Pack::Injection) {
+                            crate::guard::injection::describe(source, &result)
+                        } else {
+                            source.map(str::to_owned)
+                        };
+                        if let Some(what) = what {
+                            guard.learn_outside(&mut hidden, &result);
+                            came_in.insert(call.id.clone(), what);
+                        }
+                        result
+                    }
+                };
                 tell(Note::ToolDone {
-                    ok: !result.starts_with("Error"),
+                    ok: !result.starts_with("Error") && ran,
                 });
                 steps.extend(trace.tool_done(&call.id, &result));
                 turns.push(Turn::tool(call.id.clone(), result));
@@ -345,6 +431,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
     };
     Outcome {
         end,
+        outside: in_view,
         steps,
         tokens: Tokens {
             input: trace.run.input_tokens,
@@ -477,8 +564,13 @@ impl App {
                 .filter(|t| unattended(&t.name))
                 .collect(),
             limit: self.context_limit(&ModelRef::new(&prep.provider, &prep.model)),
-            prep,
+            prep: crate::flows::Prep {
+                asker: self.asker(Where::Chat(sid.to_owned()), &member.name),
+                ..prep
+            },
             task,
+            outside: self.tainted.get(sid).cloned(),
+            trust_folder: member.trust_workdir,
             cancel: Arc::new(AtomicBool::new(false)),
         };
         Ok((run, job, member.name.clone()))
@@ -579,6 +671,14 @@ impl App {
             self.reload_runs();
         }
         self.release_delegation(sid);
+        // Its answer carries what outside text it had in view.
+        if let Some(what) = &out.outside {
+            self.mark_outside(
+                sid,
+                call_id,
+                format!("{name}'s answer, written with {what} in view"),
+            );
+        }
         self.resolve(sid, call_id, told, carry_on);
     }
 

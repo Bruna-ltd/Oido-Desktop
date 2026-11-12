@@ -71,6 +71,7 @@ impl Store {
                 name: r.get(1)?,
                 handle: r.get(2)?,
                 agent: r.get(3)?,
+                trusted: r.get::<_, i64>(4)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -79,7 +80,14 @@ impl Store {
     pub fn save_channel_user(&self, kind: Kind, p: &Paired) -> Result<()> {
         self.conn
             .prepare_cached(self.sql("UpsertChannelUser")?)?
-            .execute((kind.as_str(), &p.id, &p.name, &p.handle, &p.agent))?;
+            .execute((
+                kind.as_str(),
+                &p.id,
+                &p.name,
+                &p.handle,
+                &p.agent,
+                i64::from(p.trusted),
+            ))?;
         Ok(())
     }
 
@@ -181,6 +189,7 @@ mod tests {
             name: "Ada".into(),
             handle: Some("ada".into()),
             agent: Some(agent.clone()),
+            trusted: false,
         };
         s.save_channel_user(T, &p).unwrap();
         let b = Binding {

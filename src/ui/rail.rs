@@ -61,7 +61,11 @@ static CONFIGURE: [Item; 6] = [
         icon: &icons::MCP,
         route: Route::Mcp,
     },
-    soon("Guardrails", &icons::GUARDRAILS),
+    Item {
+        label: "Guardrails",
+        icon: &icons::GUARDRAILS,
+        route: Route::Guardrails,
+    },
 ];
 
 static SETTINGS: Item = Item {

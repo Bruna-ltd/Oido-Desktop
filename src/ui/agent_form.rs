@@ -267,7 +267,7 @@ fn templates(s: &App, k: &Kit) -> El {
                 .checked(on)
                 .on_press(move |s: &mut App| s.roster.pick_template(i))
                 .child(text(t.label).font(k.ty.ui_medium).color(c.text_base))
-                .child(text(t.hint).font(k.ty.small).color(c.text_muted)),
+                .child(hint(t.hint, k)),
         )
     };
     col()
@@ -280,6 +280,11 @@ fn templates(s: &App, k: &Kit) -> El {
         )
         .child(row().w_full().gap(8.0).child(one(0)).child(one(1)))
         .child(row().w_full().gap(8.0).child(one(2)).child(one(3)))
+}
+
+/// The muted line under a section's title. It wraps: a long description must stay inside its card.
+fn hint(words: impl Into<String>, k: &Kit) -> El {
+    text(words).font(k.ty.small).color(k.c.text_muted).wrap()
 }
 
 fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
@@ -299,12 +304,7 @@ fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
                         .font(k.ty.body_medium)
                         .color(c.text_base),
                 )
-                .child(
-                    text(description.to_owned())
-                        .font(k.ty.small)
-                        .color(c.text_muted)
-                        .wrap(),
-                ),
+                .child(hint(description, k)),
         )
         .child(body)
 }
@@ -445,7 +445,8 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(20.0)
                 .child(skills_field(s, k, layer))
                 .child(tools_field(s, k, layer))
-                .child(workdir_field(s, k, layer)),
+                .child(workdir_field(s, k, layer))
+                .child(topics_field(s, k)),
         );
     }
     out
@@ -454,7 +455,7 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 /// The skills block: a title, what it is for, and the multi-select.
 fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let hint = if s.skills.is_empty() {
+    let about = if s.skills.is_empty() {
         "No skills found. Put them in ~/.agents/skills, one folder each with a SKILL.md."
     } else {
         "Ready-made know-how you can hand it. Its text goes to the model with the brief."
@@ -463,7 +464,7 @@ fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .w_full()
         .gap(8.0)
         .child(text("Skills").font(k.ty.body_medium).color(c.text_base))
-        .child(text(hint).font(k.ty.small).color(c.text_muted))
+        .child(hint(about, k))
         .child(super::multi_picker::build(
             s,
             k,
@@ -529,12 +530,70 @@ fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .font(k.ty.body_medium)
                 .color(c.text_base),
         )
-        .child(
-            text("Where its commands run. If you choose none, that is your home folder.")
-                .font(k.ty.small)
-                .color(c.text_muted),
-        )
+        .child(hint(
+            "Where its commands run. If you choose none, that is your home folder.",
+            k,
+        ))
         .child(super::folder_picker::build(s, k, layer))
+        .child(trust_field(s, k))
+}
+
+/// What the agent answers about on channels (see `guard::intake`).
+fn topics_field(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            text("On channels, only answer about")
+                .font(k.ty.body_medium)
+                .color(c.text_base),
+        )
+        .child(hint(
+            "Words or topics, split by commas. A message from Telegram, Slack or WhatsApp that names none of them is turned away before it reaches the agent. Empty, it answers anything.",
+            k,
+        ))
+        .child(
+            TextInput::new(&s.roster.form.topics)
+                .placeholder("e.g. billing, refunds, orders")
+                .label("Channel topics")
+                .on_edit(|s: &mut App| &mut s.roster.form.topics)
+                .build(k)
+                .key("channel-topics"),
+        )
+}
+
+/// Whether what the agent reads and runs in its folder counts as yours (see `guard::taint`).
+fn trust_field(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let on = s.roster.form.trust_workdir;
+    row()
+        .key("trust-workdir")
+        .w_full()
+        .gap(16.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text("Trust what it reads and runs there")
+                        .font(k.ty.ui_medium)
+                        .color(c.text_base),
+                )
+                .child(hint(
+                    "Off, a file it read or a command's output counts as outside text, like a web page: after reading one, it asks before it acts. Turn off for a folder of things you did not write, such as downloads or a cloned project.",
+                    k,
+                )),
+        )
+        .child(
+            rune_kit::Switch::new(on)
+                .label("Trust what it reads and runs there")
+                .hide_label()
+                .on_toggle(move |s: &mut App| s.roster.form.trust_workdir = !on)
+                .build(k),
+        )
 }
 
 /// The tools block: the TypeSafe and MCP tools the agent may use. The app's own tools are every
@@ -549,11 +608,10 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .font(k.ty.body_medium)
                 .color(c.text_base),
         )
-        .child(
-            text("Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers or TypeSafe here.")
-                .font(k.ty.small)
-                .color(c.text_muted),
-        )
+        .child(hint(
+            "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers or TypeSafe here.",
+            k,
+        ))
         .child(super::multi_picker::build(
             s,
             k,

@@ -11,12 +11,14 @@ mod completion;
 mod composer;
 mod connect;
 mod context;
+mod credentials;
 mod delegate;
 #[cfg(any(test, debug_assertions))]
 mod demo;
 mod files;
 mod flows;
 mod folders;
+mod guard;
 mod instance;
 mod launcher;
 mod listing;
@@ -132,7 +134,13 @@ fn main() {
     // Schedules: what is due fires now (catching up on what was missed) and every half minute.
     let handle = app.handle();
     schedules::every_tick(move || {
-        handle.update(|s: &mut app::App, _| s.fire_due(app::now()));
+        handle.update(|s: &mut app::App, _| {
+            s.fire_due(app::now());
+            // Calls held for a go-ahead nobody gave in time do not run.
+            s.expire_holds(app::now());
+            // Subscription tokens near expiry are refreshed before a call needs them.
+            s.refresh_subscription_tokens();
+        });
     });
     app.run();
 }

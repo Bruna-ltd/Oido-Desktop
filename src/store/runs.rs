@@ -238,6 +238,17 @@ mod tests {
     }
 
     #[test]
+    fn a_guardrail_step_is_saved_and_read_back_as_one() {
+        let db = store();
+        db.start_run(&run("r", 10)).unwrap();
+        let mut guard = step(2, StepKind::Guard);
+        guard.name = "Runs as administrator: waiting for your go-ahead".into();
+        db.save_run(&run("r", 10), &[step(1, StepKind::User), guard.clone()])
+            .unwrap();
+        assert_eq!(db.list_steps("r").unwrap()[1], guard);
+    }
+
+    #[test]
     fn starting_the_app_removes_old_runs_with_their_steps_and_ends_runs_that_were_cut_off() {
         let db = store();
         let day = 24 * 60 * 60;

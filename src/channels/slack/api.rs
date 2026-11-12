@@ -396,8 +396,9 @@ fn send_once(agent: &ureq::Agent, base: &str, bot: &Secret, out: &Out) -> Result
     match out {
         // Slack has no "typing…" for bots; the mark on the message stands in.
         Out::Typing { .. } => Ok(()),
-        // Buttons come off as soon as one is pressed (see `listen`), with the message's words.
-        Out::Unbutton { .. } => Ok(()),
+        // Buttons come off as soon as one is pressed (see `listen`), with the message's words. An
+        // app keeps no session to sign out of.
+        Out::Unbutton { .. } | Out::Unlink => Ok(()),
         Out::Working { to, message, on } => {
             let method = if *on {
                 "reactions.add"

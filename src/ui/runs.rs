@@ -381,6 +381,7 @@ pub fn title(step: &Step) -> String {
         StepKind::Context => "Date and time".to_owned(),
         StepKind::User => "Your message".to_owned(),
         StepKind::Llm => "Model call".to_owned(),
+        StepKind::Guard => "Guardrail".to_owned(),
         StepKind::Error => "It failed".to_owned(),
     }
 }
@@ -389,7 +390,7 @@ pub fn title(step: &Step) -> String {
 fn preview(step: &Step) -> Option<String> {
     let text = step.output.as_deref()?;
     match step.kind {
-        StepKind::User | StepKind::Llm | StepKind::Error => {}
+        StepKind::User | StepKind::Llm | StepKind::Guard | StepKind::Error => {}
         _ => return None,
     }
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
@@ -427,7 +428,7 @@ pub fn tone(step: &Step, k: &Kit) -> Color {
         StepKind::User => k.c.text_base,
         StepKind::Llm => k.c.info.icon,
         StepKind::Tool => k.c.success.icon,
-        StepKind::Error => k.c.warning.icon,
+        StepKind::Guard | StepKind::Error => k.c.warning.icon,
     }
 }
 

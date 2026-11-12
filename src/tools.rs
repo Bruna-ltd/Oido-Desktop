@@ -101,7 +101,7 @@ fn file_tool(name: &'static str, description: &'static str, schema: Value) -> To
 fn shell() -> ToolSpec {
     ToolSpec {
         name: SHELL.into(),
-        description: "Run a shell command on the person's computer and get its output. It runs at once, with no approval, so keep commands few, focused and easy to read back to the person. It runs with `sh -c` in the agent's working folder (the person's home folder if none is set), cannot read input, and is ended after a time limit. Long output is cut. Do not use it for anything destructive unless they asked for exactly that.".into(),
+        description: "Run a shell command on the person's computer and get its output. It runs at once, unless it looks risky (running as administrator, deleting outside the working folder, changing system or login files and the like), when it waits for the person's go-ahead; so keep commands few, focused and easy to read back to the person. It runs with `sh -c` in the agent's working folder (the person's home folder if none is set), cannot read input, and is ended after a time limit. Long output is cut. Do not use it for anything destructive unless they asked for exactly that.".into(),
         schema: json!({
             "type": "object",
             "properties": {
@@ -248,7 +248,7 @@ fn own(name: &str) -> Option<(&'static str, &'static str)> {
         ),
         SHELL => (
             "Run commands",
-            "Runs shell commands on this computer, without asking first.",
+            "Runs shell commands on this computer; risky ones wait for your go-ahead.",
         ),
         TEACH => (
             "Save as a workflow",

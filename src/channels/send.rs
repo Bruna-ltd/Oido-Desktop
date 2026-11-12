@@ -120,6 +120,8 @@ fn max_file(kind: Kind) -> u64 {
     match kind {
         Kind::Telegram => telegram::MAX_FILE,
         Kind::Slack => slack::MAX_FILE,
+        // Not yet: a file would go through the running client, not a stateless call.
+        Kind::WhatsApp => 0,
     }
 }
 
@@ -166,6 +168,7 @@ impl Upload {
                 self.caption.as_deref(),
             )
             .map_err(|e| e.to_string()),
+            Creds::WhatsApp(_) => Err("WhatsApp takes no files from agents yet".to_owned()),
         };
         match sent {
             Ok(()) => format!("Sent {} to them on {}.", self.name, self.kind.title()),

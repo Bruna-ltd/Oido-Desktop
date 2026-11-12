@@ -34,6 +34,8 @@ pub fn sample_agents() -> Vec<Agent> {
             tools: vec!["storage.read".into(), "wiki.search".into(), "slack.post".into()],
             subagents: vec![member("fact-checker", "fact-checker", 60.0, "You check every number in a draft against its source before it goes out.")],
             workdir: None,
+            trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![
@@ -107,6 +109,8 @@ pub fn sample_agents() -> Vec<Agent> {
             tools: vec!["github.diff".into(), "shell.run".into()],
             subagents: vec![member("reviewer", "reviewer", 200.0, "You read a diff for unsafe code and missing tests, and report only what matters.")],
             workdir: None,
+            trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat(
@@ -151,6 +155,8 @@ pub fn sample_agents() -> Vec<Agent> {
             tools: vec!["gmail.list".into()],
             subagents: vec![],
             workdir: None,
+            trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],
@@ -167,6 +173,8 @@ pub fn sample_agents() -> Vec<Agent> {
             tools: vec![],
             subagents: vec![],
             workdir: None,
+            trust_workdir: true,
+            channel_topics: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],
@@ -458,6 +466,7 @@ pub static SCENES: &[Scene] = &[
             name: "Ada Lovelace".into(),
             handle: Some("ada".into()),
             agent: Some("atlas".into()),
+            trusted: false,
         });
         s.route = Route::Channels;
     }),
@@ -466,6 +475,34 @@ pub static SCENES: &[Scene] = &[
         s.channels.telegram.status = crate::channels::Status::Failed(
             "Could not connect: Telegram does not accept this token.".into(),
         );
+        s.route = Route::Channels;
+    }),
+    // A WhatsApp number being linked: the code to scan.
+    ("channels-whatsapp-link", |s| {
+        s.channels.whatsapp.status = crate::channels::Status::Linking(
+            "2@3Fh8sAe0x1wE5vQk9yZb7nP2dLmR4tUjc,0cE1b2A3d4F5g6H7i8J9k0L1m2N3o4P5q6R7s8T9u0=,AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=".into(),
+        );
+        s.route = Route::Channels;
+    }),
+    // A WhatsApp number linked, an invite on show and Ada paired.
+    ("channels-whatsapp", |s| {
+        load_samples(s);
+        let w = &mut s.channels.whatsapp;
+        w.bot = Some("+35799123456".into());
+        w.agents = vec!["atlas".into()];
+        w.enabled = true;
+        w.status = crate::channels::Status::Listening;
+        w.invite = Some(crate::channels::Invite {
+            token: "3f9a0c7e21b4d58a6c0f".into(),
+            expires: crate::app::now() + 9 * 60 + 30,
+        });
+        w.users.push(crate::channels::Paired {
+            id: "123456789@lid".into(),
+            name: "Ada Lovelace".into(),
+            handle: None,
+            agent: Some("atlas".into()),
+            trusted: false,
+        });
         s.route = Route::Channels;
     }),
     // A chat Ada carries on from Telegram, open beside the agent's own.
@@ -491,6 +528,82 @@ pub static SCENES: &[Scene] = &[
                 agent: "scout".into(),
                 session: sid,
             });
+        }
+    }),
+    // The Guardrails screen, with risky actions switched off.
+    ("guardrails", |s| {
+        s.guard.set(crate::guard::Pack::Actions, false);
+        s.guard
+            .set_words(vec!["Project Falcon".into(), "Acme".into()]);
+        s.guard_words = TextEdit::new("Project Falcon, Acme");
+        s.guard.set_limits(crate::guard::Limits {
+            length: 2000,
+            per_hour: 30,
+        });
+        s.route = Route::Guardrails;
+    }),
+    // A reply whose command waits for your go-ahead, after one a guardrail refused.
+    ("chat-guard", |s| {
+        use crate::guard::{Trip, TripState};
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        let call = |id: &str, command: &str, trip: Trip, output: Option<&str>| ToolCall {
+            name: crate::tools::SHELL.into(),
+            summary: command.into(),
+            output: output.map(str::to_owned),
+            id: id.into(),
+            args: serde_json::json!({"command": command, "reason": "Clear space"}).to_string(),
+            trip: Some(trip),
+            outside: None,
+        };
+        let refused = Trip {
+            rule: "shell.disk".into(),
+            why: "It would erase a disk.".into(),
+            state: TripState::Blocked,
+            asked_at: None,
+        };
+        let held = Trip {
+            rule: "shell.delete".into(),
+            why:
+                "It deletes /home/ada/Downloads/old, outside the working folder /home/ada/project."
+                    .into(),
+            state: TripState::Asking,
+            asked_at: Some(crate::app::now() - 90),
+        };
+        if let Some(a) = s.roster.current_mut() {
+            let mut reply = Message::reply(
+                "I'll clear the old downloads to free some space.",
+                None,
+                Outcome::Done,
+            );
+            if let Message::Assistant { tools, .. } = &mut reply {
+                let told = refused.told();
+                tools.push(call("c1", "mkfs.ext4 /dev/sdb1", refused, Some(&told)));
+                tools.push(call("c2", "rm -rf ~/Downloads/old", held, None));
+            }
+            a.sessions.push(chat(
+                "Free up space",
+                vec![
+                    Message::User("My disk is full, free some space.".into()),
+                    reply,
+                ],
+            ));
+            a.active = a.sessions.len() - 1;
+            a.status = AgentStatus::Waiting;
+            // A team member's command, waiting too: nobody watches its work.
+            let sid = a.chat().id.clone();
+            s.waiting.push(crate::guard::ask::Waiting::demo(
+                crate::guard::ask::Where::Chat(sid),
+                "cleaner",
+                crate::tools::SHELL,
+                "docker system prune -af",
+                Trip {
+                    rule: "taint.outside".into(),
+                    why: "What it was reading holds a web page, which could be steering it. Check this is what you want.".into(),
+                    state: TripState::Asking,
+                    asked_at: Some(crate::app::now()),
+                },
+            ));
         }
     }),
     ("mcp-search", |s| {
@@ -618,6 +731,8 @@ pub static SCENES: &[Scene] = &[
                         output: Some("The person now sees a draft.".into()),
                         id: "c1".into(),
                         args: "{}".into(),
+                        trip: None,
+                        outside: None,
                     }],
                     approval: None,
                     stats: None,
@@ -721,6 +836,7 @@ pub static SCENES: &[Scene] = &[
                 Message::Summary {
                     text: "You asked for the release notes since 2.0. All 41 were read with the shell tool from `docs/releases/`.\n\n- **Decided:** report only changes that need action.\n- **Open:** a one-page summary for the team.".into(),
                     keeps: 0,
+                    outside: None,
                 },
                 Message::User("Which ones need action?".into()),
                 answered,
@@ -758,6 +874,8 @@ pub static SCENES: &[Scene] = &[
                         output: None,
                         id: "c1".into(),
                         args: r#"{"question":"Who is the announcement for?","options":["Customers","Investors","The team"],"multiple":true}"#.into(),
+                        trip: None,
+                        outside: None,
                     }],
                     approval: None,
                     stats: None,
@@ -778,6 +896,8 @@ pub static SCENES: &[Scene] = &[
                 output: out.map(str::to_owned),
                 id: id.into(),
                 args: format!(r#"{{"command":"{cmd}","reason":"See what is taking the space."}}"#),
+                trip: None,
+                outside: None,
             };
             let reply = |tools| Message::Assistant {
                 text: "Let me look.".into(),
@@ -919,6 +1039,8 @@ pub static SCENES: &[Scene] = &[
             output: out.map(str::to_owned),
             id: id.into(),
             args: String::new(),
+            trip: None,
+            outside: None,
         };
         let card = |stages: Vec<Stage>,
                     text: &str,

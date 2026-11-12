@@ -8,9 +8,10 @@ use rune::TextEdit;
 use zeroize::Zeroizing;
 
 use crate::app::{App, now};
+use crate::credentials::{self, Credential, Tokens};
 use crate::listing::{self, Error as ListError};
 use crate::models::{ModelInfo, ModelRef};
-use crate::providers::{NEW_SERVER, normalize_server_url};
+use crate::providers::{NEW_SERVER, ProviderAuth, SigningIn, normalize_server_url};
 use crate::store::Verified;
 
 type Listed = Result<Vec<ModelInfo>, ListError>;
@@ -38,7 +39,7 @@ impl App {
         };
         self.providers.error = None;
         self.providers.busy.insert(id.to_owned());
-        let (id, ask) = (id.to_owned(), key.clone());
+        let (id, key, ask) = (id.to_owned(), key.clone(), Credential::Key(key));
         self.spawn(
             move || listing::fetch(&ep, Some(&ask)),
             move |app, listed| app.connected(&id, &key, sealed, listed),
@@ -109,7 +110,7 @@ impl App {
         // The key to ask with: the one just typed, else the one already kept for this server.
         let (ask, sealed) = if typed.is_empty() {
             let kept = match (&self.store, &existing) {
-                (Some(db), Some(_)) => db.provider_key(&target).map_err(|e| e.to_string()),
+                (Some(db), Some(_)) => db.provider_credential(&target).map_err(|e| e.to_string()),
                 _ => Ok(None),
             };
             match kept {
@@ -118,7 +119,7 @@ impl App {
             }
         } else {
             match self.seal(&target, &typed) {
-                Ok(sealed) => (Some(typed.clone()), Some(sealed)),
+                Ok(sealed) => (Some(Credential::Key(typed.clone())), Some(sealed)),
                 Err(why) => return self.providers.fail(id, why),
             }
         };
@@ -126,7 +127,7 @@ impl App {
         self.providers.busy.insert(target.clone());
         let id = id.to_owned();
         self.spawn(
-            move || listing::fetch(&ep, ask.as_ref().map(|k| k.as_str())),
+            move || listing::fetch(&ep, ask.as_ref()),
             move |app, listed| app.server_checked(&id, &target, &label, sealed, &typed, listed),
         );
     }
@@ -189,7 +190,7 @@ impl App {
             return;
         };
         let kept = match &self.store {
-            Some(db) => db.provider_key(id).map_err(|e| e.to_string()),
+            Some(db) => db.provider_credential(id).map_err(|e| e.to_string()),
             None => Ok(None),
         };
         let ask = match kept {
@@ -203,7 +204,7 @@ impl App {
         self.providers.busy.insert(id.to_owned());
         let id = id.to_owned();
         self.spawn(
-            move || listing::fetch(&ep, ask.as_ref().map(|k| k.as_str())),
+            move || listing::fetch(&ep, ask.as_ref()),
             move |app, listed| app.refreshed(&id, &label, listed),
         );
     }
@@ -223,6 +224,184 @@ impl App {
                     .insert(id.to_owned(), e.describe(label));
             }
         }
+    }
+
+    /// Starts a Claude Pro/Max subscription sign-in for `id`: Anthropic's approval page opens in the
+    /// browser, and the code it shows is pasted back into the form.
+    pub fn start_subscription_sign_in(&mut self, id: &str) {
+        if self.providers.busy.contains(id) {
+            return;
+        }
+        let sign = match credentials::sign_in() {
+            Ok(sign) => sign,
+            Err(why) => return self.providers.fail(id, why),
+        };
+        // The address is shown on the form too, so a browser that will not open is not a dead end.
+        self.providers.error = crate::browser::open(&sign.url).err();
+        self.providers.signing_in = Some(SigningIn {
+            id: id.to_owned(),
+            sign,
+        });
+        self.providers.code = TextEdit::new("");
+    }
+
+    /// Trades the pasted code for tokens. The state it carries must be the one this sign-in made,
+    /// or the code belongs to another request and is refused.
+    pub fn finish_subscription_sign_in(&mut self, id: &str) {
+        if self.providers.busy.contains(id) {
+            return;
+        }
+        let Some((verifier, state)) = self
+            .providers
+            .signing_in
+            .as_ref()
+            .filter(|s| s.id == id)
+            .map(|s| (s.sign.verifier.clone(), s.sign.state.clone()))
+        else {
+            return;
+        };
+        let pasted = self.providers.code.text.trim().to_owned();
+        if pasted.is_empty() {
+            return self
+                .providers
+                .fail(id, "Paste the code the browser showed.".to_owned());
+        }
+        let (code, shown) = pasted
+            .split_once('#')
+            .map_or((pasted.as_str(), ""), |(c, s)| (c.trim(), s.trim()));
+        if code.is_empty() {
+            return self
+                .providers
+                .fail(id, "Paste the code the browser showed.".to_owned());
+        }
+        if shown.is_empty() {
+            return self.providers.fail(
+                id,
+                "Paste the whole code the page shows, including the part after #.".to_owned(),
+            );
+        }
+        if shown != state {
+            return self.providers.fail(
+                id,
+                "That code came from a different sign-in. Start again.".to_owned(),
+            );
+        }
+        let code = code.to_owned();
+        self.providers.error = None;
+        self.providers.busy.insert(id.to_owned());
+        let id = id.to_owned();
+        self.spawn(
+            move || credentials::exchange(&code, &state, &verifier),
+            move |app, tokens| app.subscribed(&id, tokens),
+        );
+    }
+
+    /// Tokens in hand: the provider is asked for its models with them before anything is saved, so
+    /// a subscription that cannot infer is not stored as connected.
+    fn subscribed(&mut self, id: &str, tokens: Result<Tokens, String>) {
+        self.providers.busy.remove(id);
+        let tokens = match tokens {
+            Ok(tokens) => tokens,
+            Err(why) => return self.providers.fail(id, why),
+        };
+        let Some(ep) = self.list_endpoint(id) else {
+            let label = self.providers.label_of(id);
+            return self
+                .providers
+                .fail(id, format!("{label} is not supported yet."));
+        };
+        self.providers.busy.insert(id.to_owned());
+        let ask = tokens.credential();
+        let (id, tokens) = (id.to_owned(), tokens);
+        self.spawn(
+            move || listing::fetch(&ep, Some(&ask)),
+            move |app, listed| app.subscription_checked(&id, &tokens, listed),
+        );
+    }
+
+    fn subscription_checked(&mut self, id: &str, tokens: &Tokens, listed: Listed) {
+        self.providers.busy.remove(id);
+        let label = self.providers.label_of(id);
+        let models = match listed {
+            Ok(models) => models,
+            Err(ListError::Rejected) => {
+                return self.providers.fail(
+                    id,
+                    format!("{label} did not accept the sign-in. Try signing in again."),
+                );
+            }
+            Err(e) => return self.providers.fail(id, e.describe(&label)),
+        };
+        let sealed = match tokens.json().and_then(|json| self.seal(id, &json)) {
+            Ok(sealed) => sealed,
+            Err(why) => return self.providers.fail(id, why),
+        };
+        let at = now();
+        self.providers.connect(id);
+        self.providers.set_subscription_hint(id);
+        self.providers.set_models(id, models.clone(), at);
+        let verified = Verified {
+            id,
+            sealed: Some(&sealed),
+            models: &models,
+            fetched_at: at,
+        };
+        if let Err(why) = self.write_providers(Some(verified)) {
+            self.providers.disconnect(id);
+            return self.providers.fail(id, why);
+        }
+        self.providers.code = TextEdit::new("");
+    }
+
+    /// Keeps signed-in subscriptions current, from the app's half-minute tick. Offline, the old
+    /// token is left as it is and the next tick tries again.
+    pub fn refresh_subscription_tokens(&mut self) {
+        let at = now();
+        let due: Vec<String> = self
+            .providers
+            .list
+            .iter()
+            .filter(|p| {
+                p.connected
+                    && p.auth == ProviderAuth::Subscription
+                    && !self.providers.busy.contains(&p.id)
+            })
+            .map(|p| p.id.clone())
+            .collect();
+        for id in due {
+            let tokens = match self.store.as_ref().map(|db| db.subscription_tokens(&id)) {
+                Some(Ok(Some(tokens))) if tokens.is_stale(at) => tokens,
+                _ => continue,
+            };
+            self.providers.busy.insert(id.clone());
+            self.spawn(
+                move || credentials::refresh(&tokens),
+                move |app, tokens| app.refreshed_tokens(&id, tokens),
+            );
+        }
+    }
+
+    /// A refreshed pair is sealed back in place: the refresh token rotates, so the old one is spent.
+    fn refreshed_tokens(&mut self, id: &str, tokens: Result<Tokens, String>) {
+        self.providers.busy.remove(id);
+        let label = self.providers.label_of(id);
+        match tokens {
+            Ok(tokens) => {
+                if let Some(db) = &self.store
+                    && let Err(e) = db.save_subscription_tokens(id, &tokens)
+                {
+                    eprintln!("oido: could not keep {label}'s refreshed sign-in: {e}");
+                }
+            }
+            Err(why) => eprintln!("oido: could not refresh {label}'s sign-in: {why}"),
+        }
+    }
+
+    /// Where a provider's models are listed, if it has an address we know.
+    fn list_endpoint(&self, id: &str) -> Option<listing::Endpoint> {
+        self.providers
+            .get(id)
+            .and_then(|p| listing::endpoint(&p.id, p.custom, p.base_url.as_deref()))
     }
 
     /// A model picker was opened: any connected provider whose list is stale is asked again in the
@@ -619,5 +798,96 @@ mod tests {
             app.providers.default_model.is_some(),
             "still remembered, and flagged"
         );
+    }
+
+    /// Saves Anthropic as connected with a subscription, as a finished sign-in does.
+    fn subscribed(app: &App, tokens: &Tokens) {
+        let store = app.store.as_ref().unwrap();
+        let mut list = app.providers.list.clone();
+        let p = list.iter_mut().find(|p| p.id == "anthropic").unwrap();
+        p.connected = true;
+        p.auth = ProviderAuth::Subscription;
+        p.key_masked = Some("Claude Pro/Max".to_owned());
+        let sealed = store
+            .seal_provider_key("anthropic", &tokens.json().unwrap())
+            .unwrap();
+        let verified = Verified {
+            id: "anthropic",
+            sealed: Some(&sealed),
+            models: &[],
+            fetched_at: now(),
+        };
+        store.replace_providers(&list, Some(verified)).unwrap();
+    }
+
+    #[test]
+    fn an_expired_subscription_asks_for_another_sign_in_and_a_fresh_one_is_sent() {
+        let db = TempDb::new();
+        let fresh = Tokens {
+            access_token: "sk-ant-oat-1".into(),
+            refresh_token: "refresh-1".into(),
+            expires_at: now() + 3600,
+        };
+        {
+            let app = db.open();
+            subscribed(&app, &fresh);
+        }
+        {
+            let app = db.open();
+            let (endpoint, credential) = app.target_for("anthropic").unwrap();
+            assert_eq!(endpoint.base, "https://api.anthropic.com/v1");
+            let credential = credential.unwrap();
+            assert!(credential.is_subscription());
+            assert_eq!(
+                credential.token(),
+                "sk-ant-oat-1",
+                "the token is what is sent"
+            );
+        }
+
+        let stale = Tokens {
+            expires_at: now() - 1,
+            ..fresh
+        };
+        {
+            let app = db.open();
+            subscribed(&app, &stale);
+        }
+        let app = db.open();
+        let why = app.target_for("anthropic").unwrap_err();
+        assert!(
+            why.contains("expired") && why.contains("sign in again"),
+            "a stale token is not sent: {why}"
+        );
+    }
+
+    #[test]
+    fn a_code_from_another_sign_in_is_refused_before_the_token_endpoint() {
+        let db = TempDb::new();
+        let mut app = db.open();
+        app.providers.open = Some("anthropic".to_owned());
+        app.providers.signing_in = Some(SigningIn {
+            id: "anthropic".to_owned(),
+            sign: crate::credentials::SignIn {
+                verifier: "verifier".to_owned(),
+                state: "state-1".to_owned(),
+                url: "https://claude.ai/oauth/authorize".to_owned(),
+            },
+        });
+
+        app.providers.code = TextEdit::new("the-code#other-state");
+        app.finish_subscription_sign_in("anthropic");
+        let why = app.providers.error.as_deref().unwrap();
+        assert!(why.contains("different sign-in"), "{why}");
+        assert!(app.providers.busy.is_empty(), "no request was made");
+
+        app.providers.code = TextEdit::new("the-code");
+        app.finish_subscription_sign_in("anthropic");
+        let why = app.providers.error.as_deref().unwrap();
+        assert!(
+            why.contains("after #"),
+            "the whole code is asked for: {why}"
+        );
+        assert!(app.providers.busy.is_empty());
     }
 }

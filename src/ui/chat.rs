@@ -1,6 +1,8 @@
 //! The conversation: transcript with tool calls and approval gates, and the composer below it.
 
-use rune::{El, ScrollPos, ScrollSpec, TextStyle, col, el, row, text};
+use std::borrow::Cow;
+
+use rune::{El, GrowthSpec, ScrollPos, ScrollSpec, TextStyle, col, el, row, text};
 use rune_kit::{
     Badge, BadgeVariant, Button, ButtonVariant, Card, Collapsible, ControlSize, Dialog, IconButton,
     IconButtonVariant, Kit, Markdown, MarkdownStyle, glyphs,
@@ -15,6 +17,8 @@ const COLUMN: f32 = 760.0;
 /// How far above the newest message, in points, the transcript is scrolled before the jump button
 /// shows.
 const SCROLLED_UP: f32 = 200.0;
+/// A message's height before it has been seen, in points: about a short reply.
+const ROW_ESTIMATE: f32 = 140.0;
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(agent) = s.current() else {
@@ -70,26 +74,10 @@ fn jump_to_latest(k: &Kit) -> El {
 }
 
 fn transcript(s: &App, agent: &Agent, k: &Kit) -> El {
-    let messages = &agent.chat().messages;
-    let body = if messages.is_empty() {
+    let body = if agent.chat().messages.is_empty() {
         empty(agent, k)
     } else {
-        col()
-            .w_full()
-            .max_w(COLUMN)
-            .px(24.0)
-            .py(24.0)
-            .gap(20.0)
-            .children(
-                messages
-                    .iter()
-                    .enumerate()
-                    .map(|(i, m)| message(s, m, i, i + 1 == messages.len(), k)),
-            )
-            .children(draft(s, &agent.chat().id, k))
-            .children(schedule_drafts(s, &agent.chat().id, k))
-            .children(mcp_drafts(s, &agent.chat().id, k))
-            .children(agent_drafts(s, &agent.chat().id, k))
+        rows(s, agent, k)
     };
     col()
         .key("transcript")
@@ -111,6 +99,54 @@ fn transcript(s: &App, agent: &Agent, k: &Kit) -> El {
             }
         })
         .child(body)
+}
+
+/// The messages, then whatever waits under them, as rows that exist only near the window. A long
+/// chat then costs what its visible part costs, in layout and in what is drawn each frame.
+fn rows(s: &App, agent: &Agent, k: &Kit) -> El {
+    let chat = agent.chat();
+    let messages = chat.messages.len();
+    // Cards for what the agent is asking, drafting or holding. A few at most, usually none.
+    let tail: Vec<El> = draft(s, &chat.id, k)
+        .into_iter()
+        .chain(schedule_drafts(s, &chat.id, k))
+        .chain(mcp_drafts(s, &chat.id, k))
+        .chain(agent_drafts(s, &chat.id, k))
+        .chain(super::guard::waiting(
+            s,
+            &crate::guard::ask::Where::Chat(chat.id.clone()),
+            k,
+        ))
+        .collect();
+    let kit = k.clone();
+    col()
+        .key("rows")
+        .w_full()
+        .max_w(COLUMN)
+        .px(24.0)
+        .py(24.0)
+        .gap(20.0)
+        .growth(GrowthSpec::default())
+        .virtual_rows(
+            messages + tail.len(),
+            ROW_ESTIMATE,
+            move |_: &App, i| {
+                if i < messages {
+                    Cow::Owned(format!("m{i}"))
+                } else {
+                    Cow::Owned(format!("tail{}", i - messages))
+                }
+            },
+            move |s: &App, i| match i.checked_sub(messages) {
+                Some(j) => tail.get(j).cloned().unwrap_or_else(el),
+                None => s
+                    .current()
+                    .and_then(|a| a.chat().messages.get(i).map(|m| (a, m)))
+                    .map_or_else(el, |(a, m)| {
+                        message(s, m, i, i + 1 == a.chat().messages.len(), &kit)
+                    }),
+            },
+        )
 }
 
 fn empty(a: &Agent, k: &Kit) -> El {
@@ -489,19 +525,30 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
             }
         }
     }
+    // Calls held for your go-ahead wait, all of them, until it is given.
+    let held = r.tools.iter().any(|t| {
+        t.output.is_none()
+            && t.trip
+                .as_ref()
+                .is_some_and(|t| t.state == crate::guard::TripState::Asking)
+    });
+    // A guardrail's card goes right under the call it stopped.
+    let sid = s.current().map(|a| a.chat().id.clone()).unwrap_or_default();
+    let tripped = |j: usize, t: &ToolCall| super::guard::trip(s, &sid, t, j, k);
     // Other tools show what they did before the reply; a question comes after it, as its end.
     out = out.children(
         r.tools
             .iter()
             .enumerate()
             .filter(|(_, t)| !crate::tools::needs_you(&t.name))
-            .map(|(j, t)| {
-                let writing = *r.outcome == Outcome::Working;
-                if t.name == crate::tools::DELEGATE {
+            .flat_map(|(j, t)| {
+                let writing = *r.outcome == Outcome::Working || held;
+                let shown = if t.name == crate::tools::DELEGATE {
                     super::flow::delegation(s, t, writing, j, k)
                 } else {
                     tool(t, writing, j, k)
-                }
+                };
+                std::iter::once(shown).chain(tripped(j, t))
             }),
     );
     if *r.outcome == Outcome::Working && r.body.is_empty() && r.thinking.is_empty() {
@@ -527,12 +574,13 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
             .iter()
             .enumerate()
             .filter(|(_, t)| crate::tools::needs_you(&t.name))
-            .map(|(j, t)| {
-                if t.name == crate::tools::SHELL {
+            .flat_map(|(j, t)| {
+                let shown = if t.name == crate::tools::SHELL {
                     command_card(s, t, j, k)
                 } else {
                     question(s, t, r.last, j, k)
-                }
+                };
+                std::iter::once(shown).chain(tripped(j, t))
             }),
     );
     if let Some(a) = r.approval {
@@ -1288,9 +1336,14 @@ fn command_card(s: &App, t: &ToolCall, j: usize, k: &Kit) -> El {
                 .truncate(),
         );
     let mut accent = k.c.warning.icon;
+    let stopped = t.trip.as_ref().is_some_and(|t| t.state.stopped());
     match &t.output {
         Some(out) => {
-            accent = k.c.success.icon;
+            accent = if stopped {
+                k.c.text_faint
+            } else {
+                k.c.success.icon
+            };
             let (shown, cut) = crate::runs::clip(out, 2000);
             body = body.child(mono(
                 if cut { format!("{shown}\n…") } else { shown },
@@ -1305,10 +1358,18 @@ fn command_card(s: &App, t: &ToolCall, j: usize, k: &Kit) -> El {
             );
         }
         None => {
+            let held = t.trip.is_some() || {
+                // Held with another call that waits for your go-ahead.
+                s.current().is_some_and(|a| s.holding_in(&a.chat().id))
+            };
             body = body.child(
-                text("Waiting for the command before it.")
-                    .font(k.ty.small)
-                    .color(c.text_faint),
+                text(if held {
+                    "Waits for your go-ahead."
+                } else {
+                    "Waiting for the command before it."
+                })
+                .font(k.ty.small)
+                .color(c.text_faint),
             );
         }
     }
@@ -1445,4 +1506,45 @@ fn divider(label: &str, i: usize, k: &Kit) -> El {
                 .color(k.c.text_faint),
         )
         .child(rule())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use rune::{Env, Runtime};
+
+    use crate::agents::Target;
+    use crate::model::{Message, Outcome};
+
+    /// A chat of hundreds of messages builds and draws the ones near its window, so scrolling it
+    /// costs what the window shows and not what the chat holds.
+    #[test]
+    fn a_long_chat_builds_only_the_messages_near_the_window() {
+        let mut app = crate::testing::samples();
+        app.roster.select(Target::agent("scout"));
+        app.roster.current_mut().unwrap().chat_mut().messages = (0..300)
+            .flat_map(|i| {
+                [
+                    Message::User(format!("Question {i}").into()),
+                    Message::reply("An answer.", None, Outcome::Done),
+                ]
+            })
+            .collect();
+        let mut rt = Runtime::new(
+            app,
+            crate::ui::view,
+            (1280.0, 900.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        for _ in 0..10 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(rt.find("m599").is_some(), "the newest message is on screen");
+        assert!(rt.find("m0").is_none(), "the oldest message was built");
+        let built = rt.elements().len();
+        assert!(built < 800, "{built} elements for a 600-message chat");
+    }
 }
