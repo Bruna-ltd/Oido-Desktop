@@ -9,7 +9,7 @@ use crate::app::{self, App, Route};
 use crate::listing;
 use crate::model::{AgentStatus, Approval, Message, Outcome, Stats, ToolCall, chat};
 use crate::models::{ModelRef, RawModel};
-use crate::providers::NEW_SERVER;
+use crate::providers::{CODEX, NEW_SERVER, SigningIn};
 
 fn member(id: &str, name: &str, hue: f32, prompt: &str) -> Agent {
     Agent {
@@ -1385,6 +1385,24 @@ pub static SCENES: &[Scene] = &[
             "the system keyring is not available (no secret service), so the key was not saved"
                 .into(),
         );
+    }),
+    ("chatgpt-form", |s| {
+        s.route = Route::Providers;
+        s.providers.toggle(CODEX);
+    }),
+    ("chatgpt-waiting", |s| {
+        s.route = Route::Providers;
+        s.providers.toggle(CODEX);
+        s.providers.busy.insert(CODEX.to_owned());
+        s.providers.signing_in = Some(SigningIn {
+            id: CODEX.to_owned(),
+            sign: crate::credentials::SignIn {
+                verifier: "verifier".to_owned(),
+                state: "state".to_owned(),
+                url: "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&state=state".to_owned(),
+            },
+            cancel: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))),
+        });
     }),
     ("server-form", |s| {
         s.route = Route::Providers;

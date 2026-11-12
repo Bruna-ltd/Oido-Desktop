@@ -1,4 +1,4 @@
-//! The pages the browser lands on after signing in to an MCP server: what the loopback port
+//! The pages the browser lands on after signing in to a server or a service: what the loopback port
 //! answers with. They wear the app's look, so the person comes back to something that is plainly
 //! Oido and not a bare browser tab.
 //!

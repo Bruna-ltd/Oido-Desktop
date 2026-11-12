@@ -4,14 +4,18 @@
 //! works are the provider, its sealed key and its models saved together. Asking the network
 //! happens on a worker thread (see [`App::spawn`]) so the window never freezes.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
 use rune::TextEdit;
 use zeroize::Zeroizing;
 
 use crate::app::{App, now};
+use crate::chatgpt;
 use crate::credentials::{self, Credential, Tokens};
 use crate::listing::{self, Error as ListError};
 use crate::models::{ModelInfo, ModelRef};
-use crate::providers::{NEW_SERVER, ProviderAuth, SigningIn, normalize_server_url};
+use crate::providers::{CODEX, NEW_SERVER, ProviderAuth, SigningIn, normalize_server_url};
 use crate::store::Verified;
 
 type Listed = Result<Vec<ModelInfo>, ListError>;
@@ -226,11 +230,15 @@ impl App {
         }
     }
 
-    /// Starts a Claude Pro/Max subscription sign-in for `id`: Anthropic's approval page opens in the
-    /// browser, and the code it shows is pasted back into the form.
+    /// Starts a subscription sign-in for `id`: the provider's approval page opens in the browser.
+    /// A Claude Pro/Max sign-in then has its code pasted back into the form; a ChatGPT one comes
+    /// back to this computer by itself.
     pub fn start_subscription_sign_in(&mut self, id: &str) {
         if self.providers.busy.contains(id) {
             return;
+        }
+        if id == CODEX {
+            return self.start_chatgpt_sign_in(id);
         }
         let sign = match credentials::sign_in() {
             Ok(sign) => sign,
@@ -241,8 +249,46 @@ impl App {
         self.providers.signing_in = Some(SigningIn {
             id: id.to_owned(),
             sign,
+            cancel: None,
         });
         self.providers.code = TextEdit::new("");
+    }
+
+    /// Opens ChatGPT's approval page and waits, on a worker thread, for the browser to come back to
+    /// this computer with the code. Letting the sign-in go (see [`SigningIn`]) ends the wait.
+    fn start_chatgpt_sign_in(&mut self, id: &str) {
+        let (sign, listener) = match chatgpt::begin() {
+            Ok(begun) => begun,
+            Err(why) => return self.providers.fail(id, why),
+        };
+        // The address is shown on the form too, so a browser that will not open is not a dead end.
+        self.providers.error = crate::browser::open(&sign.url).err();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.providers.signing_in = Some(SigningIn {
+            id: id.to_owned(),
+            sign: sign.clone(),
+            cancel: Some(Arc::clone(&cancel)),
+        });
+        self.providers.busy.insert(id.to_owned());
+        let colors = self.look.colors();
+        let id = id.to_owned();
+        self.spawn(
+            move || {
+                let tokens = chatgpt::finish(&listener, &sign, &cancel, &colors);
+                (tokens, cancel.load(std::sync::atomic::Ordering::Relaxed))
+            },
+            move |app, (tokens, cancelled)| app.chatgpt_signed_in(&id, tokens, cancelled),
+        );
+    }
+
+    /// The browser came back, or the wait ended. A sign-in that was let go is not reported.
+    fn chatgpt_signed_in(&mut self, id: &str, tokens: Result<Tokens, String>, cancelled: bool) {
+        self.providers.signing_in = None;
+        if cancelled {
+            self.providers.busy.remove(id);
+            return;
+        }
+        self.subscribed(id, tokens);
     }
 
     /// Trades the pasted code for tokens. The state it carries must be the one this sign-in made,
@@ -374,8 +420,13 @@ impl App {
                 _ => continue,
             };
             self.providers.busy.insert(id.clone());
+            let renew: fn(&Tokens) -> Result<Tokens, String> = if id == CODEX {
+                chatgpt::refresh
+            } else {
+                credentials::refresh
+            };
             self.spawn(
-                move || credentials::refresh(&tokens),
+                move || renew(&tokens),
                 move |app, tokens| app.refreshed_tokens(&id, tokens),
             );
         }
@@ -800,19 +851,19 @@ mod tests {
         );
     }
 
-    /// Saves Anthropic as connected with a subscription, as a finished sign-in does.
-    fn subscribed(app: &App, tokens: &Tokens) {
+    /// Saves `id` as connected with a subscription, as a finished sign-in does.
+    fn subscribed(app: &App, id: &str, tokens: &Tokens) {
         let store = app.store.as_ref().unwrap();
         let mut list = app.providers.list.clone();
-        let p = list.iter_mut().find(|p| p.id == "anthropic").unwrap();
+        let p = list.iter_mut().find(|p| p.id == id).unwrap();
         p.connected = true;
         p.auth = ProviderAuth::Subscription;
-        p.key_masked = Some("Claude Pro/Max".to_owned());
+        p.key_masked = Some("a plan".to_owned());
         let sealed = store
-            .seal_provider_key("anthropic", &tokens.json().unwrap())
+            .seal_provider_key(id, &tokens.json().unwrap())
             .unwrap();
         let verified = Verified {
-            id: "anthropic",
+            id,
             sealed: Some(&sealed),
             models: &[],
             fetched_at: now(),
@@ -830,7 +881,7 @@ mod tests {
         };
         {
             let app = db.open();
-            subscribed(&app, &fresh);
+            subscribed(&app, "anthropic", &fresh);
         }
         {
             let app = db.open();
@@ -851,7 +902,7 @@ mod tests {
         };
         {
             let app = db.open();
-            subscribed(&app, &stale);
+            subscribed(&app, "anthropic", &stale);
         }
         let app = db.open();
         let why = app.target_for("anthropic").unwrap_err();
@@ -873,6 +924,7 @@ mod tests {
                 state: "state-1".to_owned(),
                 url: "https://claude.ai/oauth/authorize".to_owned(),
             },
+            cancel: None,
         });
 
         app.providers.code = TextEdit::new("the-code#other-state");
@@ -889,5 +941,82 @@ mod tests {
             "the whole code is asked for: {why}"
         );
         assert!(app.providers.busy.is_empty());
+    }
+
+    #[test]
+    fn a_chatgpt_plan_is_asked_at_the_codex_backend_with_its_token_until_it_expires() {
+        let db = TempDb::new();
+        let token = crate::testing::access_token(Some("acct-1"));
+        let fresh = Tokens {
+            access_token: token.clone(),
+            refresh_token: "refresh-1".into(),
+            expires_at: now() + 3600,
+        };
+        {
+            let app = db.open();
+            subscribed(&app, "codex", &fresh);
+        }
+        {
+            let app = db.open();
+            let (endpoint, credential) = app.target_for("codex").unwrap();
+            assert_eq!(endpoint.api, crate::completion::Api::Codex);
+            assert_eq!(endpoint.base, chatgpt::BASE);
+            assert_eq!(credential.unwrap().token(), token);
+        }
+        let stale = Tokens {
+            expires_at: now() - 1,
+            ..fresh
+        };
+        {
+            let app = db.open();
+            subscribed(&app, "codex", &stale);
+        }
+        let app = db.open();
+        let why = app.target_for("codex").unwrap_err();
+        assert!(
+            why.contains("OpenAI Codex") && why.contains("expired"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_chatgpt_sign_in_that_was_let_go_says_nothing_and_one_that_failed_says_why() {
+        let db = TempDb::new();
+        let mut app = db.open();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiting = |cancel: &Arc<AtomicBool>| SigningIn {
+            id: "codex".to_owned(),
+            sign: crate::credentials::SignIn {
+                verifier: "v".to_owned(),
+                state: "s".to_owned(),
+                url: "https://auth.openai.com/oauth/authorize".to_owned(),
+            },
+            cancel: Some(Arc::clone(cancel)),
+        };
+
+        app.providers.busy.insert("codex".to_owned());
+        app.providers.signing_in = Some(waiting(&cancel));
+        app.chatgpt_signed_in("codex", Err("sign-in was cancelled".to_owned()), true);
+        assert!(app.providers.busy.is_empty() && app.providers.signing_in.is_none());
+        assert!(app.providers.error.is_none(), "cancelling is not an error");
+
+        app.providers.busy.insert("codex".to_owned());
+        app.providers.signing_in = Some(waiting(&cancel));
+        app.chatgpt_signed_in(
+            "codex",
+            Err("the sign-in was refused: access_denied".to_owned()),
+            false,
+        );
+        assert!(app.providers.busy.is_empty() && app.providers.signing_in.is_none());
+        assert_eq!(app.providers.open.as_deref(), Some("codex"));
+        assert!(
+            app.providers
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("access_denied")),
+            "{:?}",
+            app.providers.error
+        );
+        assert!(!app.providers.get("codex").unwrap().connected);
     }
 }

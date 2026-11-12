@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::chatgpt;
 use crate::credentials::{Credential, OAUTH_BETA};
 use crate::models::{Caps, ModelInfo, RawModel, finish};
 
@@ -21,6 +22,9 @@ pub enum Wire {
     /// `GET {base}/models` with a Bearer key, answering `{"models":[{"name":..}]}`. Those are
     /// System One models, not chat models: asking only proves the key works.
     TypeSafe,
+    /// `GET {base}/models?client_version=..` with a ChatGPT plan's token, answering
+    /// `{"models":[{"slug":..}]}`: the models the plan can run in Codex.
+    Codex,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -56,6 +60,7 @@ pub fn endpoint(id: &str, custom: bool, base_url: Option<&str>) -> Option<Endpoi
         "mistral" => (Wire::OpenAi, "https://api.mistral.ai/v1"),
         "anthropic" => (Wire::Anthropic, "https://api.anthropic.com/v1"),
         "typesafe" => (Wire::TypeSafe, "https://api.typesafe.ai/v1"),
+        "codex" => (Wire::Codex, chatgpt::BASE),
         "gemini" => (
             Wire::Gemini,
             "https://generativelanguage.googleapis.com/v1beta",
@@ -207,6 +212,18 @@ fn page_request(ep: &Endpoint, credential: Option<&Credential>, cursor: Option<&
                 None => format!("{}/models?limit=1000", ep.base),
             }
         }
+        Wire::Codex => {
+            if let Some(Credential::Subscription(token)) =
+                credential.filter(|c| !c.token().is_empty())
+            {
+                headers.extend(chatgpt::headers(token));
+            }
+            format!(
+                "{}/models?client_version={}",
+                ep.base,
+                chatgpt::CLIENT_VERSION
+            )
+        }
         Wire::Gemini => {
             // The key goes in a header, not the URL, so it never lands in a log of addresses.
             if let Some(c) = credential.filter(|c| !c.token().is_empty()) {
@@ -262,6 +279,19 @@ fn parse_page(wire: Wire, body: &str) -> Result<(Vec<RawModel>, Option<String>),
             // The list must be there for the key to count as checked, but it is not for agents.
             list("models")?;
             Ok((Vec::new(), None))
+        }
+        Wire::Codex => {
+            let models = list("models")?
+                .iter()
+                // The list also holds models kept out of pickers: only the listed ones are offered.
+                .filter(|m| {
+                    m.get("visibility")
+                        .and_then(Value::as_str)
+                        .is_none_or(|v| v == "list")
+                })
+                .filter_map(codex_model)
+                .collect();
+            Ok((models, None))
         }
         Wire::Anthropic => {
             let models = list("data")?
@@ -338,6 +368,29 @@ fn openai_model(m: &Value) -> Option<RawModel> {
             m,
             &["context_length", "max_model_len", "max_context_length"],
         ),
+    })
+}
+
+/// A Codex model: named by its `slug`, with what the list declares of its context, whether it
+/// reasons and whether it takes pictures.
+fn codex_model(m: &Value) -> Option<RawModel> {
+    let caps = Caps {
+        vision: m
+            .get("input_modalities")
+            .and_then(Value::as_array)
+            .map(|inputs| inputs.iter().any(|x| x.as_str() == Some("image"))),
+        reasoning: m
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .map(|levels| !levels.is_empty()),
+        tools: None,
+    };
+    Some(RawModel {
+        id: str_of(m, "slug")?,
+        name: str_of(m, "display_name"),
+        caps,
+        chat: None,
+        context: count_of(m, &["context_window"]),
     })
 }
 
@@ -731,5 +784,51 @@ mod tests {
         );
         let m = Error::Unexpected("HTTP 404".into()).describe("My server");
         assert!(m.contains("HTTP 404") && m.contains("/v1"));
+    }
+
+    #[test]
+    fn codex_lists_the_models_a_plan_can_run_asking_as_that_account() {
+        let (base, seen) = serve(vec![(
+            200,
+            r#"{"models":[
+                {"slug":"gpt-5.3-codex","display_name":"GPT-5.3 Codex","visibility":"list",
+                 "context_window":272000,"input_modalities":["text","image"],
+                 "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]},
+                {"slug":"kept-out","display_name":"Kept out","visibility":"hide"},
+                {"slug":"gpt-5.1-codex-mini","visibility":"list"}]}"#,
+        )]);
+        let token = crate::testing::access_token(Some("acct-1"));
+        let models = fetch(
+            &at(Wire::Codex, &base),
+            Some(&Credential::subscription(&token)),
+        )
+        .unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-5.1-codex-mini", "gpt-5.3-codex"]);
+        let top = &models[1];
+        assert_eq!(top.name, "GPT-5.3 Codex");
+        assert_eq!(top.context, Some(272_000));
+        assert_eq!(
+            (top.caps.vision, top.caps.reasoning),
+            (Some(true), Some(true))
+        );
+        assert_eq!(models[0].caps, Caps::default(), "unsaid stays unknown");
+
+        let request = seen.recv().unwrap();
+        assert!(
+            request.starts_with(&format!(
+                "get /models?client_version={} ",
+                chatgpt::CLIENT_VERSION
+            )),
+            "{request}"
+        );
+        assert!(request.contains("chatgpt-account-id: acct-1"), "{request}");
+        assert!(
+            request.contains(&format!("authorization: bearer {}", token.to_lowercase())),
+            "{request}"
+        );
+
+        let ep = endpoint("codex", false, None).unwrap();
+        assert_eq!((ep.wire, ep.base.as_str()), (Wire::Codex, chatgpt::BASE));
     }
 }
