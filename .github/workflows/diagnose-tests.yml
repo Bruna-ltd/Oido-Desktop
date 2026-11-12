@@ -1,0 +1,61 @@
+# TEMPORARY: finds the test that locks the runner up. Runs every test in a process of its own, under
+# a hard time and memory limit, and lists the ones that did not pass. Do not merge.
+name: Diagnose tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/diagnose-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rune, as Cargo.toml expects it
+        run: |
+          rev=$(sed -n 's/^rune = .*rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml)
+          git init -q ../rune
+          git -C ../rune fetch -q --depth 1 https://github.com/anomalyco/rune "$rev"
+          git -C ../rune checkout -q FETCH_HEAD
+          git -C ../rune apply "$GITHUB_WORKSPACE/patches/rune-wheel-notch.patch"
+
+      - name: Build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build tests
+        run: |
+          cargo test --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .executable != null) | .executable' > "$RUNNER_TEMP/bin.txt"
+          cat "$RUNNER_TEMP/bin.txt"
+
+      - name: Run each test alone
+        run: |
+          bin=$(head -1 "$RUNNER_TEMP/bin.txt")
+          "$bin" --list 2>/dev/null | sed -n 's/: test$//p' > "$RUNNER_TEMP/tests.txt"
+          total=$(wc -l < "$RUNNER_TEMP/tests.txt")
+          echo "$total tests, each alone, killed after 60 s, at most 8 GB of address space"
+          # A test that blows its memory aborts here instead of taking the runner with it.
+          ulimit -v 8000000
+          bad=0
+          while read -r t; do
+            start=$SECONDS
+            if timeout -s KILL 60 "$bin" --exact "$t" -q > "$RUNNER_TEMP/out.txt" 2>&1; then
+              :
+            else
+              code=$?
+              bad=$((bad + 1))
+              echo "::error::NOT OK (exit $code after $((SECONDS - start)) s): $t"
+              tail -8 "$RUNNER_TEMP/out.txt"
+            fi
+          done < "$RUNNER_TEMP/tests.txt"
+          echo "$bad of $total did not pass"
+          [[ $bad -eq 0 ]]
