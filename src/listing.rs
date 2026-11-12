@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::credentials::{Credential, OAUTH_BETA};
 use crate::models::{Caps, ModelInfo, RawModel, finish};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -95,9 +96,9 @@ impl Error {
     }
 }
 
-/// The models `key` can use at `ep`, ready for the picker: chat models only, named, and sorted.
-/// Blocks on the network, so call it from a worker thread.
-pub fn fetch(ep: &Endpoint, key: Option<&str>) -> Result<Vec<ModelInfo>, Error> {
+/// The models `credential` can use at `ep`, ready for the picker: chat models only, named, and
+/// sorted. Blocks on the network, so call it from a worker thread.
+pub fn fetch(ep: &Endpoint, credential: Option<&Credential>) -> Result<Vec<ModelInfo>, Error> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .http_status_as_error(false)
@@ -106,7 +107,7 @@ pub fn fetch(ep: &Endpoint, key: Option<&str>) -> Result<Vec<ModelInfo>, Error> 
     let mut raws = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
-        let req = page_request(ep, key, cursor.as_deref());
+        let req = page_request(ep, credential, cursor.as_deref());
         let body = get(&agent, ep.wire, &req)?;
         let (page, next) = parse_page(ep.wire, &body)?;
         raws.extend(page);
@@ -117,7 +118,7 @@ pub fn fetch(ep: &Endpoint, key: Option<&str>) -> Result<Vec<ModelInfo>, Error> 
     }
     if ep.wire == Wire::Server {
         // What the server runs with beats what the list says the model was trained for.
-        if let Some(n) = server_context(&agent, ep, key) {
+        if let Some(n) = server_context(&agent, ep, credential) {
             for r in &mut raws {
                 r.context = Some(n);
             }
@@ -128,7 +129,11 @@ pub fn fetch(ep: &Endpoint, key: Option<&str>) -> Result<Vec<ModelInfo>, Error> 
 
 /// The context llama-server gives each request, from `/props` at the server's root (beside `/v1`).
 /// `None` for a server that has no such page or does not say.
-fn server_context(agent: &ureq::Agent, ep: &Endpoint, key: Option<&str>) -> Option<u32> {
+fn server_context(
+    agent: &ureq::Agent,
+    ep: &Endpoint,
+    credential: Option<&Credential>,
+) -> Option<u32> {
     let root = ep
         .base
         .rsplit_once('/')
@@ -140,9 +145,9 @@ fn server_context(agent: &ureq::Agent, ep: &Endpoint, key: Option<&str>) -> Opti
         .map_or(ep.base.as_str(), |(root, _)| root);
     let req = Request {
         url: format!("{root}/props"),
-        headers: key
-            .filter(|k| !k.is_empty())
-            .map(|k| vec![("Authorization", format!("Bearer {k}"))])
+        headers: credential
+            .filter(|c| !c.token().is_empty())
+            .map(|c| vec![("Authorization", format!("Bearer {}", c.token()))])
             .unwrap_or_default(),
     };
     let body = get(agent, Wire::Server, &req).ok()?;
@@ -176,18 +181,25 @@ pub struct Request {
 }
 
 /// One page's request. `cursor` is where the last page left off.
-fn page_request(ep: &Endpoint, key: Option<&str>, cursor: Option<&str>) -> Request {
+fn page_request(ep: &Endpoint, credential: Option<&Credential>, cursor: Option<&str>) -> Request {
     let mut headers = Vec::new();
     let url = match ep.wire {
         Wire::OpenAi | Wire::Server | Wire::TypeSafe => {
-            if let Some(k) = key.filter(|k| !k.is_empty()) {
-                headers.push(("Authorization", format!("Bearer {k}")));
+            if let Some(c) = credential.filter(|c| !c.token().is_empty()) {
+                headers.push(("Authorization", format!("Bearer {}", c.token())));
             }
             format!("{}/models", ep.base)
         }
         Wire::Anthropic => {
-            if let Some(k) = key {
-                headers.push(("x-api-key", k.to_owned()));
+            match credential {
+                Some(Credential::Subscription(token)) if !token.is_empty() => {
+                    headers.push(("Authorization", format!("Bearer {}", token.as_str())));
+                    headers.push(("anthropic-beta", OAUTH_BETA.to_owned()));
+                }
+                Some(Credential::Key(key)) if !key.is_empty() => {
+                    headers.push(("x-api-key", key.to_string()));
+                }
+                _ => {}
             }
             headers.push(("anthropic-version", ANTHROPIC_VERSION.to_owned()));
             match cursor {
@@ -197,8 +209,8 @@ fn page_request(ep: &Endpoint, key: Option<&str>, cursor: Option<&str>) -> Reque
         }
         Wire::Gemini => {
             // The key goes in a header, not the URL, so it never lands in a log of addresses.
-            if let Some(k) = key {
-                headers.push(("x-goog-api-key", k.to_owned()));
+            if let Some(c) = credential.filter(|c| !c.token().is_empty()) {
+                headers.push(("x-goog-api-key", c.token().to_owned()));
             }
             match cursor {
                 Some(c) => format!("{}/models?pageSize=1000&pageToken={}", ep.base, encode(c)),
@@ -387,7 +399,7 @@ mod tests {
             r#"{"models":[{"name":"jev-latest","description":"d","release_date":"2026-09-15"}]}"#,
         )]);
         let ep = at(Wire::TypeSafe, &format!("{base}/v1"));
-        assert_eq!(fetch(&ep, Some("ts-key")), Ok(Vec::new()));
+        assert_eq!(fetch(&ep, Some(&Credential::key("ts-key"))), Ok(Vec::new()));
         let request = seen.recv().unwrap();
         assert!(request.starts_with("get /v1/models "), "{request}");
         assert!(
@@ -397,7 +409,10 @@ mod tests {
 
         let (base, _) = serve(vec![(401, "{}")]);
         assert_eq!(
-            fetch(&at(Wire::TypeSafe, &format!("{base}/v1")), Some("bad")),
+            fetch(
+                &at(Wire::TypeSafe, &format!("{base}/v1")),
+                Some(&Credential::key("bad"))
+            ),
             Err(Error::Rejected)
         );
         assert_eq!(
@@ -432,7 +447,11 @@ mod tests {
 
     #[test]
     fn requests_carry_the_key_the_way_each_provider_wants_it() {
-        let r = page_request(&at(Wire::OpenAi, "http://x/v1"), Some("sk-1"), None);
+        let r = page_request(
+            &at(Wire::OpenAi, "http://x/v1"),
+            Some(&Credential::key("sk-1")),
+            None,
+        );
         assert_eq!(r.url, "http://x/v1/models");
         assert_eq!(r.headers, vec![("Authorization", "Bearer sk-1".to_owned())]);
         assert!(
@@ -444,7 +463,7 @@ mod tests {
 
         let r = page_request(
             &at(Wire::Anthropic, "http://x/v1"),
-            Some("sk-a"),
+            Some(&Credential::key("sk-a")),
             Some("model_9"),
         );
         assert_eq!(r.url, "http://x/v1/models?limit=1000&after_id=model_9");
@@ -454,8 +473,27 @@ mod tests {
         );
 
         let r = page_request(
+            &at(Wire::Anthropic, "http://x/v1"),
+            Some(&Credential::subscription("sk-ant-oat-1")),
+            None,
+        );
+        assert!(
+            r.headers
+                .contains(&("Authorization", "Bearer sk-ant-oat-1".to_owned())),
+            "a subscription is a bearer token: {:?}",
+            r.headers
+        );
+        assert!(
+            r.headers.iter().any(|(n, v)| *n == "anthropic-beta"
+                && v.contains("oauth-2025-04-20")
+                && v.contains("claude-code-20250219")),
+            "and needs the subscription betas"
+        );
+        assert!(!r.headers.iter().any(|(n, _)| *n == "x-api-key"));
+
+        let r = page_request(
             &at(Wire::Gemini, "http://x/v1beta"),
-            Some("g-1"),
+            Some(&Credential::key("g-1")),
             Some("a+b/c="),
         );
         assert_eq!(
@@ -557,7 +595,7 @@ mod tests {
         let (base, seen) = serve(vec![(200, OPENAI)]);
         let models = fetch(
             &at(Wire::OpenAi, &format!("{base}/v1")),
-            Some("sk-test-123"),
+            Some(&Credential::key("sk-test-123")),
         )
         .unwrap();
         assert_eq!(models.len(), 2);
@@ -575,7 +613,11 @@ mod tests {
             ),
             (200, r#"{"default_generation_settings":{"n_ctx":8192}}"#),
         ]);
-        let models = fetch(&at(Wire::Server, &format!("{base}/v1")), Some("sk-s")).unwrap();
+        let models = fetch(
+            &at(Wire::Server, &format!("{base}/v1")),
+            Some(&Credential::key("sk-s")),
+        )
+        .unwrap();
         assert!(models.iter().all(|m| m.context == Some(8192)), "{models:?}");
         let _ = seen.recv().unwrap();
         let props = seen.recv().unwrap();
@@ -628,7 +670,7 @@ mod tests {
                 r#"{"data":[{"id":"claude-b","display_name":"B"}],"has_more":false,"last_id":"claude-b"}"#,
             ),
         ]);
-        let models = fetch(&at(Wire::Anthropic, &base), Some("sk-a")).unwrap();
+        let models = fetch(&at(Wire::Anthropic, &base), Some(&Credential::key("sk-a"))).unwrap();
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["claude-a", "claude-b"]
@@ -645,7 +687,7 @@ mod tests {
     fn a_rejected_key_an_unreachable_server_and_a_broken_one_are_told_apart() {
         let (base, _) = serve(vec![(401, r#"{"error":"bad key"}"#)]);
         assert_eq!(
-            fetch(&at(Wire::OpenAi, &base), Some("bad")),
+            fetch(&at(Wire::OpenAi, &base), Some(&Credential::key("bad"))),
             Err(Error::Rejected)
         );
 
@@ -654,7 +696,7 @@ mod tests {
             r#"{"error":{"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}"#,
         )]);
         assert_eq!(
-            fetch(&at(Wire::Gemini, &base), Some("bad")),
+            fetch(&at(Wire::Gemini, &base), Some(&Credential::key("bad"))),
             Err(Error::Rejected),
             "google says 400, not 401"
         );

@@ -230,7 +230,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
         user_name: None,
     });
     let mut turns = vec![Turn::user(job.task.clone())];
-    let key = job.prep.key.as_deref().map(String::as_str);
+    let credential = job.prep.credential.as_ref();
     let guard = &job.prep.guard;
     // Its secrets, numbered as first seen, hidden from its model and put back for its tools.
     let mut hidden = crate::guard::Hidden::default();
@@ -272,8 +272,12 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
             let (mut text, mut reasoning, mut calls) = (String::new(), String::new(), Vec::new());
             let (mut used, mut first) = (Tokens::default(), None);
             let (mut shown, mut last) = (String::new(), Instant::now());
-            let result =
-                completion::run(&job.prep.endpoint, key, &request, &job.cancel, &mut |ev| {
+            let result = completion::run(
+                &job.prep.endpoint,
+                credential,
+                &request,
+                &job.cancel,
+                &mut |ev| {
                     if first.is_none() && !matches!(ev, Event::Usage(_)) {
                         first = Some(round.elapsed());
                     }
@@ -290,7 +294,8 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                         Event::ToolCall(c) => calls.push(c),
                         Event::Usage(t) => used.update(t),
                     }
-                });
+                },
+            );
             if !shown.is_empty() {
                 tell(Note::Text(shown));
             }

@@ -11,6 +11,14 @@ use crate::picker::{Group, PickerState};
 /// The id Studio gives a user-added server before it has a name; the form's slot for "new".
 pub const NEW_SERVER: &str = "llama-server:new";
 
+/// How a provider is asked: with its own API key, or with a Claude Pro/Max subscription.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ProviderAuth {
+    #[default]
+    ApiKey,
+    Subscription,
+}
+
 #[derive(Clone)]
 pub struct Provider {
     pub id: String,
@@ -21,6 +29,14 @@ pub struct Provider {
     pub key_masked: Option<String>,
     pub base_url: Option<String>,
     pub custom: bool,
+    /// How a connected provider is asked.
+    pub auth: ProviderAuth,
+}
+
+/// A subscription sign-in waiting for the code the browser showed.
+pub struct SigningIn {
+    pub id: String,
+    pub sign: crate::credentials::SignIn,
 }
 
 pub struct Providers {
@@ -41,6 +57,10 @@ pub struct Providers {
     pub key: TextEdit,
     pub url: TextEdit,
     pub name: TextEdit,
+    /// The subscription sign-in in progress, if any.
+    pub signing_in: Option<SigningIn>,
+    /// The code the browser showed, to be pasted back.
+    pub code: TextEdit,
 }
 
 /// TypeSafe's System One models answer typed questions for tools; they are not chat models. It is
@@ -103,6 +123,7 @@ fn built_in(&(id, label, color): &(&'static str, &str, &'static str)) -> Provide
         key_masked: None,
         base_url: None,
         custom: false,
+        auth: ProviderAuth::ApiKey,
     }
 }
 
@@ -120,6 +141,8 @@ pub fn init() -> Providers {
         key: TextEdit::new(""),
         url: TextEdit::new(""),
         name: TextEdit::new(""),
+        signing_in: None,
+        code: TextEdit::new(""),
     }
 }
 
@@ -150,6 +173,8 @@ impl Providers {
             key: TextEdit::new(""),
             url: TextEdit::new(""),
             name: TextEdit::new(""),
+            signing_in: None,
+            code: TextEdit::new(""),
         }
     }
 }
@@ -307,6 +332,8 @@ impl Providers {
         self.name = TextEdit::new(if custom { name } else { String::new() });
         self.url = TextEdit::new(if custom { url } else { String::new() });
         self.key = TextEdit::new("");
+        self.signing_in = None;
+        self.code = TextEdit::new("");
         self.open = Some(id.to_owned());
         // The first field takes focus, as Studio's `autoFocus` does.
         if id == NEW_SERVER || custom {
@@ -333,8 +360,11 @@ impl Providers {
     pub fn connect(&mut self, id: &str) {
         if let Some(p) = self.list.iter_mut().find(|p| p.id == id) {
             p.connected = true;
+            p.auth = ProviderAuth::ApiKey;
         }
         self.open = None;
+        self.signing_in = None;
+        self.code = TextEdit::new("");
     }
 
     /// Shows a masked hint of the key that was just kept for `id`. Only called once the key is
@@ -342,6 +372,14 @@ impl Providers {
     pub fn set_hint(&mut self, id: &str, key: &str) {
         if let Some(p) = self.list.iter_mut().find(|p| p.id == id) {
             p.key_masked = Some(mask(key));
+        }
+    }
+
+    /// Shows what a subscription is signed in as, in place of a masked key.
+    pub fn set_subscription_hint(&mut self, id: &str) {
+        if let Some(p) = self.list.iter_mut().find(|p| p.id == id) {
+            p.auth = ProviderAuth::Subscription;
+            p.key_masked = Some("Claude Pro/Max".to_owned());
         }
     }
 
@@ -382,6 +420,7 @@ impl Providers {
                 key_masked: None,
                 base_url: Some(normalize_server_url(&url)),
                 custom: true,
+                auth: ProviderAuth::ApiKey,
             });
             (id, true)
         } else {
@@ -406,9 +445,14 @@ impl Providers {
         } else if let Some(p) = self.list.iter_mut().find(|p| p.id == id) {
             p.connected = false;
             p.key_masked = None;
+            p.auth = ProviderAuth::ApiKey;
         }
         self.models.remove(id);
         self.row_errors.remove(id);
+        if self.signing_in.as_ref().is_some_and(|s| s.id == id) {
+            self.signing_in = None;
+            self.code = TextEdit::new("");
+        }
         if self.open.as_deref() == Some(id) {
             self.open = None;
         }

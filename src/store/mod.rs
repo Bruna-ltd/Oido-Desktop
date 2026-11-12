@@ -36,6 +36,8 @@ pub enum Error {
     Vault(vault::Error),
     /// A key was set for a provider that is not saved.
     NoSuchProvider(String),
+    /// A saved subscription's tokens could not be read.
+    BadCredential(String),
     /// A statement the code asks for is not in `db/queries`.
     MissingQuery(&'static str),
     /// The file was made by a newer version of the app than this one.
@@ -56,6 +58,12 @@ impl fmt::Display for Error {
             Self::Io(e) => write!(f, "could not prepare the data folder: {e}"),
             Self::Vault(e) => write!(f, "{e}"),
             Self::NoSuchProvider(id) => write!(f, "no saved provider {id} to keep a key for"),
+            Self::BadCredential(id) => {
+                write!(
+                    f,
+                    "the saved sign-in for {id} could not be read; sign in again"
+                )
+            }
             Self::MissingQuery(n) => write!(f, "no query named {n} in db/queries"),
             Self::NewerSchema { found, known } => {
                 write!(
@@ -95,7 +103,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 20] = [
+const MIGRATIONS: [&str; 21] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -116,6 +124,7 @@ const MIGRATIONS: [&str; 20] = [
     include_str!("../../db/migrations/018_guard_steps.sql"),
     include_str!("../../db/migrations/019_trust.sql"),
     include_str!("../../db/migrations/020_channel_topics.sql"),
+    include_str!("../../db/migrations/021_provider_auth.sql"),
 ];
 
 const QUERY_FILES: [&str; 10] = [
@@ -234,6 +243,7 @@ fn parse_queries() -> Vec<(&'static str, &'static str)> {
 mod tests {
     use super::*;
     use crate::agents::Agent;
+    use crate::credentials::Tokens;
     use crate::demo::sample_agents;
     use crate::model::{AgentStatus, chat};
     use crate::providers;
@@ -580,6 +590,65 @@ mod tests {
             s.provider_key("kimi").unwrap().is_none(),
             "a signed-out provider holds no key"
         );
+    }
+
+    #[test]
+    fn a_subscription_is_kept_as_sealed_tokens_and_read_back_as_one() {
+        let s = mem();
+        let tokens = Tokens {
+            access_token: "sk-ant-oat-1".into(),
+            refresh_token: "refresh-1".into(),
+            expires_at: 1_700_000_000,
+        };
+        let mut list = connected_list(&["anthropic"]);
+        let p = list.iter_mut().find(|p| p.id == "anthropic").unwrap();
+        p.auth = providers::ProviderAuth::Subscription;
+        let sealed = s
+            .seal_provider_key("anthropic", &tokens.json().unwrap())
+            .unwrap();
+        let verified = Verified {
+            id: "anthropic",
+            sealed: Some(&sealed),
+            models: &[],
+            fetched_at: 0,
+        };
+        s.replace_providers(&list, Some(verified)).unwrap();
+
+        let credential = s.provider_credential("anthropic").unwrap().unwrap();
+        assert!(credential.is_subscription());
+        assert_eq!(credential.token(), "sk-ant-oat-1");
+        assert!(
+            s.provider_key("anthropic").unwrap().is_none(),
+            "a subscription is not a key"
+        );
+        assert_eq!(s.subscription_tokens("anthropic").unwrap(), Some(tokens));
+
+        // A refresh replaces the pair, and the row stays a subscription either way.
+        let fresh = Tokens {
+            access_token: "sk-ant-oat-2".into(),
+            refresh_token: "refresh-2".into(),
+            expires_at: 1_700_003_600,
+        };
+        s.save_subscription_tokens("anthropic", &fresh).unwrap();
+        assert_eq!(
+            s.provider_credential("anthropic").unwrap().unwrap().token(),
+            "sk-ant-oat-2"
+        );
+        assert_eq!(s.subscription_tokens("anthropic").unwrap(), Some(fresh));
+
+        // A stored value that is not tokens says so, rather than being sent as a key.
+        let broken = s.seal_provider_key("anthropic", "not tokens").unwrap();
+        let verified = Verified {
+            id: "anthropic",
+            sealed: Some(&broken),
+            models: &[],
+            fetched_at: 0,
+        };
+        s.replace_providers(&list, Some(verified)).unwrap();
+        assert!(matches!(
+            s.provider_credential("anthropic"),
+            Err(Error::BadCredential(_))
+        ));
     }
 
     #[test]

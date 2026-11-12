@@ -11,6 +11,7 @@ mod completion;
 mod composer;
 mod connect;
 mod context;
+mod credentials;
 mod delegate;
 #[cfg(any(test, debug_assertions))]
 mod demo;
@@ -137,6 +138,8 @@ fn main() {
             s.fire_due(app::now());
             // Calls held for a go-ahead nobody gave in time do not run.
             s.expire_holds(app::now());
+            // Subscription tokens near expiry are refreshed before a call needs them.
+            s.refresh_subscription_tokens();
         });
     });
     app.run();

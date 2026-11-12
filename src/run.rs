@@ -7,12 +7,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use zeroize::Zeroizing;
-
 use crate::app::{App, Effort, Route};
 use crate::completion::{
     self, Call, Completion, Endpoint, Error, Event, Request, Role, Think, Tokens, Turn,
 };
+use crate::credentials::Credential;
 use crate::model::{AgentStatus, Message, Outcome, Session, Stats, ToolCall, new_id};
 use crate::models::ModelRef;
 use crate::providers::ModelStatus;
@@ -493,8 +492,8 @@ impl App {
         self.beat();
         match (refuse, target) {
             (Some(why), _) | (None, Err(why)) => self.settle(&sid, &run.id, Err(Error::Setup(why))),
-            (None, Ok((endpoint, key))) => {
-                self.stream(sid, run.id, endpoint, key, guarded, cancel);
+            (None, Ok((endpoint, credential))) => {
+                self.stream(sid, run.id, endpoint, credential, guarded, cancel);
             }
         }
     }
@@ -510,7 +509,7 @@ impl App {
         ask: Request,
         mut hidden: crate::guard::Hidden,
     ) -> bool {
-        let Ok((endpoint, key)) = self.target_for(&model.provider) else {
+        let Ok((endpoint, credential)) = self.target_for(&model.provider) else {
             return false;
         };
         let ask = self.guard.request(ask, &mut hidden);
@@ -523,9 +522,7 @@ impl App {
         let (sid, who) = (sid.to_owned(), self.providers.label_of(&model.provider));
         let (sent, began) = (transcript(&ask.request().turns), Instant::now());
         self.spawn(
-            move || {
-                completion::complete(&endpoint, key.as_deref().map(String::as_str), &ask, &cancel)
-            },
+            move || completion::complete(&endpoint, credential.as_ref(), &ask, &cancel),
             move |app, got| app.summarized(&sid, cut, &sent, began, &who, got, &hidden),
         );
         true
@@ -726,26 +723,48 @@ impl App {
         }
     }
 
-    /// Where a provider's chat is, and the key to use, or why there is no way to ask it.
+    /// Where a provider's chat is, and what to ask it with, or why there is no way to ask it.
     pub(crate) fn target_for(
         &self,
         provider: &str,
-    ) -> Result<(Endpoint, Option<Zeroizing<String>>), String> {
+    ) -> Result<(Endpoint, Option<Credential>), String> {
         let label = self.providers.label_of(provider);
         let p = self.providers.get(provider).filter(|p| p.connected);
         let endpoint = p
             .and_then(|p| completion::endpoint(&p.id, p.custom, p.base_url.as_deref()))
             .ok_or_else(|| format!("{label} has no chat address to send to."))?;
-        let key = match &self.store {
-            Some(db) => db.provider_key(provider).map_err(|e| e.to_string())?,
+        let credential = match &self.store {
+            Some(db) => db
+                .provider_credential(provider)
+                .map_err(|e| e.to_string())?,
             None => None,
         };
-        if key.is_none() && !p.is_some_and(|p| p.custom) {
+        if credential.as_ref().is_some_and(Credential::is_subscription)
+            && self.subscription_is_stale(provider)
+        {
             return Err(format!(
-                "{label} has no saved key. Connect it again on the Providers page."
+                "{label}'s Claude Pro/Max sign-in has expired. Disconnect it on the Providers page, then sign in again."
             ));
         }
-        Ok((endpoint, key))
+        if credential.is_none() && !p.is_some_and(|p| p.custom) {
+            return Err(format!(
+                "{label} has no saved sign-in. Connect it again on the Providers page."
+            ));
+        }
+        Ok((endpoint, credential))
+    }
+
+    /// Whether a subscription's access token is close enough to expiry that a request may see it
+    /// run out. The ticker refreshes it; this only catches the gap before the next tick.
+    fn subscription_is_stale(&self, provider: &str) -> bool {
+        let Some(tokens) = self
+            .store
+            .as_ref()
+            .and_then(|db| db.subscription_tokens(provider).ok().flatten())
+        else {
+            return false;
+        };
+        tokens.is_stale(crate::app::now())
     }
 
     /// Asks the model on a worker thread; the reply arrives through [`App::apply`] and the end
@@ -755,18 +774,12 @@ impl App {
         sid: String,
         rid: String,
         endpoint: Endpoint,
-        key: Option<Zeroizing<String>>,
+        credential: Option<Credential>,
         request: crate::guard::Guarded,
         cancel: Arc<AtomicBool>,
     ) {
         let ask = move |emit: &mut dyn FnMut(Event)| {
-            completion::run(
-                &endpoint,
-                key.as_deref().map(String::as_str),
-                &request,
-                &cancel,
-                emit,
-            )
+            completion::run(&endpoint, credential.as_ref(), &request, &cancel, emit)
         };
         match crate::app::handle() {
             Some(handle) => {
@@ -1059,7 +1072,7 @@ impl App {
         if trimmed == 0 {
             return false;
         }
-        let Ok((endpoint, key)) = self.target_for(&model.provider) else {
+        let Ok((endpoint, credential)) = self.target_for(&model.provider) else {
             return false;
         };
         let Some(live) = self.live.get_mut(sid) else {
@@ -1093,7 +1106,7 @@ impl App {
         live.reasoning.clear();
         let (rid, cancel) = (live.run_id.clone(), Arc::clone(&live.cancel));
         self.record(sid, &steps);
-        self.stream(sid.to_owned(), rid, endpoint, key, guarded, cancel);
+        self.stream(sid.to_owned(), rid, endpoint, credential, guarded, cancel);
         true
     }
 
@@ -2124,7 +2137,7 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_with_no_saved_key_says_so_without_asking() {
+    fn a_provider_with_no_saved_sign_in_says_so_without_asking() {
         let mut app = crate::testing::samples();
         crate::testing::ready(&mut app);
         app.composer.edit = TextEdit::new("hello");
@@ -2136,7 +2149,7 @@ mod tests {
         else {
             panic!("failed");
         };
-        assert!(why.contains("no saved key"), "{why}");
+        assert!(why.contains("no saved sign-in"), "{why}");
     }
 
     #[test]

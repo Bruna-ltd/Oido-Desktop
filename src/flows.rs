@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{Map, Value, json};
-use zeroize::Zeroizing;
 
 use crate::app::{App, Route, now};
 use crate::command::{self, Finish};
 use crate::completion::{self, Completion, Endpoint, Request, Turn};
+use crate::credentials::Credential;
 use crate::model::{Message, new_id};
 use crate::models::ModelRef;
 use crate::providers::ModelStatus;
@@ -64,7 +64,7 @@ pub fn trace_of(messages: &[Message]) -> (String, Vec<Trace>) {
 /// What a model call or a run needs, worked out before leaving the UI thread.
 pub(crate) struct Prep {
     pub endpoint: Endpoint,
-    pub key: Option<Zeroizing<String>>,
+    pub credential: Option<Credential>,
     pub model: String,
     pub provider: String,
     /// The provider's name, for saying who failed.
@@ -90,18 +90,13 @@ fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Com
     };
     let mut hidden = crate::guard::Hidden::default();
     let request = p.guard.request(request, &mut hidden);
-    completion::complete(
-        &p.endpoint,
-        p.key.as_deref().map(String::as_str),
-        &request,
-        cancel,
-    )
-    .map(|mut c| {
-        // The step's output stays on this computer, so it carries the real values.
-        c.text = hidden.reveal(&c.text);
-        c
-    })
-    .map_err(|e| e.describe(&p.who))
+    completion::complete(&p.endpoint, p.credential.as_ref(), &request, cancel)
+        .map(|mut c| {
+            // The step's output stays on this computer, so it carries the real values.
+            c.text = hidden.reveal(&c.text);
+            c
+        })
+        .map_err(|e| e.describe(&p.who))
 }
 
 /// Runs the workflow's steps with real tools and a real model. Blocks.
@@ -229,11 +224,11 @@ impl App {
                 agent.name
             ));
         };
-        let (endpoint, key) = self.target_for(&model.provider)?;
+        let (endpoint, credential) = self.target_for(&model.provider)?;
         let workdir = agent.workdir.clone().map(PathBuf::from);
         Ok(Prep {
             endpoint,
-            key,
+            credential,
             who: self.providers.label_of(&model.provider),
             provider: model.provider,
             model: model.id,

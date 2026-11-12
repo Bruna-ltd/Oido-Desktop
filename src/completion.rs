@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::credentials::{
+    CLAUDE_CODE_SYSTEM, CLAUDE_CODE_USER_AGENT, Credential, OAUTH_BETA, TOOL_PREFIX,
+};
 use crate::guard::Guarded;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -306,12 +309,13 @@ const WHOLE_STREAM: Duration = Duration::from_secs(600);
 /// Only a request that has been through the guard can be sent (see [`crate::guard`]).
 pub fn run(
     ep: &Endpoint,
-    key: Option<&str>,
+    credential: Option<&Credential>,
     req: &Guarded,
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(Event),
 ) -> Result<(), Error> {
-    let (url, headers, body) = prepare(ep, key, req.request());
+    let oauth = credential.is_some_and(Credential::is_subscription);
+    let (url, headers, body) = prepare(ep, credential, req.request());
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_response(Some(FIRST_BYTE))
@@ -331,6 +335,8 @@ pub fn run(
     }
     read_stream(
         ep.api,
+        oauth,
+        &req.request().tools,
         BufReader::new(resp.into_body().into_reader()),
         cancel,
         emit,
@@ -347,12 +353,12 @@ pub struct Completion {
 /// Asks and waits for the whole answer. Blocks, so call it from a worker thread.
 pub fn complete(
     ep: &Endpoint,
-    key: Option<&str>,
+    credential: Option<&Credential>,
     req: &Guarded,
     cancel: &AtomicBool,
 ) -> Result<Completion, Error> {
     let mut done = Completion::default();
-    run(ep, key, req, cancel, &mut |ev| match ev {
+    run(ep, credential, req, cancel, &mut |ev| match ev {
         Event::Text(t) => done.text.push_str(&t),
         Event::Usage(t) => done.tokens.update(t),
         Event::Reasoning(_) | Event::ToolCall(_) => {}
@@ -363,23 +369,33 @@ pub fn complete(
 /// The address, headers and body for a request.
 fn prepare(
     ep: &Endpoint,
-    key: Option<&str>,
+    credential: Option<&Credential>,
     req: &Request,
 ) -> (String, Vec<(&'static str, String)>, String) {
     let mut headers = Vec::new();
+    let oauth = credential.is_some_and(Credential::is_subscription);
     let (path, body) = match ep.api {
         Api::OpenAi => {
-            if let Some(k) = key.filter(|k| !k.is_empty()) {
-                headers.push(("Authorization", format!("Bearer {k}")));
+            if let Some(c) = credential.filter(|c| !c.token().is_empty()) {
+                headers.push(("Authorization", format!("Bearer {}", c.token())));
             }
             ("chat/completions", openai_body(ep.thinking, req))
         }
         Api::Anthropic => {
-            if let Some(k) = key {
-                headers.push(("x-api-key", k.to_owned()));
+            match credential {
+                Some(Credential::Subscription(token)) if !token.is_empty() => {
+                    headers.push(("Authorization", format!("Bearer {}", token.as_str())));
+                    headers.push(("anthropic-beta", OAUTH_BETA.to_owned()));
+                    headers.push(("user-agent", CLAUDE_CODE_USER_AGENT.to_owned()));
+                    headers.push(("x-app", "cli".to_owned()));
+                }
+                Some(Credential::Key(key)) if !key.is_empty() => {
+                    headers.push(("x-api-key", key.to_string()));
+                }
+                _ => {}
             }
             headers.push(("anthropic-version", ANTHROPIC_VERSION.to_owned()));
-            ("messages", anthropic_body(req))
+            ("messages", anthropic_body(req, oauth))
         }
     };
     (format!("{}/{path}", ep.base), headers, body.to_string())
@@ -484,7 +500,7 @@ fn openai_body(thinking: Thinking, req: &Request) -> Value {
 
 /// Anthropic wants tool results inside a user message, together with whatever the user says next,
 /// so consecutive user and tool turns become one message.
-fn anthropic_messages(req: &Request) -> Vec<Value> {
+fn anthropic_messages(req: &Request, oauth: bool) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut user_blocks: Vec<Value> = Vec::new();
     let flush = |out: &mut Vec<Value>, blocks: &mut Vec<Value>| {
@@ -513,7 +529,7 @@ fn anthropic_messages(req: &Request) -> Vec<Value> {
                 for c in &t.calls {
                     let input = args_object(&c.args).unwrap_or_else(|| json!({}));
                     blocks.push(
-                        json!({"type": "tool_use", "id": c.id, "name": c.name, "input": input}),
+                        json!({"type": "tool_use", "id": c.id, "name": wire_tool_name(&c.name, oauth), "input": input}),
                     );
                 }
                 out.push(json!({"role": "assistant", "content": blocks}));
@@ -524,7 +540,30 @@ fn anthropic_messages(req: &Request) -> Vec<Value> {
     out
 }
 
-fn anthropic_body(req: &Request) -> Value {
+/// A tool name as the wire takes it. On a subscription Anthropic only runs tools under the `mcp__`
+/// namespace, so every name carries it; the prefix is stripped again from the reply.
+fn wire_tool_name(name: &str, oauth: bool) -> String {
+    if oauth && !name.starts_with(TOOL_PREFIX) {
+        format!("{TOOL_PREFIX}{name}")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// A wire tool name back to the name the app dispatches by. Not every name gets the prefix on the
+/// way out: an MCP tool is already `mcp__<server>__<tool>` and is sent as it is, so the request's
+/// own tool names say which form a reply means. A name not among them is left alone.
+fn app_tool_name(wire: &str, oauth: bool, tools: &[ToolSpec]) -> String {
+    if !oauth || tools.iter().any(|t| t.name == wire) {
+        return wire.to_owned();
+    }
+    match wire.strip_prefix(TOOL_PREFIX) {
+        Some(bare) if tools.iter().any(|t| t.name == bare) => bare.to_owned(),
+        _ => wire.to_owned(),
+    }
+}
+
+fn anthropic_body(req: &Request, oauth: bool) -> Value {
     // Thinking is left off once a tool has been used in the chat: Anthropic would need the
     // earlier thinking blocks sent back with their signatures, which are not kept.
     let used_tools = req.turns.iter().any(|t| !t.calls.is_empty());
@@ -533,14 +572,18 @@ fn anthropic_body(req: &Request) -> Value {
         "model": req.model,
         // Thinking counts toward the limit and the limit must exceed the budget, so the reply keeps its room.
         "max_tokens": REPLY_TOKENS + budget.unwrap_or(0),
-        "messages": anthropic_messages(req),
+        "messages": anthropic_messages(req, oauth),
         "stream": true,
     });
     if let Some(map) = body.as_object_mut() {
+        // OAuth inference must introduce itself as Claude Code, or Anthropic refuses it.
+        let mut system = Vec::new();
+        if oauth {
+            system.push(json!({"type": "text", "text": CLAUDE_CODE_SYSTEM}));
+        }
         // The brief and skills are the same on every message of a chat, so they are marked
         // cacheable: after the first the provider reads them from its cache at a fraction of the
         // price. The context changes each time, so it follows as a block of its own.
-        let mut system = Vec::new();
         if let Some(s) = req.system.as_deref().filter(|s| !s.is_empty()) {
             system.push(json!({"type": "text", "text": s, "cache_control": {"type": "ephemeral"}}));
         }
@@ -554,7 +597,7 @@ fn anthropic_body(req: &Request) -> Value {
             let tools: Vec<Value> = req
                 .tools
                 .iter()
-                .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.schema}))
+                .map(|t| json!({"name": wire_tool_name(&t.name, oauth), "description": t.description, "input_schema": t.schema}))
                 .collect();
             map.insert("tools".into(), json!(tools));
         }
@@ -617,6 +660,8 @@ type Pending = BTreeMap<u64, (String, String, String)>;
 
 fn read_stream(
     api: Api,
+    oauth: bool,
+    tools: &[ToolSpec],
     mut reader: impl BufRead,
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(Event),
@@ -645,7 +690,7 @@ fn read_stream(
         };
         finished |= match api {
             Api::OpenAi => openai_chunk(&v, &mut pending, emit),
-            Api::Anthropic => anthropic_event(&v, &mut pending, emit)?,
+            Api::Anthropic => anthropic_event(&v, oauth, tools, &mut pending, emit)?,
         };
         if finished && api == Api::Anthropic {
             break;
@@ -731,6 +776,8 @@ fn openai_chunk(v: &Value, pending: &mut Pending, emit: &mut dyn FnMut(Event)) -
 /// One Anthropic event. `Ok(true)` when the message is complete; an error event is an `Err`.
 fn anthropic_event(
     v: &Value,
+    oauth: bool,
+    tools: &[ToolSpec],
     pending: &mut Pending,
     emit: &mut dyn FnMut(Event),
 ) -> Result<bool, Error> {
@@ -770,7 +817,8 @@ fn anthropic_event(
                         .unwrap_or_default()
                         .to_owned()
                 };
-                pending.insert(index, (field("id"), field("name"), String::new()));
+                let name = app_tool_name(&field("name"), oauth, tools);
+                pending.insert(index, (field("id"), name, String::new()));
             }
         }
         Some("content_block_delta") => {
@@ -862,7 +910,7 @@ mod tests {
     }
 
     fn body(api: Api, thinking: Thinking, think: Option<Think>) -> Value {
-        let (_, _, b) = prepare(&ep(api, thinking), Some("k"), &req(think));
+        let (_, _, b) = prepare(&ep(api, thinking), Some(&Credential::key("k")), &req(think));
         serde_json::from_str(&b).unwrap()
     }
 
@@ -870,6 +918,8 @@ mod tests {
         let mut events = Vec::new();
         let r = read_stream(
             api,
+            false,
+            &[],
             Cursor::new(stream.to_owned()),
             &AtomicBool::new(false),
             &mut |e| events.push(e),
@@ -913,14 +963,132 @@ mod tests {
     }
 
     #[test]
+    fn a_subscription_introduces_itself_as_claude_code_and_names_every_tool_under_mcp() {
+        let (_, h, raw) = prepare(
+            &ep(Api::Anthropic, Thinking::Budget),
+            Some(&Credential::subscription("sk-ant-oat-1")),
+            &req(None),
+        );
+        assert!(
+            h.contains(&("Authorization", "Bearer sk-ant-oat-1".to_owned())),
+            "{h:?}"
+        );
+        assert!(h.contains(&("x-app", "cli".to_owned())));
+        assert!(
+            h.iter()
+                .any(|(n, v)| *n == "anthropic-beta" && v.contains("oauth-2025-04-20"))
+        );
+        assert!(!h.iter().any(|(n, _)| *n == "x-api-key"));
+        assert!(
+            !raw.contains("sk-ant-oat-1"),
+            "the token stays out of the body"
+        );
+
+        let mut r = req(None);
+        r.tools = vec![ToolSpec {
+            name: "read_file".into(),
+            description: "read".into(),
+            schema: json!({"type": "object"}),
+        }];
+        r.turns = vec![
+            Turn::user("Hi"),
+            Turn::assistant(
+                "",
+                vec![Call {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    args: "{}".into(),
+                }],
+            ),
+            Turn::tool("c1", "done"),
+        ];
+        let b = anthropic_body(&r, true);
+        assert_eq!(b["system"][0]["text"], CLAUDE_CODE_SYSTEM);
+        assert_eq!(b["system"][1]["text"], "Be brief.");
+        assert_eq!(b["tools"][0]["name"], "mcp__read_file");
+        assert_eq!(b["messages"][1]["content"][0]["name"], "mcp__read_file");
+    }
+
+    #[test]
+    fn a_subscriptions_reply_names_the_tools_the_app_knows() {
+        let mut events = Vec::new();
+        let r = read_stream(
+            Api::Anthropic,
+            true,
+            &[ToolSpec {
+                name: "read_file".into(),
+                description: "read".into(),
+                schema: json!({"type": "object"}),
+            }],
+            Cursor::new(
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"mcp__read_file\"}}\n\n\
+                 data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n\
+                 data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                 data: {\"type\":\"message_stop\"}\n\n"
+                    .to_owned(),
+            ),
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+        );
+        assert_eq!(r, Ok(()));
+        assert_eq!(
+            events,
+            vec![Event::ToolCall(Call {
+                id: "t1".into(),
+                name: "read_file".into(),
+                args: "{}".into(),
+            })]
+        );
+    }
+
+    /// A tool of an MCP server is already `mcp__<server>__<tool>` and goes out untouched, so the
+    /// reply must come back untouched too: taking the prefix off would name a tool that is not there.
+    #[test]
+    fn a_subscriptions_mcp_tool_keeps_the_name_the_app_registered() {
+        let mut events = Vec::new();
+        let tools = [ToolSpec {
+            name: "mcp__demo__ping".into(),
+            description: "ping".into(),
+            schema: json!({"type": "object"}),
+        }];
+        let r = read_stream(
+            Api::Anthropic,
+            true,
+            &tools,
+            Cursor::new(
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"mcp__demo__ping\"}}\n\n\
+                 data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n\
+                 data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                 data: {\"type\":\"message_stop\"}\n\n"
+                    .to_owned(),
+            ),
+            &AtomicBool::new(false),
+            &mut |e| events.push(e),
+        );
+        assert_eq!(r, Ok(()));
+        assert_eq!(
+            events,
+            vec![Event::ToolCall(Call {
+                id: "t1".into(),
+                name: "mcp__demo__ping".into(),
+                args: "{}".into(),
+            })]
+        );
+    }
+
+    #[test]
     fn the_key_goes_in_the_header_each_provider_expects_and_nowhere_else() {
-        let (url, h, b) = prepare(&ep(Api::OpenAi, Thinking::None), Some("sk-1"), &req(None));
+        let (url, h, b) = prepare(
+            &ep(Api::OpenAi, Thinking::None),
+            Some(&Credential::key("sk-1")),
+            &req(None),
+        );
         assert_eq!(url, "http://x/v1/chat/completions");
         assert_eq!(h, vec![("Authorization", "Bearer sk-1".to_owned())]);
         assert!(!b.contains("sk-1"));
         let (url, h, _) = prepare(
             &ep(Api::Anthropic, Thinking::Budget),
-            Some("sk-2"),
+            Some(&Credential::key("sk-2")),
             &req(None),
         );
         assert_eq!(url, "http://x/v1/messages");
@@ -1009,6 +1177,8 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let r = read_stream(
             Api::OpenAi,
+            false,
+            &[],
             Cursor::new("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n".to_owned()),
             &cancel,
             &mut |_| {},
@@ -1075,7 +1245,7 @@ mod tests {
         assert_eq!(parts[0], json!({"type": "text", "text": "what is this"}));
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
 
-        let b = anthropic_body(&r);
+        let b = anthropic_body(&r, false);
         let blocks = &b["messages"][0]["content"];
         assert_eq!(blocks[0]["text"], "what is this");
         assert_eq!(
@@ -1090,7 +1260,7 @@ mod tests {
             "image_url"
         );
         assert_eq!(
-            anthropic_body(&r)["messages"][0]["content"][0]["type"],
+            anthropic_body(&r, false)["messages"][0]["content"][0]["type"],
             "image"
         );
     }
@@ -1130,7 +1300,7 @@ mod tests {
         assert_eq!(m[4]["role"], "user");
 
         r.think = Some(Think::High);
-        let b = anthropic_body(&r);
+        let b = anthropic_body(&r, false);
         assert_eq!(b["tools"][0]["input_schema"]["type"], "object");
         let m = b["messages"].as_array().unwrap();
         assert_eq!(
@@ -1207,7 +1377,7 @@ data: {"type":"message_stop"}
             b["messages"][0]["content"],
             "Be brief.\n\n## Context\n- Current date and time: now"
         );
-        let b = anthropic_body(&r);
+        let b = anthropic_body(&r, false);
         let system = b["system"].as_array().unwrap();
         assert_eq!(system.len(), 2);
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
@@ -1223,14 +1393,14 @@ data: {"type":"message_stop"}
         );
 
         r.system = None;
-        let b = anthropic_body(&r);
+        let b = anthropic_body(&r, false);
         assert_eq!(
             b["system"].as_array().unwrap().len(),
             1,
             "context alone still goes"
         );
         r.context = None;
-        assert!(anthropic_body(&r).get("system").is_none());
+        assert!(anthropic_body(&r, false).get("system").is_none());
         assert_eq!(
             openai_body(Thinking::None, &r)["messages"][0]["role"],
             "user"
@@ -1263,7 +1433,7 @@ data: {"type":"message_stop"}
             .collect();
         assert_eq!(sent, [&json!("{}"); 3]);
 
-        let b = anthropic_body(&r);
+        let b = anthropic_body(&r, false);
         let inputs: Vec<&Value> = b["messages"]
             .as_array()
             .unwrap()
