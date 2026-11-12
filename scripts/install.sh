@@ -3,9 +3,9 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Bruna-ltd/Oido-Desktop/main/scripts/install.sh | bash
 #
-# Downloads the binary for this machine and its SHA-256, checks them, and puts the binary at
-# ~/.local/bin/oido-desktop. The first launch adds Oido to the app launcher, and a binary in a
-# folder you can write to updates itself from then on.
+# Downloads the binary for this machine and its SHA-256, checks them, puts the binary at
+# ~/.local/bin/oido-desktop and adds Oido to the app launcher. A binary in a folder you can write
+# to updates itself from then on.
 #
 # OIDO_VERSION=0.2.0   install that release rather than the latest
 # OIDO_INSTALL_DIR=…   install there rather than in ~/.local/bin
@@ -54,11 +54,20 @@ main() {
         die "installed $dir/oido-desktop but it does not start: $version"
     echo "Installed $version at $dir/oido-desktop"
 
+    # --register is 0.2.1's; an older binary would open its window instead, and adds itself to the
+    # launcher at its first launch.
+    if [[ $(printf '%s\n' "${version##* }" 0.2.1 | sort -V | head -1) == 0.2.1 ]]; then
+        "$dir/oido-desktop" --register &&
+            echo "Added Oido to your app launcher." ||
+            echo "Oido will try again to add itself to your app launcher when it first starts."
+    else
+        echo "The first launch adds Oido to your app launcher."
+    fi
+
     case ":$PATH:" in
     *":$dir:"*) echo "Run it with: oido-desktop" ;;
     *) echo "$dir is not on your PATH. Run $dir/oido-desktop, or add it to PATH." ;;
     esac
-    echo "The first launch adds Oido to your app launcher."
 }
 
 main "$@"

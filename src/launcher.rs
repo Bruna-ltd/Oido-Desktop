@@ -15,14 +15,16 @@ pub const APP_ID: &str = "oido-desktop";
 pub const SVG: &[u8] = include_bytes!("../assets/icon/oido-desktop.svg");
 pub const PNG: &[u8] = include_bytes!("../assets/icon/oido-desktop.png");
 
-/// Writes the entry and icon where launchers look, if they are not there already.
+/// Writes the entry and icon where launchers look, if they are not there already; says so on
+/// stderr when it cannot.
 pub fn install() {
-    if let Err(e) = try_install() {
+    if let Err(e) = register() {
         eprintln!("oido: could not add Oido to the app launcher: {e}");
     }
 }
 
-fn try_install() -> io::Result<()> {
+/// `install`, for `--register`, which exits with the error rather than going on without it.
+pub fn register() -> io::Result<()> {
     let Some(data) = dirs::data_dir() else {
         return Ok(());
     };

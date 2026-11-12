@@ -11,6 +11,7 @@ use crate::agents::{Agent, Target};
 use crate::app::{App, Route};
 use crate::model::AgentStatus;
 use crate::theme;
+use crate::update::VERSION;
 
 pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let r = &s.roster;
@@ -54,7 +55,15 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         );
         entries(menu, &m.target, agent).build(k, layer);
     }
-    sb.build(k)
+    // Indented to the rows' own padding, so it lines up with their avatars.
+    sb.footer(
+        row().key("sidebar-version").pl(8.0).child(
+            text(format!("Oido {VERSION}"))
+                .font(k.ty.small)
+                .color(k.c.text_faint),
+        ),
+    )
+    .build(k)
 }
 
 /// Each agent's row, then its team (when unfolded).
