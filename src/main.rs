@@ -74,8 +74,17 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn main() {
-    if std::env::args().skip(1).any(|a| a == "--version") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version") {
         println!("oido-desktop {}", update::VERSION);
+        return;
+    }
+    // Adds Oido to the app launcher and stops, so an install need not open the window to do it.
+    if args.iter().any(|a| a == "--register") {
+        if let Err(e) = launcher::register() {
+            eprintln!("oido: could not add Oido to the app launcher: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     let headless = rune::is_headless();
