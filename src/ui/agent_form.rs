@@ -13,6 +13,9 @@ use crate::theme;
 
 const PAGE: f32 = 720.0;
 
+/// The instructions field stops growing here and scrolls: a long brief must not fill the screen.
+const PROMPT_MAX: f32 = 320.0;
+
 /// Cancel on the left, the one primary action on the right, disabled until the name is in.
 pub fn toolbar(s: &App, k: &Kit, tb: Toolbar) -> Toolbar {
     let (_, submit) = s.form_labels();
@@ -74,6 +77,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 })
                 .label("Instructions")
                 .rows(6)
+                .max_height(PROMPT_MAX)
                 .width(None)
                 .on_edit(|s: &mut App| &mut s.roster.form.prompt)
                 .build(k)

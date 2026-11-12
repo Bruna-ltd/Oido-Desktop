@@ -1009,6 +1009,13 @@ pub static SCENES: &[Scene] = &[
         s.edit_agent(&Target::agent("atlas"));
         s.roster.form.advanced = true;
     }),
+    // A brief far longer than the field: it stops growing and scrolls.
+    ("agent-edit-long", |s| {
+        load_samples(s);
+        s.edit_agent(&Target::agent("atlas"));
+        let line = "Answer billing questions briefly and politely, and never promise a refund.";
+        s.roster.form.prompt = TextEdit::new(vec![line; 40].join(" "));
+    }),
     ("tools-open", |s| {
         load_samples(s);
         s.edit_agent(&Target::agent("atlas"));
