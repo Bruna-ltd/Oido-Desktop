@@ -284,10 +284,7 @@ fn templates(s: &App, k: &Kit) -> El {
 
 /// The muted line under a section's title. It wraps: a long description must stay inside its card.
 fn hint(words: impl Into<String>, k: &Kit) -> El {
-    text(words)
-        .font(k.ty.small)
-        .color(k.c.text_muted)
-        .wrap()
+    text(words).font(k.ty.small).color(k.c.text_muted).wrap()
 }
 
 fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
