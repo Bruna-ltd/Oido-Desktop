@@ -107,19 +107,26 @@ pub(super) fn section(title: &str, count: usize, rows: Vec<El>, k: &Kit) -> El {
     col()
         .w_full()
         .gap(10.0)
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .child(
-                    text(title.to_owned())
-                        .font(k.ty.small_medium)
-                        .color(c.text_muted),
-                )
-                .child(el().grow(1.0))
-                .child(text(count.to_string()).font(k.ty.small).color(c.text_faint)),
-        )
+        .child(section_header(title, count, k))
         .child(group)
+}
+
+/// A section's title with how many it holds at the far end.
+pub(super) fn section_header(title: &str, count: usize, k: &Kit) -> El {
+    row()
+        .w_full()
+        .center_y()
+        .child(
+            text(title.to_owned())
+                .font(k.ty.small_medium)
+                .color(k.c.text_muted),
+        )
+        .child(el().grow(1.0))
+        .child(
+            text(count.to_string())
+                .font(k.ty.small)
+                .color(k.c.text_faint),
+        )
 }
 
 /// The brand tile: the provider's own colour with its initial, like an app icon.

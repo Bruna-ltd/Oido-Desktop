@@ -1,15 +1,20 @@
 //! MCP servers: other programs that give agents tools. Any number can be registered; each one's
 //! tools then show up in an agent's form to be given to it.
 
-use rune::{El, ScrollSpec, col, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextInput};
+use rune::{El, ScrollSpec, col, el, row, text};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Divider, Kit, SegmentedControl, Switch, TextInput,
+};
 
 use super::logo;
-use super::providers::{ghost, names, pill, section, tile};
+use super::providers::{ghost, pill, section_header, tile};
 use crate::app::App;
 use crate::mcp::{Auth, Kind, Preset, Server, Status, Transport};
 
-const PAGE: f32 = 768.0;
+const PAGE: f32 = 960.0;
+/// Servers and presets sit in this many columns.
+const COLUMNS: usize = 2;
+const GAP: f32 = 12.0;
 
 pub fn screen(s: &App, k: &Kit) -> El {
     let c = &k.c;
@@ -25,8 +30,6 @@ pub fn screen(s: &App, k: &Kit) -> El {
             m.matches(&fields)
         })
         .collect();
-    let mut servers: Vec<El> = shown.iter().map(|x| server_row(s, x, k)).collect();
-    servers.push(add_row(s, k));
     let presets: Vec<&Preset> = crate::mcp::PRESETS
         .iter()
         .filter(|p| !m.has_preset(p) && m.matches(&[p.name, p.description, p.url]))
@@ -75,8 +78,22 @@ pub fn screen(s: &App, k: &Kit) -> El {
             .build(k)
             .key("mcp-search"),
     );
-    page = page.child(section("Servers", shown.len(), servers, k));
-    if presets.is_empty() && !m.search.text.trim().is_empty() && shown.is_empty() {
+    page = page.child(add_panel(s, k));
+    if !shown.is_empty() {
+        page = page.child(cards(
+            "Servers",
+            shown.iter().map(|x| server_card(s, x, k)).collect(),
+            k,
+        ));
+    } else if m.servers.is_empty() {
+        page = page.child(
+            text("No servers yet. Add one above, or start from a preset below.")
+                .key("mcp-empty")
+                .font(k.ty.small)
+                .color(c.text_faint)
+                .wrap(),
+        );
+    } else if presets.is_empty() {
         page = page.child(
             text("Nothing matches. Clear the search, or add a server by its address above.")
                 .key("mcp-none")
@@ -86,10 +103,9 @@ pub fn screen(s: &App, k: &Kit) -> El {
         );
     }
     if !presets.is_empty() {
-        page = page.child(section(
+        page = page.child(cards(
             "Quick add",
-            presets.len(),
-            presets.iter().map(|p| preset_row(p, k)).collect(),
+            presets.iter().map(|p| preset_card(p, k)).collect(),
             k,
         ));
     }
@@ -105,8 +121,9 @@ pub fn screen(s: &App, k: &Kit) -> El {
         .child(page)
 }
 
-fn status_line(s: &App, server: &Server) -> String {
-    let state = if s.mcp.busy.contains(&server.id) {
+/// What the server is doing: working, off, or how many tools it gave.
+fn state(s: &App, server: &Server) -> String {
+    if s.mcp.busy.contains(&server.id) {
         "Connecting…".to_owned()
     } else if !server.enabled {
         "Off".to_owned()
@@ -119,29 +136,73 @@ fn status_line(s: &App, server: &Server) -> String {
             },
             Status::Unreachable => "Not reachable".to_owned(),
         }
-    };
-    format!("{state} · {}", server.target())
+    }
 }
 
-fn server_row(s: &App, server: &Server, k: &Kit) -> El {
+/// A titled group of cards in columns.
+fn cards(title: &str, cards: Vec<El>, k: &Kit) -> El {
+    col()
+        .w_full()
+        .gap(10.0)
+        .child(section_header(title, cards.len(), k))
+        .child(
+            col()
+                .w_full()
+                .gap(GAP)
+                .equal_columns(COLUMNS)
+                .children(cards),
+        )
+}
+
+/// A card's frame: the layer a server or preset sits on.
+fn card(k: &Kit) -> El {
+    col()
+        .min_w(0.0)
+        .padding(16.0)
+        .gap(12.0)
+        .radius(k.radius.lg)
+        .border(1.0, k.c.border_muted)
+        .fill(k.c.layer_01)
+}
+
+fn server_card(s: &App, server: &Server, k: &Kit) -> El {
+    let c = &k.c;
     let id = server.id.clone();
     let busy = s.mcp.busy.contains(&id);
     let open = s.mcp.open.as_deref() == Some(id.as_str());
-    let error = (server.status == Status::Unreachable && !busy).then(|| server.detail.clone());
-    let mut head = row()
-        .key(format!("mcp-{id}"))
+    let head = row()
         .w_full()
-        .padding(14.0)
-        .gap(8.0)
+        .gap(12.0)
         .center_y()
         .child(server_tile(server, k))
-        .child(names(
-            &server.name,
-            status_line(s, server),
-            error.as_ref(),
-            k,
-        ));
-    head = head.child({
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text(server.name.clone())
+                        .font(k.ty.ui)
+                        .color(c.text_base)
+                        .truncate(),
+                )
+                .child(
+                    text(state(s, server))
+                        .font(k.ty.small)
+                        .color(c.text_muted)
+                        .truncate(),
+                ),
+        )
+        .child({
+            let toggled = id.clone();
+            Switch::new(server.enabled)
+                .label(format!("Use {}", server.name))
+                .hide_label()
+                .on_toggle(move |s: &mut App| s.mcp_toggle(&toggled))
+                .build(k)
+                .key(format!("mcp-toggle-{id}"))
+        });
+    let mut actions = row().w_full().gap(4.0).center_y().flex_wrap().child({
         let id = id.clone();
         ghost(
             if open { "Hide tools" } else { "Tools" },
@@ -152,7 +213,7 @@ fn server_row(s: &App, server: &Server, k: &Kit) -> El {
     });
     if server.auth == Auth::OAuth {
         let id = id.clone();
-        head = head.child(
+        actions = actions.child(
             Button::new(if busy { "Signing in…" } else { "Sign in" })
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
@@ -162,7 +223,7 @@ fn server_row(s: &App, server: &Server, k: &Kit) -> El {
                 .key(format!("mcp-signin-{}", server.id)),
         );
     }
-    head = head
+    actions = actions
         .child({
             let id = id.clone();
             Button::new(if busy { "Refreshing…" } else { "Refresh" })
@@ -174,19 +235,7 @@ fn server_row(s: &App, server: &Server, k: &Kit) -> El {
                 .build(k)
                 .key(format!("mcp-refresh-{}", server.id))
         })
-        .child({
-            let id = id.clone();
-            ghost(
-                if server.enabled {
-                    "Turn off"
-                } else {
-                    "Turn on"
-                },
-                format!("mcp-toggle-{id}"),
-                k,
-                move |s: &mut App| s.mcp_toggle(&id),
-            )
-        })
+        .child(el().grow(1.0))
         .child({
             let id = id.clone();
             ghost(
@@ -196,7 +245,22 @@ fn server_row(s: &App, server: &Server, k: &Kit) -> El {
                 move |s: &mut App| s.mcp_remove(&id),
             )
         });
-    let mut r = col().w_full().child(k.interactive(head));
+    let mut r = card(k).key(format!("mcp-{id}")).child(head).child(
+        text(server.target())
+            .font(k.ty.small)
+            .color(c.text_faint)
+            .truncate(),
+    );
+    if server.status == Status::Unreachable && !busy {
+        r = r.child(
+            text(server.detail.clone())
+                .key("row-error")
+                .font(k.ty.small)
+                .color(c.danger.fg)
+                .max_lines(3),
+        );
+    }
+    r = r.child(actions);
     if open {
         r = r.child(tools_list(server, k));
     }
@@ -214,7 +278,7 @@ fn server_tile(server: &Server, k: &Kit) -> El {
 
 fn tools_list(server: &Server, k: &Kit) -> El {
     let c = &k.c;
-    let mut list = col().w_full().pl(62.0).pr(14.0).pb(14.0).gap(8.0);
+    let mut list = col().w_full().gap(8.0);
     if server.tools.is_empty() {
         list = list.child(
             text("No tools yet. They appear once the server has been reached.")
@@ -228,51 +292,84 @@ fn tools_list(server: &Server, k: &Kit) -> El {
         list = list.child(
             col()
                 .gap(2.0)
+                .min_w(0.0)
                 .child(
                     text(server.qualified(&t.name))
                         .font(k.ty.mono)
-                        .color(c.text_base),
+                        .color(c.text_base)
+                        .truncate(),
                 )
-                .child(text(first).font(k.ty.small).color(c.text_muted).wrap()),
+                .child(
+                    text(first)
+                        .font(k.ty.small)
+                        .color(c.text_muted)
+                        .max_lines(2),
+                ),
         );
     }
-    list
+    col()
+        .w_full()
+        .gap(12.0)
+        .child(Divider::horizontal().build(k))
+        .child(list)
 }
 
-fn preset_row(p: &Preset, k: &Kit) -> El {
+/// A preset to start from: its name and what it does, and the press that fills the form with it.
+fn preset_card(p: &Preset, k: &Kit) -> El {
     let preset = *p;
+    let c = &k.c;
+    let description = format!(
+        "{}{}",
+        p.description,
+        if p.auth == Auth::OAuth {
+            " Signs in with your browser."
+        } else {
+            ""
+        }
+    );
     k.interactive(
-        row()
+        card(k)
             .key(format!("mcp-preset-{}", p.name))
-            .w_full()
-            .padding(14.0)
-            .gap(12.0)
-            .center_y()
             // The form it fills is at the top of the page; the person is far down it.
             .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
                 s.mcp_use_preset(&preset);
                 tx.scroll_to("mcp", 0.0, 0.0);
             })
             .child(
-                logo::tile(p.url, k)
-                    .unwrap_or_else(|| tile(p.name, crate::providers::SERVER_COLOR, k)),
+                row()
+                    .w_full()
+                    .gap(12.0)
+                    .center_y()
+                    .child(
+                        logo::tile(p.url, k)
+                            .unwrap_or_else(|| tile(p.name, crate::providers::SERVER_COLOR, k)),
+                    )
+                    .child(
+                        text(p.name)
+                            .font(k.ty.ui)
+                            .color(c.text_base)
+                            .truncate()
+                            .grow(1.0),
+                    )
+                    .child(pill("Add", k)),
             )
-            .child(names(
-                p.name,
-                format!(
-                    "{}{}",
-                    p.description,
-                    if p.auth == Auth::OAuth {
-                        " Signs in with your browser."
-                    } else {
-                        ""
-                    }
-                ),
-                None,
-                k,
-            ))
-            .child(pill("Add", k)),
+            .child(
+                text(description)
+                    .font(k.ty.small)
+                    .color(c.text_muted)
+                    .max_lines(3),
+            ),
     )
+}
+
+/// The way in for a server the presets do not have: a row that opens its form below it.
+fn add_panel(s: &App, k: &Kit) -> El {
+    col()
+        .w_full()
+        .radius(k.radius.lg)
+        .border(1.0, k.c.border_muted)
+        .fill(k.c.layer_01)
+        .child(add_row(s, k))
 }
 
 fn add_row(s: &App, k: &Kit) -> El {
@@ -432,6 +529,7 @@ fn form(s: &App, k: &Kit) -> El {
     }
     let mut box_ = col()
         .w_full()
+        .max_w(640.0)
         .pl(62.0)
         .pr(14.0)
         .pb(14.0)
