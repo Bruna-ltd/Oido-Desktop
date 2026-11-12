@@ -408,8 +408,9 @@ impl App {
             return;
         };
         let cancel = self.mcp_begin_sign_in(&server.id);
+        let colors = self.look.colors();
         self.spawn(
-            move || oauth::sign_in(&url, &cancel),
+            move || oauth::sign_in(&url, &cancel, colors),
             move |app, result| {
                 app.mcp_end_sign_in(&server.id);
                 match result {
@@ -438,9 +439,10 @@ impl App {
             return;
         };
         let cancel = self.mcp_begin_sign_in(id);
+        let colors = self.look.colors();
         let id = id.to_owned();
         self.spawn(
-            move || oauth::sign_in(&url, &cancel),
+            move || oauth::sign_in(&url, &cancel, colors),
             move |app, result| {
                 app.mcp_end_sign_in(&id);
                 match result {
