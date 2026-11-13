@@ -19,6 +19,7 @@ mod delegate;
 #[cfg(any(test, debug_assertions))]
 mod demo;
 mod files;
+mod flow_editor;
 mod flows;
 mod folders;
 mod guard;

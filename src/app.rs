@@ -129,6 +129,11 @@ pub struct App {
     pub wf_jobs: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub wf_notice: Option<String>,
     pub wf_confirm: bool,
+    /// The workflow being made or changed, and which of its pop-up lists is open.
+    pub wf_editor: Option<crate::workflow::editor::Editor>,
+    pub wf_menu: Option<crate::workflow::editor::Menu>,
+    /// Stands in for a box that is no longer there when something is typed into it.
+    pub wf_stray: TextEdit,
     pub composer: crate::composer::Composer,
     /// What was typed in the chats not open, by session id: each tab keeps its own draft.
     pub parked: std::collections::HashMap<String, crate::composer::Composer>,
@@ -304,6 +309,9 @@ impl App {
             wf_jobs: std::collections::HashMap::new(),
             wf_notice: None,
             wf_confirm: false,
+            wf_editor: None,
+            wf_menu: None,
+            wf_stray: TextEdit::new(""),
             composer: crate::composer::Composer::new(),
             parked: std::collections::HashMap::new(),
             queued: std::collections::HashMap::new(),

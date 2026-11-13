@@ -429,6 +429,18 @@ pub enum Target {
     When(Loc, usize),
 }
 
+/// Which pop-up list of the editor is open; one at a time.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Menu {
+    Agent,
+    InputKind(usize),
+    /// Add a step at the end of this list.
+    Add(Place),
+    Tool(Loc),
+    /// Names to put into a box.
+    Names(Target),
+}
+
 /// A workflow being made or changed.
 #[derive(Debug)]
 pub struct Editor {
@@ -550,17 +562,27 @@ impl Editor {
     /// Looks again at what is typed and keeps what is wrong with it.
     pub fn check(&mut self) {
         self.problems = self.definition().err().unwrap_or_default();
+        if let Some(why) = self.basics() {
+            self.problems.insert(0, why);
+        }
+    }
+
+    /// What is missing before anything else: a name, and the agent it belongs to.
+    fn basics(&self) -> Option<String> {
         if self.name.text.trim().is_empty() {
-            self.problems
-                .insert(0, "The workflow needs a name.".to_owned());
+            Some("The workflow needs a name.".to_owned())
+        } else if self.agent_id.is_empty() {
+            Some("Choose the agent this workflow belongs to.".to_owned())
+        } else {
+            None
         }
     }
 
     /// The workflow, if it is good to save. `created_at` is for a new one.
     pub fn saved(&self, id: &str, created_at: i64) -> Result<Saved, Vec<String>> {
         let definition = self.definition()?;
-        if self.name.text.trim().is_empty() {
-            return Err(vec!["The workflow needs a name.".to_owned()]);
+        if let Some(why) = self.basics() {
+            return Err(vec![why]);
         }
         Ok(Saved {
             id: id.to_owned(),

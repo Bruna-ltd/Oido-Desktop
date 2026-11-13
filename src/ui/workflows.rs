@@ -5,17 +5,13 @@ use rune::{Color, El, ScrollSpec, col, el, row, text, text_input};
 use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit};
 
 use crate::app::{App, now};
-use crate::workflow::definition::{each_step, outline};
+use crate::workflow::definition::outline;
 use crate::workflow::{RunRecord, RunStatus, Saved};
 
-/// Steps in a workflow, those inside containers counted.
-fn step_count(steps: &[crate::workflow::definition::Step]) -> usize {
-    let mut n = 0;
-    each_step(steps, &mut |_| n += 1);
-    n
-}
-
-pub fn screen(s: &App, k: &Kit) -> El {
+pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    if s.wf_editor.is_some() {
+        return super::workflow_editor::screen(s, k, layer);
+    }
     if s.workflows.is_empty() {
         return empty(k);
     }
@@ -25,6 +21,15 @@ pub fn screen(s: &App, k: &Kit) -> El {
         .h_full()
         .child(list(s, k))
         .child(detail(s, k))
+}
+
+fn new_button(k: &Kit) -> El {
+    Button::new("New workflow")
+        .variant(ButtonVariant::Outline)
+        .control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.new_workflow())
+        .build(k)
+        .key("wf-new")
 }
 
 fn empty(k: &Kit) -> El {
@@ -42,6 +47,7 @@ fn empty(k: &Kit) -> El {
                 .max_w(460.0)
                 .wrap(),
         )
+        .child(new_button(k))
 }
 
 fn list(s: &App, k: &Kit) -> El {
@@ -55,6 +61,7 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+        .child(new_button(k))
         .children(s.workflows.iter().map(|w| item(s, w, k)))
 }
 
@@ -88,7 +95,7 @@ fn item(s: &App, w: &Saved, k: &Kit) -> El {
         .child(
             text(format!(
                 "{agent} · {} steps",
-                step_count(&w.definition.steps)
+                crate::workflow::editor::step_count(&w.definition)
             ))
             .font(k.ty.small)
             .color(c.text_muted)
@@ -246,6 +253,15 @@ fn detail(s: &App, k: &Kit) -> El {
                 .key("wf-run"),
         )
     };
+    actions = actions.child(
+        Button::new("Edit")
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .disabled(running)
+            .on_press(|s: &mut App| s.edit_open_workflow())
+            .build(k)
+            .key("wf-edit"),
+    );
     actions = if s.wf_confirm {
         actions
             .child(
