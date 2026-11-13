@@ -20,6 +20,7 @@ use super::model_picker::ModelPicker;
 use crate::agents::Agent;
 use crate::app::{App, Effort};
 use crate::composer::{Listing, Suggestion, Suggestions, Trigger};
+use crate::model::Message;
 use crate::models::can_think;
 use crate::prompt::Attachment;
 use crate::providers::ModelStatus;
@@ -169,6 +170,9 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
     if let Some(waiting) = s.queued_here() {
         card = card.child(queued(waiting, k));
     }
+    if let Some(at) = s.composer.editing() {
+        card = card.child(editing(s, at, k));
+    }
     if !s.composer.attachments.is_empty() {
         card = card.child(
             row()
@@ -285,6 +289,48 @@ fn queued(waiting: &crate::prompt::Prompt, k: &Kit) -> El {
                 .on_press(|s: &mut App| s.unqueue())
                 .build(k)
                 .key("unqueue"),
+        )
+}
+
+/// What sending a rewritten message does, with a way to leave it be.
+fn editing(s: &App, at: usize, k: &Kit) -> El {
+    let after = s
+        .current()
+        .and_then(|a| a.chat().messages.get(at + 1..))
+        .unwrap_or_default();
+    let ran = after
+        .iter()
+        .any(|m| matches!(m, Message::Assistant { tools, .. } if !tools.is_empty()));
+    let note = match (after.is_empty(), ran) {
+        (true, _) => "Editing your message.",
+        (false, false) => "Editing an earlier message. Sending removes the messages after it.",
+        (false, true) => {
+            "Editing an earlier message. Sending removes the messages after it; what the agent already did stays done."
+        }
+    };
+    row()
+        .key("composer-editing")
+        .w_full()
+        .px(16.0)
+        .pt(10.0)
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(note)
+                .font(k.ty.small)
+                .color(k.c.text_muted)
+                .grow(1.0)
+                .shrink()
+                .wrap(),
+        )
+        .child(
+            Button::new("Cancel")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .help("Leave the message as it was (Esc)")
+                .on_press(|s: &mut App| s.cancel_edit())
+                .build(k)
+                .key("cancel-edit"),
         )
 }
 

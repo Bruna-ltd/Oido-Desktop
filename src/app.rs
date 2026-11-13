@@ -135,6 +135,9 @@ pub struct App {
     /// Messages sent while their chat's agent was still answering, by session id. Each goes when
     /// its chat's reply ends.
     pub queued: std::collections::HashMap<String, crate::prompt::Prompt>,
+    /// The message just copied with its Copy button (chat id and place), and when: its icon shows a
+    /// check for a moment.
+    pub copied: Option<(String, usize, std::time::Instant)>,
     /// The open chat's transcript is scrolled up away from its newest message.
     pub scrolled_up: bool,
     /// The working folder's files, for the composer's `@`.
@@ -308,6 +311,7 @@ impl App {
             parked: std::collections::HashMap::new(),
             queued: std::collections::HashMap::new(),
             file_index: None,
+            copied: None,
             scrolled_up: false,
             answer_text: TextEdit::new(""),
             picks: Vec::new(),
