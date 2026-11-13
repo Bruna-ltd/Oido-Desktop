@@ -1286,6 +1286,14 @@ pub static SCENES: &[Scene] = &[
         ];
         s.route = Route::Workflows;
     }),
+    ("workflow-nested", |s| nested_workflow(s)),
+    ("workflow-editor", |s| {
+        use crate::workflow::editor::Editor;
+        nested_workflow(s);
+        if let Some(w) = s.workflows.first() {
+            s.wf_editor = Some(Editor::from_saved(w));
+        }
+    }),
     ("draft", |s| {
         use crate::workflow::Draft;
         use crate::workflow::definition::{Definition, Step};
@@ -1629,4 +1637,84 @@ fn demo_runs(app: &mut App) {
         timed(last, 4020, 5380),
     ];
     app.record = 5;
+}
+
+/// A workflow with loops and a switch, and a run of it, for the Workflows page.
+fn nested_workflow(s: &mut App) {
+    use crate::workflow::engine::StepLog;
+    use crate::workflow::{RunRecord, RunStatus, Saved};
+    load_samples(s);
+    let w = Saved {
+            id: "w1".into(),
+            agent_id: "atlas".into(),
+            name: "Tidy downloads".into(),
+            goal: "Sorts what is in the folder, one kind at a time.".into(),
+            definition: serde_json::from_value(serde_json::json!({
+                "inputs": {"folder": {"type": "string", "description": "Where to look", "default": "downloads"}},
+                "steps": [
+                    {"id": "ls", "kind": "tool", "tool": "shell", "bind": "files",
+                     "args": {"command": "ls {{inputs.folder}}"}},
+                    {"id": "each", "kind": "for_each", "over": "files.stdout.split(\"\\n\")", "as": "name",
+                     "on_error": "continue",
+                     "steps": [
+                        {"id": "kind", "kind": "switch", "on": "name.split(\".\").pop()",
+                         "cases": [
+                            {"when": "\"pdf\"", "steps": [{"id": "pdf", "kind": "tool", "tool": "shell", "args": {"command": "mv {{name}} docs/"}}]},
+                            {"when": "\"png\"", "steps": [{"id": "png", "kind": "tool", "tool": "shell", "args": {"command": "mv {{name}} pictures/"}}]}],
+                         "default": [{"id": "other", "kind": "tool", "tool": "shell", "args": {"command": "echo skip {{name}}"}}]}]}
+                ],
+                "success": "Every file was looked at."
+            }))
+            .unwrap_or_default(),
+            created_at: app::now(),
+        };
+    s.wf_runs = vec![RunRecord {
+        id: "r1".into(),
+        workflow_id: "w1".into(),
+        started_by: "you".into(),
+        status: RunStatus::Succeeded,
+        inputs: "{}".into(),
+        output: String::new(),
+        failed_step: String::new(),
+        error: String::new(),
+        steps: vec![
+            StepLog {
+                id: "each".into(),
+                kind: "for_each".into(),
+                what: "For each name in files.stdout.split(\"\\n\")".into(),
+                output: "2 rounds".into(),
+                error: None,
+                ms: 40,
+                path: "1".into(),
+                rounds: vec![],
+            },
+            StepLog {
+                id: "kind".into(),
+                kind: "switch".into(),
+                what: "Switch on name.split(\".\").pop()".into(),
+                output: "case 1".into(),
+                error: None,
+                ms: 1,
+                path: "1.body.0".into(),
+                rounds: vec![1],
+            },
+            StepLog {
+                id: "pdf".into(),
+                kind: "tool".into(),
+                what: "shell: `mv a.pdf docs/`".into(),
+                output: String::new(),
+                error: None,
+                ms: 9,
+                path: "1.body.0.case0.0".into(),
+                rounds: vec![1],
+            },
+        ],
+        input_tokens: 0,
+        output_tokens: 0,
+        started_at: app::now() - 300,
+        finished_at: Some(app::now() - 290),
+    }];
+    s.workflows = vec![w.clone()];
+    s.wf_open = Some("w1".into());
+    s.route = Route::Workflows;
 }

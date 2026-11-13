@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13, not built. Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); P2 and P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -204,9 +204,21 @@ is the one non-deterministic tool step and is marked as such.
 | Rhai dependency surprises | Pin the version; engine behind one module so it can be swapped |
 | Taught drafts stay linear | Accepted; `teach_workflow` is not asked to write control flow. Edit in the editor |
 
+## As built in P1
+
+- `while` runs its body first, then repeats while the condition holds, so the condition can read what
+  the body bound (nothing else changes between rounds). A loop still true after `max` rounds fails
+  the run rather than stopping quietly.
+- `index` counts from 0; the run log's round numbers count from 1.
+- `switch` compares by equality only (a whole number equals the same number written with a point).
+- A `set` step's values each see what was there before it, not one another.
+- The editor checks on adding, removing or moving a step, on Save, and on its Check button, not on
+  every keystroke. Tool arguments are one JSON box. A chat draft is saved first, then edited.
+- A step run more than five rounds keeps 200 characters of output instead of 4000.
+
 ## Phases
 
-**P1 — branching, loops, editor.** Rhai module and limits; `if`, `switch`, `set`, `for_each`,
+**P1 — branching, loops, editor (built).** Rhai module and limits; `if`, `switch`, `set`, `for_each`,
 `while`; `{{= expr}}`; nested validation; nested step log and run view; the editor (create, edit,
 validate, delete, open a taught draft). No new tools.
 
