@@ -40,9 +40,13 @@ pub fn summary(args: &str) -> String {
         .unwrap_or_else(|| args.to_owned())
 }
 
-/// Runs a call. Always returns text for the model, errors included.
+/// Runs a call. Always returns text for the model, errors included. A page is untrusted and its
+/// HTML is read by hand: should that ever panic, the call is still answered, or the chat would
+/// wait for it for good.
 pub fn fetch(args: &str) -> String {
-    run(args).unwrap_or_else(|why| format!("Error: {why}"))
+    std::panic::catch_unwind(|| run(args))
+        .unwrap_or_else(|_| Err("the page could not be read.".to_owned()))
+        .unwrap_or_else(|why| format!("Error: {why}"))
 }
 
 fn run(args: &str) -> Result<String, String> {
@@ -197,7 +201,13 @@ pub fn to_text(html: &str) -> String {
             continue;
         }
         let end = tag_end(rest);
-        let tag = &rest[1..end.saturating_sub(1).max(1)];
+        // Without a closing `>` the tag runs to the end of the page, which may end in any character.
+        let close = if rest[..end].ends_with('>') {
+            end - 1
+        } else {
+            end
+        };
+        let tag = &rest[1..close.max(1)];
         rest = &rest[end..];
         let closing = tag.starts_with('/');
         let name: String = tag
@@ -369,7 +379,13 @@ fn decode(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let Some(end) = rest[..rest.len().min(12)].find(';') else {
+        // The `;` must come within a few characters; look by character, as a byte offset could
+        // fall inside a wide one.
+        let Some(end) = rest
+            .char_indices()
+            .take(12)
+            .find_map(|(i, c)| (c == ';').then_some(i))
+        else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -407,6 +423,28 @@ fn decode(s: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entities_and_tags_in_text_with_wide_characters_do_not_panic() {
+        // An `&` followed by multi-byte characters used to cut one in half when looking for `;`.
+        assert_eq!(decode("&中中中中中"), "&中中中中中");
+        assert_eq!(decode("Q&A — 日本語 &amp; ключ"), "Q&A — 日本語 & ключ");
+        // A page cut off inside a tag, ending in a wide character.
+        let cut = to_text("<p>Привет</p><div class=\"é");
+        assert!(cut.contains("Привет"), "{cut}");
+        assert!(to_text("<p>x</p><ж").contains('x'));
+    }
+
+    #[test]
+    fn a_fetched_page_in_another_script_comes_back_as_text() {
+        let page = "<html><title>R&D</title><body><p>Условия & положения — 日本語 &amp; more</p>";
+        let (base, _) = crate::testing::serve_as(vec![(200, "text/html; charset=utf-8", page)]);
+        let told = fetch(&json!({"url": base}).to_string());
+        assert!(
+            told.contains("# R&D") && told.contains("Условия & положения — 日本語 & more"),
+            "{told}"
+        );
+    }
 
     #[test]
     fn a_page_reads_as_text_with_its_title_headings_lists_and_links() {

@@ -1791,8 +1791,7 @@ mod tests {
         let sid = bound(&app);
         said(&mut app);
         // A command still running keeps the chat busy.
-        app.commands
-            .insert(sid.clone(), Arc::new(AtomicBool::new(false)));
+        app.track(&sid, "running");
         write(&mut app, "second");
         assert_eq!(
             app.queued.get(&sid).map(|p| p.text.as_str()),
@@ -2405,8 +2404,7 @@ mod tests {
         app.hear(S, slack_heard("first", thread(), "6.0"), now());
         let sid = app.channels.slack.chats[0].session.clone();
         app.channels.slack.sent.clear();
-        app.commands
-            .insert(sid.clone(), Arc::new(AtomicBool::new(false)));
+        app.track(&sid, "running");
         app.hear(S, slack_heard("second", thread(), "7.0"), now());
         assert!(app.queued.contains_key(&sid));
         let marks = app.channels.slack.working.get(&sid).map(Vec::len);

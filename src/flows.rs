@@ -621,8 +621,7 @@ impl App {
             self.start_next_command(sid);
             return;
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.commands.insert(sid.to_owned(), Arc::clone(&cancel));
+        let cancel = self.track(sid, call_id);
         let (s, c) = (sid.to_owned(), call_id.to_owned());
         let started = self.launch_flow(
             &wf,

@@ -53,6 +53,19 @@ pub struct Live {
     retried: bool,
 }
 
+/// A job running for one of a chat's tool calls, which the chat waits for. Stop ends the wait at
+/// once, whether or not the job can be interrupted: a job that comes back later finds its call
+/// answered already, and is ignored.
+pub struct Running {
+    /// The call it answers.
+    pub call: String,
+    /// Asks the job to end; it ends by itself soon after, or at its time limit.
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// What a job's call is answered with when you stop it before it came back.
+const STOPPED_TOLD: &str = "The person stopped this before it finished.";
+
 /// The messages the model sees: everything since the last divider that was answered in full, with
 /// the tools it called and what came back. After a summary, the summary goes first, then the
 /// messages it kept, then what came after it. Replies that were stopped or failed are left out, so
@@ -195,13 +208,45 @@ impl Live {
 }
 
 impl App {
-    /// Whether the agent is writing a reply, or a summary to make room for one, in any chat.
-    pub(crate) fn writing(&self, agent_id: &str) -> bool {
-        self.live.values().any(|l| l.agent_id == agent_id)
-            || self
-                .summarizing
-                .keys()
-                .any(|sid| self.roster.owner_of(sid).is_some_and(|a| a.id == agent_id))
+    /// Whether agent `agent_id` has work going in any of its chats: a reply or summary being
+    /// written, a job (a command, a fetch, a workflow...) or a task handed to the team that has
+    /// not come back.
+    pub(crate) fn working(&self, agent_id: &str) -> bool {
+        self.roster
+            .agent_ref(agent_id)
+            .is_some_and(|a| a.sessions.iter().any(|s| self.busy_in(&s.id)))
+    }
+
+    /// Shows what the agent is doing: working while it has work, else idle. Waiting for your
+    /// go-ahead stays until that is settled. Call it wherever work may have ended or begun.
+    pub(crate) fn refresh_status(&mut self, agent_id: &str) {
+        let working = self.working(agent_id);
+        if let Some(a) = self
+            .roster
+            .agent_mut(agent_id)
+            .filter(|a| a.status != AgentStatus::Waiting)
+        {
+            a.status = if working {
+                AgentStatus::Running
+            } else {
+                AgentStatus::Idle
+            };
+        }
+    }
+
+    /// [`App::refresh_status`] for the agent that owns chat `sid`.
+    pub(crate) fn refresh_status_of(&mut self, sid: &str) {
+        if let Some(id) = self.roster.owner_of(sid).map(|a| a.id.clone()) {
+            self.refresh_status(&id);
+        }
+    }
+
+    /// How many background processes agent `a` has running, in all its chats.
+    pub fn background_running(&self, a: &crate::agents::Agent) -> usize {
+        a.sessions
+            .iter()
+            .map(|s| self.processes.running_in(&s.id))
+            .sum()
     }
 
     /// Seconds the open chat's reply has been in progress.
@@ -626,12 +671,7 @@ impl App {
             self.begin_in(sid);
             return;
         }
-        if let Some(agent) = self.roster.owner_of(sid).map(|a| a.id.clone())
-            && !self.writing(&agent)
-            && let Some(a) = self.roster.agent_mut(&agent)
-        {
-            a.status = AgentStatus::Idle;
-        }
+        self.refresh_status_of(sid);
         self.send_queued(sid);
         self.fire_settled(sid, Status::Error, failure.as_deref());
     }
@@ -977,17 +1017,14 @@ impl App {
         });
         self.record(sid, &steps.unwrap_or_default());
 
-        let others = self.writing(&live.agent_id);
-        if let Some(agent) = self.roster.agent_mut(&live.agent_id)
-            && !others
-        {
-            agent.status = AgentStatus::Idle;
-        }
         // The calls it asked for run now, once the guard has looked at them: a risky one waits
         // for your go-ahead, and the others with it.
         if status == Status::Ok && !self.review_calls(sid, &live.hidden) {
             self.dispatch_calls(sid);
         }
+        // Idle only if nothing it asked for is running: a command that began is still the agent
+        // at work.
+        self.refresh_status(&live.agent_id);
         // The turn is over (nothing more runs in the chat): a chat carried on from a channel gets
         // what the agent wrote, before a message waiting for it goes.
         let told = !self.busy_in(sid) && self.channel_turn_over(sid, status, failure.as_deref());
@@ -1012,6 +1049,7 @@ impl App {
     /// another, team members side by side.
     pub(crate) fn dispatch_calls(&mut self, sid: &str) {
         self.run_file_tools(sid);
+        self.run_process_calls(sid);
         self.run_teach_calls(sid);
         self.run_schedule_calls(sid);
         self.run_mcp_server_calls(sid);
@@ -1120,15 +1158,17 @@ impl App {
                 let run = t.run.clone();
                 self.save_run(&run, &[]);
             }
-            if let Some(agent) = self.roster.owner_of(sid).map(|a| a.id.clone())
-                && !self.writing(&agent)
-                && let Some(a) = self.roster.agent_mut(&agent)
-            {
-                a.status = AgentStatus::Idle;
-            }
+            self.refresh_status_of(sid);
         }
-        if let Some(flag) = self.commands.get(sid) {
-            flag.store(true, Ordering::Relaxed);
+        self.processes.stop_chat(sid);
+        if let Some(job) = self.commands.get(sid) {
+            job.cancel.store(true, Ordering::Relaxed);
+            let call = job.call.clone();
+            self.command_done(
+                sid,
+                &call,
+                crate::command::Finish::Stopped(STOPPED_TOLD.to_owned()),
+            );
         }
         self.halt_delegations(sid);
         if let Some(live) = self.live.get(sid) {
@@ -1270,6 +1310,19 @@ impl App {
         self.resolve(&sid, &call, text.trim().to_owned(), true);
     }
 
+    /// Notes that chat `sid` is running a job for `call`, and gives the flag that asks it to end.
+    pub(crate) fn track(&mut self, sid: &str, call: &str) -> Arc<AtomicBool> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.commands.insert(
+            sid.to_owned(),
+            Running {
+                call: call.to_owned(),
+                cancel: Arc::clone(&cancel),
+            },
+        );
+        cancel
+    }
+
     /// Starts the first command the agent asked for that has not run, if none is running. Commands
     /// run as soon as they are asked for, one after another, each in the agent's working folder.
     /// Returns whether one started.
@@ -1314,8 +1367,7 @@ impl App {
         }
         if name == crate::web::NAME {
             // A fetch cannot be interrupted, only ended by its time limit; Stop discards it.
-            let cancel = Arc::new(AtomicBool::new(false));
-            self.commands.insert(sid.clone(), Arc::clone(&cancel));
+            let cancel = self.track(&sid, &id);
             self.spawn(
                 move || (crate::web::fetch(&args), cancel.load(Ordering::Relaxed)),
                 move |app, (text, stopped)| {
@@ -1349,8 +1401,18 @@ impl App {
             self.start_next_command(&sid);
             return true;
         }
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.commands.insert(sid.clone(), Arc::clone(&cancel));
+        if spec.background {
+            let told = match self.processes.start(&sid, &spec.command, &dir) {
+                Ok(name) => format!(
+                    "Started in the background as {name}. It keeps running; follow it with the process tool (read, stop, list). It ends when the person stops or closes this chat, or quits Oido."
+                ),
+                Err(why) => format!("Error: {why}"),
+            };
+            self.resolve(&sid, &id, told, true);
+            self.start_next_command(&sid);
+            return true;
+        }
+        let cancel = self.track(&sid, &id);
         self.spawn(
             move || crate::command::run(&spec, &dir, &cancel),
             move |app, finish| app.command_done(&sid, &id, finish),
@@ -1384,8 +1446,7 @@ impl App {
                 return;
             }
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.commands.insert(sid.to_owned(), Arc::clone(&cancel));
+        let cancel = self.track(sid, call_id);
         let (sid, id) = (sid.to_owned(), call_id.to_owned());
         let (name, args) = (name.to_owned(), args.to_owned());
         let root = self
@@ -1442,6 +1503,28 @@ impl App {
         }
     }
 
+    /// Answers the calls of the `process` tool the agent just made, at once: they only look at, or
+    /// end, what this chat started in the background.
+    fn run_process_calls(&mut self, sid: &str) {
+        let calls: Vec<(String, String)> = match self
+            .roster
+            .owner_of(sid)
+            .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
+            .and_then(|s| s.messages.last())
+        {
+            Some(Message::Assistant { tools, .. }) => tools
+                .iter()
+                .filter(|t| t.name == crate::tools::PROCESS && t.output.is_none())
+                .map(|t| (t.id.clone(), t.args.clone()))
+                .collect(),
+            _ => return,
+        };
+        for (id, args) in calls {
+            let told = self.processes.call(sid, &args);
+            self.resolve(sid, &id, told, true);
+        }
+    }
+
     /// Where the chat's agent runs commands: the folder chosen for it, else the home folder.
     pub fn workdir_of(&self, sid: &str) -> std::path::PathBuf {
         self.roster
@@ -1456,6 +1539,10 @@ impl App {
     /// left the agent carries on. If you stopped it, the rest do not run and the chat waits for
     /// you.
     pub(crate) fn command_done(&mut self, sid: &str, call: &str, finish: crate::command::Finish) {
+        // Stopped meanwhile: the call was answered then, and what comes back now is dropped.
+        if self.commands.get(sid).is_none_or(|job| job.call != call) {
+            return;
+        }
         self.commands.remove(sid);
         match finish {
             crate::command::Finish::Done(text) => {
@@ -1467,6 +1554,7 @@ impl App {
                 self.close_commands(sid, "Not run: the person stopped the command before it.");
             }
         }
+        self.refresh_status_of(sid);
     }
 
     /// Gives every command still waiting in the chat's last message `why` as its result.
@@ -2493,6 +2581,125 @@ data: [DONE]
             (2, 1, Status::Ok)
         );
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn stopping_frees_the_chat_at_once_and_what_a_stuck_job_brings_back_later_is_dropped() {
+        use crate::testing::{ask_for, result_of};
+        let db = TempDb::new();
+        let (mut app, _) = app_with_server(&db, vec![]);
+        let sid = ask_for(&mut app, crate::web::NAME, "c1", "{}");
+        let stuck = app.track(&sid, "c1");
+        assert!(app.busy());
+
+        app.stop();
+        assert!(stuck.load(Ordering::Relaxed), "the job is asked to end");
+        assert!(
+            !app.busy() && app.commands.is_empty(),
+            "no waiting for it to notice"
+        );
+        let told = result_of(&app, "c1").unwrap();
+        assert!(told.contains("stopped"), "{told}");
+
+        // The next job in the chat is running when the stuck one finally comes back.
+        let next = app.track(&sid, "c2");
+        app.command_done(&sid, "c1", crate::command::Finish::Done("late page".into()));
+        assert!(app.commands.contains_key(&sid), "the new job is untouched");
+        assert!(!next.load(Ordering::Relaxed));
+        assert_eq!(
+            result_of(&app, "c1").unwrap(),
+            told,
+            "the late page is dropped"
+        );
+    }
+
+    #[test]
+    fn an_agent_is_working_for_as_long_as_a_job_it_started_runs_and_idle_once_it_is_stopped() {
+        use crate::testing::ask_for;
+        let db = TempDb::new();
+        let (mut app, _) = app_with_server(&db, vec![]);
+        let sid = ask_for(&mut app, "shell", "c1", r#"{"command":"true"}"#);
+        let agent_id = app.current().unwrap().id.clone();
+        let model = ModelRef::new("llama-server:box", "llama-3.3-70b");
+        app.live
+            .insert(sid.clone(), Live::new("run-1", &agent_id, model));
+        app.roster.agent_mut(&agent_id).unwrap().status = AgentStatus::Running;
+        // A job of the chat is still out when the reply that asked for another one ends.
+        app.track(&sid, "other");
+
+        app.settle(&sid, "run-1", Ok(()));
+        assert_eq!(
+            app.current().unwrap().status,
+            AgentStatus::Running,
+            "the reply is over, but the agent is still at work"
+        );
+
+        app.command_done(&sid, "other", crate::command::Finish::Stopped("no".into()));
+        assert_eq!(app.current().unwrap().status, AgentStatus::Idle);
+    }
+
+    fn call_as(id: &str, name: &str, args: serde_json::Value) -> &'static str {
+        let chunk = serde_json::json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": id, "function": {"name": name, "arguments": args.to_string()}}]}, "finish_reason": "tool_calls"}]});
+        Box::leak(format!("data: {chunk}\n\ndata: [DONE]\n\n").into_boxed_str())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_command_starts_at_once_is_followed_with_the_process_tool_and_ends_with_stop() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    "text/event-stream",
+                    call_as(
+                        "b1",
+                        "shell",
+                        serde_json::json!({"command": "echo up; sleep 60", "background": true}),
+                    ),
+                ),
+                (
+                    200,
+                    "text/event-stream",
+                    call_as("p1", "process", serde_json::json!({"action": "list"})),
+                ),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        app.composer.edit = TextEdit::new("start the server");
+        app.send();
+        let sid = app.current().unwrap().chat().id.clone();
+        let first = seen.recv().unwrap();
+        assert!(
+            first.contains("\"name\":\"process\"") && first.contains("\"background\""),
+            "both are offered"
+        );
+        let second = seen.recv().unwrap();
+        assert!(
+            second.contains("started in the background as bg1"),
+            "{second}"
+        );
+        let third = seen.recv().unwrap();
+        assert!(third.contains("bg1 running: echo up; sleep 60"), "{third}");
+
+        assert_eq!(app.processes.running_in(&sid), 1, "it runs on");
+        assert_eq!(
+            app.background_running(app.current().unwrap()),
+            1,
+            "and shows"
+        );
+        assert_eq!(
+            app.current().unwrap().status,
+            AgentStatus::Idle,
+            "the turn is over; the screen marks the process, not a turn"
+        );
+        assert!(!app.busy(), "the chat did not wait for it");
+        assert!(matches!(last(&app), Message::Assistant { text, .. } if text == "Hello!"));
+
+        app.stop();
+        assert_eq!(app.processes.running_in(&sid), 0, "Stop ends it too");
+        assert_eq!(app.background_running(app.current().unwrap()), 0);
     }
 
     #[cfg(unix)]

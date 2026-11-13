@@ -108,6 +108,13 @@ pub fn stop(id: &str) {
     }
 }
 
+/// Ends every local server that is running, when the app quits.
+pub fn stop_all() {
+    if let Ok(mut pool) = pool().lock() {
+        pool.clear();
+    }
+}
+
 fn tool_of(v: &Value) -> Option<Tool> {
     Some(Tool {
         name: v["name"].as_str()?.to_owned(),

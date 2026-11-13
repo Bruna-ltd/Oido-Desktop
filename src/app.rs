@@ -93,8 +93,10 @@ pub struct App {
     pub live: std::collections::HashMap<String, crate::run::Live>,
     /// Each chat's latest run, still being recorded while the agent works on what you said.
     pub traces: std::collections::HashMap<String, crate::runs::Trace>,
-    /// Commands running for the shell tool, by chat, with the flag that stops each.
-    pub commands: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Jobs running for a chat's tool call (a command, a fetch, a workflow...), by chat.
+    pub commands: std::collections::HashMap<String, crate::run::Running>,
+    /// Commands the agents started to keep running in the background, followed until they end.
+    pub processes: crate::background::Processes,
     /// Chats whose agent has handed tasks to team members that have not come back yet.
     pub delegating: std::collections::HashMap<String, crate::delegate::Delegating>,
     /// Chats whose older messages are being summarized to make room, with the flag that stops each.
@@ -282,6 +284,7 @@ impl App {
             live: std::collections::HashMap::new(),
             traces: std::collections::HashMap::new(),
             commands: std::collections::HashMap::new(),
+            processes: crate::background::Processes::default(),
             delegating: std::collections::HashMap::new(),
             summarizing: std::collections::HashMap::new(),
             resuming: std::collections::HashSet::new(),

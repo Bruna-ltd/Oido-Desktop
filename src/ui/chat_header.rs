@@ -22,9 +22,18 @@ pub fn build(s: &App, a: &Agent, k: &Kit) -> El {
 }
 
 fn title(s: &App, a: &Agent, k: &Kit) -> El {
+    let background = s.background_running(a);
     let (subtitle, ink) = match a.status {
         AgentStatus::Running => ("Working…".to_owned(), k.c.success.icon),
         AgentStatus::Waiting => ("Waiting for your approval".to_owned(), k.c.warning.icon),
+        // Not in a turn, but something it started is still going.
+        AgentStatus::Idle if background > 0 => (
+            format!(
+                "{background} background process{} running",
+                if background == 1 { "" } else { "es" }
+            ),
+            k.c.success.icon,
+        ),
         // Idle: which model it will answer with, or why it cannot.
         AgentStatus::Idle => match s.providers.status(a.model.as_ref()) {
             ModelStatus::Ready(m) => (s.providers.model_name(&m), k.c.text_muted),

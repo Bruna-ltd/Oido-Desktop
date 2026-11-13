@@ -7,6 +7,7 @@ use crate::completion::ToolSpec;
 
 pub const ASK: &str = "ask_user_question";
 pub const SHELL: &str = "shell";
+pub const PROCESS: &str = "process";
 pub const TEACH: &str = "teach_workflow";
 pub const RUN_WORKFLOW: &str = "run_workflow";
 pub const DELEGATE: &str = "delegate";
@@ -20,6 +21,7 @@ pub fn registered() -> Vec<ToolSpec> {
     let mut all = vec![
         ask(),
         shell(),
+        process(),
         ToolSpec {
             name: TEACH.into(),
             description: "Save what you did in this chat as a reusable workflow: fixed steps that can be run again without planning. Use it when the person asks to save or repeat what you just did. A draft is shown to them to confirm or change; nothing runs until they save it.".into(),
@@ -101,15 +103,31 @@ fn file_tool(name: &'static str, description: &'static str, schema: Value) -> To
 fn shell() -> ToolSpec {
     ToolSpec {
         name: SHELL.into(),
-        description: "Run a shell command on the person's computer and get its output. It runs at once, unless it looks risky (running as administrator, deleting outside the working folder, changing system or login files and the like), when it waits for the person's go-ahead; so keep commands few, focused and easy to read back to the person. It runs with `sh -c` in the agent's working folder (the person's home folder if none is set), cannot read input, and is ended after a time limit. Long output is cut. Do not use it for anything destructive unless they asked for exactly that.".into(),
+        description: "Run a shell command on the person's computer and get its output. It runs at once, unless it looks risky (running as administrator, deleting outside the working folder, changing system or login files and the like), when it waits for the person's go-ahead; so keep commands few, focused and easy to read back to the person. It runs with `sh -c` in the agent's working folder (the person's home folder if none is set), cannot read input, and is ended after a time limit. Long output is cut. For something that should keep running, such as a dev server or a watcher, set `background` to true: it starts at once, without a time limit, and you follow it with the `process` tool. Give it the command alone, with no `&` or `nohup`. Do not use it for anything destructive unless they asked for exactly that.".into(),
         schema: json!({
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The command line to run."},
                 "reason": {"type": "string", "description": "One short sentence on why, shown to the person with the command."},
-                "timeout_secs": {"type": "integer", "description": "Time limit in seconds. Default 30, at most 120."}
+                "timeout_secs": {"type": "integer", "description": "Time limit in seconds. Default 30, at most 120. Ignored for a background command."},
+                "background": {"type": "boolean", "description": "Start the command and carry on without waiting for it to end. It is ended when the person stops the chat or closes it, and when Oido quits."}
             },
             "required": ["command"]
+        }),
+    }
+}
+
+fn process() -> ToolSpec {
+    ToolSpec {
+        name: PROCESS.into(),
+        description: "Follow the commands you started in the background with `shell`. `list` shows them and how each stands. `read` gives one's state and the end of what it printed, so call it again later to see more. `stop` ends it and everything it started. Only this chat's processes can be seen.".into(),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "read", "stop"], "description": "What to do."},
+                "id": {"type": "string", "description": "The process, as `shell` or `list` named it, such as bg1. Not needed for list."}
+            },
+            "required": ["action"]
         }),
     }
 }
@@ -176,6 +194,7 @@ pub fn summary(name: &str, args: &str) -> String {
     match name {
         ASK => question(args).text,
         SHELL => crate::command::parse(args).map_or_else(|| args.to_owned(), |s| s.command),
+        PROCESS => process_summary(args),
         n if crate::files::is_file_tool(n) || n == crate::channels::SEND_FILE => {
             crate::files::path_of(args)
         }
@@ -192,6 +211,20 @@ pub fn summary(name: &str, args: &str) -> String {
         n if needs_typesafe(n) => crate::typesafe::summary(args),
         _ => args.to_owned(),
     }
+}
+
+/// "stop bg1", for a list.
+fn process_summary(args: &str) -> String {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let field = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    format!("{} {}", field("action"), field("id"))
+        .trim()
+        .to_owned()
 }
 
 /// The group the app's own tools are listed under.
@@ -249,6 +282,10 @@ fn own(name: &str) -> Option<(&'static str, &'static str)> {
         SHELL => (
             "Run commands",
             "Runs shell commands on this computer; risky ones wait for your go-ahead.",
+        ),
+        PROCESS => (
+            "Follow background commands",
+            "Lists, reads and stops the commands it started in the background.",
         ),
         TEACH => (
             "Save as a workflow",

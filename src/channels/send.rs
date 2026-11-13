@@ -4,8 +4,7 @@
 //! ends.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use serde_json::{Value, json};
 
@@ -47,8 +46,7 @@ impl App {
             }
             Ok(job) => {
                 let (sid, call) = (sid.to_owned(), call.to_owned());
-                let cancel = Arc::new(AtomicBool::new(false));
-                self.commands.insert(sid.clone(), Arc::clone(&cancel));
+                let cancel = self.track(&sid, &call);
                 self.spawn(
                     move || (job.send(), cancel.load(Ordering::Relaxed)),
                     move |app, (said, stopped)| {

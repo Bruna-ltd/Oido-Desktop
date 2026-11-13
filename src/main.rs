@@ -5,6 +5,7 @@ mod agent_tool;
 mod agents;
 mod app;
 mod avatars;
+mod background;
 mod browser;
 mod channels;
 mod chatgpt;
@@ -118,7 +119,14 @@ fn main() {
     })
     .chrome(chrome)
     // Notifications about finished replies only come while the window is out of sight.
-    .on_focus(|s: &mut App, focused, _| s.focused = focused);
+    .on_focus(|s: &mut App, focused, _| s.focused = focused)
+    // Nothing follows the commands, background processes and local MCP servers once the app is
+    // gone, so they end with it.
+    .on_quit(|s: &mut App, _| {
+        s.processes.stop_all();
+        command::end_all();
+        mcp::client::stop_all();
+    });
     // Worker threads (checking a key, refreshing models) hand their results back through this.
     app::set_handle(app.handle());
     if let Some(claim) = claim {
