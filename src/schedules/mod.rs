@@ -1019,8 +1019,13 @@ mod tests {
         };
         app.save("f", |db| db.insert_fire(&fire));
         app.firing.insert(s.id.clone(), fire);
-        app.commands
-            .insert(sid.clone(), Arc::new(AtomicBool::new(true)));
+        app.commands.insert(
+            sid.clone(),
+            crate::run::Running {
+                call: "c1".into(),
+                cancel: Arc::new(AtomicBool::new(true)),
+            },
+        );
 
         app.command_done(
             &sid,

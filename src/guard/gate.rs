@@ -298,16 +298,12 @@ impl App {
         if self.holding_in(sid) {
             return;
         }
-        let others = self
-            .roster
-            .owner_of(sid)
-            .is_some_and(|a| self.writing(&a.id));
         if let Some(agent) = self.roster.owner_of_mut(sid)
             && agent.status == AgentStatus::Waiting
-            && !others
         {
             agent.status = AgentStatus::Idle;
         }
+        self.refresh_status_of(sid);
         // The calls held together run now, unless the agent already went on without them.
         let same = self
             .roster

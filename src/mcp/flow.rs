@@ -633,8 +633,7 @@ impl App {
                 "the server's saved secrets could not be read.".to_owned(),
             );
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.commands.insert(sid.to_owned(), Arc::clone(&cancel));
+        let cancel = self.track(sid, call_id);
         let (sid, id) = (sid.to_owned(), call_id.to_owned());
         self.spawn(
             move || {

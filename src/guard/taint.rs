@@ -18,7 +18,7 @@ pub fn result_source(name: &str, trust_folder: bool) -> Option<&'static str> {
         None
     } else if name == crate::files::READ {
         Some("a file it read")
-    } else if name == crate::tools::SHELL {
+    } else if name == crate::tools::SHELL || name == crate::tools::PROCESS {
         Some("a command's output")
     } else if name == crate::tools::RUN_WORKFLOW {
         Some("a workflow's result")

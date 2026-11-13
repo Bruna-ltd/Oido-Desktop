@@ -5,13 +5,18 @@
 //!
 //! A command runs through `sh -c` in its own process group, with no input, under a time limit.
 //! Its output is read as it comes and cut at a limit, so a noisy command can neither fill the pipe
-//! and hang nor flood the model.
+//! and hang nor flood the model. One meant to keep running is started in the background instead
+//! (see [`crate::background`]).
+//!
+//! Every process group started here is noted while it runs, so [`end_all`] can end them when the
+//! app quits.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -30,6 +35,8 @@ pub struct Spec {
     /// Why the model wants it, to show you.
     pub reason: String,
     pub timeout: Duration,
+    /// Keep it running after the call returns, followed by [`crate::background`], not waited for.
+    pub background: bool,
 }
 
 /// Reads a call's arguments. `None` when there is no command to run.
@@ -53,6 +60,10 @@ pub fn parse(args: &str) -> Option<Spec> {
             .trim()
             .to_owned(),
         timeout: Duration::from_secs(secs),
+        background: v
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -97,17 +108,60 @@ fn text_of(cap: &Capture) -> (String, bool) {
     )
 }
 
-/// Ends the command and anything it started.
-fn kill(child: &mut std::process::Child) {
+/// `command` as `sh -c` in `dir`: no input, its output piped, in a process group of its own so
+/// that [`end_group`] reaches everything it starts.
+pub(crate) fn shell(command: &str, dir: &Path) -> Command {
+    let mut shell = Command::new("sh");
+    shell
+        .arg("-c")
+        .arg(command)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        shell.process_group(0);
+    }
+    shell
+}
+
+/// Ends the process group `pid` leads, the process and anything it started.
+pub(crate) fn end_group(pid: u32) {
     #[cfg(unix)]
     {
         let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{}", child.id())])
+            .args(["-KILL", &format!("-{pid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Ends the command and anything it started.
+fn kill(child: &mut std::process::Child) {
+    end_group(child.id());
     let _ = child.kill();
+}
+
+/// The process groups of commands running now, to end when the app quits.
+fn running() -> &'static Mutex<HashSet<u32>> {
+    static RUNNING: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    RUNNING.get_or_init(Default::default)
+}
+
+/// Ends every command running now, with what each started.
+pub fn end_all() {
+    let pids: Vec<u32> = running()
+        .lock()
+        .map(|r| r.iter().copied().collect())
+        .unwrap_or_default();
+    for pid in pids {
+        end_group(pid);
+    }
 }
 
 /// What a command did, before it is put into words.
@@ -144,7 +198,7 @@ impl Raw {
             Ended::Exit(Some(code)) => format!("exit code: {code}"),
             Ended::Exit(None) => "The command was ended by a signal.".to_owned(),
             Ended::TimedOut => format!(
-                "The command ran past its {} second limit and was ended.",
+                "The command ran past its {} second limit and was ended. One that should keep running, such as a server, is started with `background` set to true.",
                 self.limit_secs
             ),
             Ended::Stopped => "The person stopped the command before it finished.".to_owned(),
@@ -186,20 +240,10 @@ pub fn run_raw(spec: &Spec, dir: &Path, cancel: &AtomicBool) -> Raw {
         stderr_cut: false,
         limit_secs: spec.timeout.as_secs(),
     };
-    let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg(&spec.command)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+    if spec.background {
+        return failed("Only the agent in a chat can start a background process, not a team member or a workflow.".to_owned());
     }
-    let mut child = match command.spawn() {
+    let mut child = match shell(&spec.command, dir).spawn() {
         Ok(c) => c,
         Err(e) => return failed(format!("The command could not be started: {e}")),
     };
@@ -207,6 +251,9 @@ pub fn run_raw(spec: &Spec, dir: &Path, cancel: &AtomicBool) -> Raw {
         kill(&mut child);
         return failed("The command could not be started: no output pipes.".to_owned());
     };
+    if let Ok(mut r) = running().lock() {
+        r.insert(child.id());
+    }
     let (out, out_thread) = capture(stdout);
     let (err, err_thread) = capture(stderr);
 
@@ -231,6 +278,9 @@ pub fn run_raw(spec: &Spec, dir: &Path, cancel: &AtomicBool) -> Raw {
         std::thread::sleep(Duration::from_millis(25));
     };
     let _ = child.wait();
+    if let Ok(mut r) = running().lock() {
+        r.remove(&child.id());
+    }
     // A process that left the group can hold the pipe open; take what there is after a moment.
     let drained = Instant::now() + DRAIN;
     while Instant::now() < drained && !(out_thread.is_finished() && err_thread.is_finished()) {
@@ -258,6 +308,7 @@ mod tests {
             command: command.into(),
             reason: String::new(),
             timeout: Duration::from_secs(secs),
+            background: false,
         }
     }
 

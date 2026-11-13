@@ -100,6 +100,8 @@ fn agent_row(s: &App, a: &Agent, parent: Option<&str>, k: &Kit, layer: &mut Vec<
     match a.family_status() {
         AgentStatus::Running => r = r.status(RowStatus::Busy),
         AgentStatus::Waiting => r = r.status(RowStatus::Attention),
+        // Between turns, but a process it started is still going.
+        AgentStatus::Idle if s.background_running(a) > 0 => r = r.status(RowStatus::Busy),
         AgentStatus::Idle => {}
     }
     let t = target.clone();

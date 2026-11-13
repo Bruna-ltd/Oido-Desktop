@@ -626,6 +626,11 @@ impl App {
         mut run: Run,
         out: Outcome,
     ) {
+        // Handed back as stopped already (see `hand_back_stopped`): only its run is left to record.
+        let handed_back = self
+            .delegated
+            .get(call_id)
+            .is_some_and(|d| d.ended.is_some());
         let t = out.tokens;
         (run.input_tokens, run.output_tokens) = (t.input, t.output);
         (run.cache_read_tokens, run.cache_write_tokens) = (t.cache_read, t.cache_write);
@@ -650,25 +655,15 @@ impl App {
                 )
             }
         };
-        if let Some(d) = self.delegated.get_mut(call_id) {
-            d.ended = Some(Instant::now());
-            d.text.clear();
-            (d.input, d.output) = (t.input.unwrap_or(0), t.output.unwrap_or(0));
-            for stage in d.stages.iter_mut().filter(|s| s.ended.is_none()) {
-                (stage.ended, stage.ok) = (d.ended, false);
-            }
-            let member_id = d.member_id.clone();
-            let busy = self
-                .delegated
-                .values()
-                .any(|o| o.member_id == member_id && o.ended.is_none());
-            if let Some(member) = self.roster.agent_mut(&member_id).filter(|_| !busy) {
-                member.status = AgentStatus::Idle;
-            }
+        if !handed_back {
+            self.end_card(call_id, (t.input.unwrap_or(0), t.output.unwrap_or(0)));
         }
         self.save_run(&run, &out.steps);
         if self.route == crate::app::Route::Runs {
             self.reload_runs();
+        }
+        if handed_back {
+            return;
         }
         self.release_delegation(sid);
         // Its answer carries what outside text it had in view.
@@ -692,21 +687,13 @@ impl App {
             return;
         }
         self.delegating.remove(sid);
-        let lead = self.roster.owner_of(sid).map(|a| a.id.clone());
-        let working = lead.as_deref().is_some_and(|id| self.writing(id));
-        if let Some(lead) = lead
-            .and_then(|id| self.roster.agent_mut(&id))
-            .filter(|_| !working)
-        {
-            lead.status = AgentStatus::Idle;
-        }
+        self.refresh_status_of(sid);
     }
 
-    /// Stops one handed-over task. Its member's answer becomes "stopped", and the agent goes on.
+    /// Stops one handed-over task. Its member's answer becomes "stopped" at once, and the agent
+    /// goes on.
     pub fn stop_delegation(&mut self, call_id: &str) {
-        if let Some(d) = self.delegated.get(call_id).filter(|d| d.ended.is_none()) {
-            d.cancel.store(true, Ordering::Relaxed);
-        }
+        self.hand_back_stopped(call_id, true);
     }
 
     /// The person stopped the chat: every task it handed over stops, and the agent waits.
@@ -714,12 +701,59 @@ impl App {
         if let Some(d) = self.delegating.get_mut(sid) {
             d.halted = true;
         }
-        for d in self
+        let out: Vec<String> = self
+            .delegated
+            .iter()
+            .filter(|(_, d)| d.sid == sid && d.ended.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in out {
+            self.hand_back_stopped(&id, false);
+        }
+    }
+
+    /// Asks a task's worker to end and answers its call as stopped now, without waiting for it: it
+    /// may be in the middle of a network call that only ends at its time limit. When the worker
+    /// does come back, only its run is recorded (see [`App::delegation_done`]).
+    fn hand_back_stopped(&mut self, call_id: &str, carry_on: bool) {
+        let Some(d) = self.delegated.get(call_id).filter(|d| d.ended.is_none()) else {
+            return;
+        };
+        d.cancel.store(true, Ordering::Relaxed);
+        let (sid, member_id) = (d.sid.clone(), d.member_id.clone());
+        self.end_card(call_id, (d.input, d.output));
+        let name = self
+            .roster
+            .agent_ref(&member_id)
+            .map_or_else(|| "The team member".to_owned(), |a| a.name.clone());
+        self.release_delegation(&sid);
+        self.resolve(
+            &sid,
+            call_id,
+            format!("The person stopped {name} before it finished."),
+            carry_on,
+        );
+    }
+
+    /// Closes a task's card: nothing in it is still going, and its member is free unless it has
+    /// another task out. `used` is the tokens it spent, (input, output).
+    fn end_card(&mut self, call_id: &str, used: (u32, u32)) {
+        let Some(d) = self.delegated.get_mut(call_id) else {
+            return;
+        };
+        d.ended = Some(Instant::now());
+        d.text.clear();
+        (d.input, d.output) = used;
+        for stage in d.stages.iter_mut().filter(|s| s.ended.is_none()) {
+            (stage.ended, stage.ok) = (d.ended, false);
+        }
+        let member_id = d.member_id.clone();
+        let busy = self
             .delegated
             .values()
-            .filter(|d| d.sid == sid && d.ended.is_none())
-        {
-            d.cancel.store(true, Ordering::Relaxed);
+            .any(|o| o.member_id == member_id && o.ended.is_none());
+        if let Some(member) = self.roster.agent_mut(&member_id).filter(|_| !busy) {
+            member.status = AgentStatus::Idle;
         }
     }
 
@@ -806,6 +840,46 @@ mod tests {
         assert!(app.delegated["c1"].text.is_empty());
         app.delegation_note("other-chat", "c1", Note::Model);
         assert_eq!(app.delegated["c1"].stages.len(), 3);
+    }
+
+    #[test]
+    fn stopping_the_chat_answers_its_tasks_at_once_and_a_late_worker_only_has_its_run_recorded() {
+        use crate::testing::{TempDb, app_with_server, ask_for, result_of};
+        let db = TempDb::new();
+        let (mut app, _) = app_with_server(&db, vec![]);
+        let sid = ask_for(&mut app, DELEGATE, "d1", "{}");
+        app.delegated.insert("d1".into(), card(&sid));
+        app.delegating.insert(
+            sid.clone(),
+            Delegating {
+                pending: 1,
+                halted: false,
+            },
+        );
+        assert!(app.busy());
+
+        app.stop();
+        assert!(app.delegated["d1"].cancel.load(Ordering::Relaxed));
+        assert!(!app.busy(), "the lead does not wait for the worker");
+        let told = result_of(&app, "d1").unwrap();
+        assert!(told.contains("stopped"), "{told}");
+
+        // The worker, stuck in a network call, answers long after.
+        let run = Run::new("r1", "m1", "Ann", &sid, ModelRef::new("x", "y"));
+        let late = Outcome {
+            end: End::Done("late answer".into()),
+            outside: None,
+            steps: Vec::new(),
+            tokens: Tokens::default(),
+            ms: 5,
+        };
+        app.delegation_done(&sid, "d1", "Ann", run, late);
+        assert_eq!(
+            result_of(&app, "d1").unwrap(),
+            told,
+            "the late answer is dropped"
+        );
+        assert!(app.delegating.is_empty());
     }
 
     #[test]

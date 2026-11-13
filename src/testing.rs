@@ -27,6 +27,37 @@ pub fn access_token(account: Option<&str>) -> String {
     )
 }
 
+/// Adds a reply to the open chat in which the agent asked for tool `name` as call `id`, and gives
+/// the chat's id. The call has no result yet.
+pub fn ask_for(app: &mut App, name: &str, id: &str, args: &str) -> String {
+    use crate::model::{Message, Outcome, ToolCall};
+    let mut asked = Message::reply("", None, Outcome::Done);
+    if let Message::Assistant { tools, .. } = &mut asked {
+        tools.push(ToolCall {
+            name: name.into(),
+            id: id.into(),
+            args: args.into(),
+            ..Default::default()
+        });
+    }
+    let chat = app
+        .roster
+        .current_mut()
+        .expect("an agent is open")
+        .chat_mut();
+    chat.messages.push(asked);
+    chat.id.clone()
+}
+
+/// What the open chat's last reply says call `id` gave back, once it has.
+pub fn result_of(app: &App, id: &str) -> Option<String> {
+    use crate::model::Message;
+    match app.current()?.chat().messages.last()? {
+        Message::Assistant { tools, .. } => tools.iter().find(|t| t.id == id)?.output.clone(),
+        _ => None,
+    }
+}
+
 /// Serves one canned JSON reply per connection, in order, and reports each request it saw
 /// (lowercased).
 pub fn serve(replies: Vec<(u16, &'static str)>) -> (String, mpsc::Receiver<String>) {
