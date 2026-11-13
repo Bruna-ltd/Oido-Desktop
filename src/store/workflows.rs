@@ -298,6 +298,8 @@ mod tests {
             output: "o".into(),
             error: Some("boom".into()),
             ms: 3,
+            path: "0.then.1".into(),
+            rounds: vec![2],
         }];
         db.finish_workflow_run(&done).unwrap();
         assert_eq!(db.list_workflow_runs("w1", 10).unwrap(), vec![done]);

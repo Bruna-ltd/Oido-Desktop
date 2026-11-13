@@ -6,6 +6,7 @@
 pub mod compile;
 pub mod definition;
 pub mod engine;
+pub mod expr;
 pub mod template;
 
 use definition::Definition;

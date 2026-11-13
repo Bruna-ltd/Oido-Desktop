@@ -1238,6 +1238,8 @@ pub static SCENES: &[Scene] = &[
             output: out.into(),
             error: err.map(str::to_owned),
             ms: 120,
+            path: String::new(),
+            rounds: Vec::new(),
         };
         s.wf_runs = vec![
             RunRecord {

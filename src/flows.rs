@@ -183,7 +183,7 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> O
         &Env {
             tool: &tool,
             model: &model,
-            cancel,
+            cancel: stop,
         },
     )
 }
