@@ -5,8 +5,15 @@ use rune::{Color, El, ScrollSpec, col, el, row, text, text_input};
 use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit};
 
 use crate::app::{App, now};
-use crate::workflow::definition::describe;
+use crate::workflow::definition::{each_step, outline};
 use crate::workflow::{RunRecord, RunStatus, Saved};
+
+/// Steps in a workflow, those inside containers counted.
+fn step_count(steps: &[crate::workflow::definition::Step]) -> usize {
+    let mut n = 0;
+    each_step(steps, &mut |_| n += 1);
+    n
+}
 
 pub fn screen(s: &App, k: &Kit) -> El {
     if s.workflows.is_empty() {
@@ -79,10 +86,13 @@ fn item(s: &App, w: &Saved, k: &Kit) -> El {
                 .truncate(),
         )
         .child(
-            text(format!("{agent} · {} steps", w.definition.steps.len()))
-                .font(k.ty.small)
-                .color(c.text_muted)
-                .truncate(),
+            text(format!(
+                "{agent} · {} steps",
+                step_count(&w.definition.steps)
+            ))
+            .font(k.ty.small)
+            .color(c.text_muted)
+            .truncate(),
         );
     k.interactive(e)
 }
@@ -137,11 +147,20 @@ fn detail(s: &App, k: &Kit) -> El {
                 .wrap(),
         );
     }
-    out = out.children(w.definition.steps.iter().enumerate().map(|(i, st)| {
-        text(format!("{}. {}", i + 1, describe(st)))
+    let mut n = 0;
+    out = out.children(outline(&w.definition.steps).into_iter().map(|r| {
+        // Steps in the first level are numbered; what is inside them is indented under them.
+        let label = if r.path.contains('.') {
+            r.label
+        } else {
+            n += 1;
+            format!("{n}. {}", r.label)
+        };
+        text(label)
             .font(k.ty.small)
             .color(c.text_base)
             .wrap()
+            .pl(r.depth as f32 * 16.0)
     }));
     if !w.definition.success.is_empty() {
         out = out.child(
@@ -331,11 +350,16 @@ fn run_detail(r: &RunRecord, k: &Kit) -> El {
         );
     }
     for (i, st) in r.steps.iter().enumerate() {
+        let note = st
+            .round_note()
+            .map_or(String::new(), |n| format!("  ({n})"));
+        let indent = st.depth() as f32 * 16.0;
         out = out.child(
-            text(format!("{}. {}", i + 1, st.what))
+            text(format!("{}. {}{note}", i + 1, st.what))
                 .font(k.ty.small)
                 .color(c.text_base)
-                .wrap(),
+                .wrap()
+                .pl(indent),
         );
         let shown = st.error.clone().unwrap_or_else(|| st.output.clone());
         if !shown.is_empty() {
@@ -349,6 +373,7 @@ fn run_detail(r: &RunRecord, k: &Kit) -> El {
                         c.text_faint
                     })
                     .wrap()
+                    .pl(indent)
                     .selectable(true),
             );
         }

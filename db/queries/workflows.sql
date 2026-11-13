@@ -2,6 +2,10 @@
 INSERT INTO workflows (id, agent_id, name, goal, definition, created_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6);
 
+-- The editor saves a workflow's name, goal and steps; its agent and runs stay.
+-- name: UpdateWorkflow :exec
+UPDATE workflows SET name = ?2, goal = ?3, definition = ?4 WHERE id = ?1;
+
 -- name: ListWorkflows :many
 SELECT id, agent_id, name, goal, definition, created_at FROM workflows ORDER BY name COLLATE NOCASE, rowid;
 

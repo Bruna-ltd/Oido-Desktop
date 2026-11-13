@@ -88,6 +88,34 @@ pub struct StepLog {
     pub rounds: Vec<u32>,
 }
 
+impl StepLog {
+    /// How many containers the step is inside, for indenting the log.
+    pub fn depth(&self) -> usize {
+        if self.path.is_empty() {
+            0
+        } else {
+            self.path.split('.').count().saturating_sub(1) / 2
+        }
+    }
+
+    /// "round 2" or "round 3 of the inner, 2 of the outer": where in its loops it ran.
+    pub fn round_note(&self) -> Option<String> {
+        let (last, outer) = self.rounds.split_last()?;
+        Some(match outer {
+            [] => format!("round {last}"),
+            _ => format!(
+                "round {}",
+                outer
+                    .iter()
+                    .chain(std::iter::once(last))
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Ending {
     Succeeded,
@@ -1021,5 +1049,32 @@ mod tests {
         let log: StepLog = serde_json::from_str(old).unwrap();
         assert_eq!((log.path.as_str(), log.rounds.len()), ("", 0));
         assert_eq!(serde_json::to_string(&log).unwrap(), old);
+    }
+
+    #[test]
+    fn a_log_line_knows_how_deep_it_is_and_which_round_it_ran() {
+        let at = |path: &str, rounds: Vec<u32>| StepLog {
+            id: "x".into(),
+            kind: "tool".into(),
+            what: String::new(),
+            output: String::new(),
+            error: None,
+            ms: 0,
+            path: path.into(),
+            rounds,
+        };
+        assert_eq!(at("", vec![]).depth(), 0);
+        assert_eq!(at("3", vec![]).depth(), 0);
+        assert_eq!(at("1.then.0", vec![]).depth(), 1);
+        assert_eq!(at("1.then.0.body.4", vec![2]).depth(), 2);
+        assert_eq!(at("0.body.0", vec![]).round_note(), None);
+        assert_eq!(
+            at("0.body.0", vec![2]).round_note().as_deref(),
+            Some("round 2")
+        );
+        assert_eq!(
+            at("0.body.0.body.0", vec![2, 3]).round_note().as_deref(),
+            Some("round 2.3")
+        );
     }
 }

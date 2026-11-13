@@ -23,6 +23,19 @@ impl Store {
         Ok(())
     }
 
+    /// Saves what the editor changed: the name, the goal and the steps.
+    pub fn update_workflow(&self, w: &Saved) -> Result<()> {
+        self.conn
+            .prepare_cached(self.sql("UpdateWorkflow")?)?
+            .execute((
+                &w.id,
+                &w.name,
+                &w.goal,
+                serde_json::to_string(&w.definition)?,
+            ))?;
+        Ok(())
+    }
+
     pub fn list_workflows(&self) -> Result<Vec<Saved>> {
         let mut stmt = self.conn.prepare_cached(self.sql("ListWorkflows")?)?;
         let rows = stmt.query_map([], |r| {
@@ -337,5 +350,33 @@ mod tests {
         assert_eq!(runs[0].status, RunStatus::Failed);
         assert!(runs[0].error.contains("closed"));
         assert_eq!(runs[1].status, RunStatus::Succeeded);
+    }
+
+    #[test]
+    fn editing_a_workflow_keeps_its_agent_its_runs_and_when_it_was_made() {
+        let (db, agent, _) = store_with_agent();
+        db.insert_workflow(&saved(&agent)).unwrap();
+        db.start_workflow_run(&run(RunStatus::Running, 7)).unwrap();
+        let mut w = saved(&agent);
+        w.name = "Weekly".into();
+        w.goal = "Better.".into();
+        w.created_at = 99;
+        w.definition.steps[0].instruction = Some("changed".into());
+        db.update_workflow(&w).unwrap();
+        let got = db.list_workflows().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (
+                got[0].name.as_str(),
+                got[0].goal.as_str(),
+                got[0].created_at
+            ),
+            ("Weekly", "Better.", 5)
+        );
+        assert_eq!(
+            got[0].definition.steps[0].instruction.as_deref(),
+            Some("changed")
+        );
+        assert_eq!(db.list_workflow_runs("w1", 10).unwrap().len(), 1);
     }
 }
