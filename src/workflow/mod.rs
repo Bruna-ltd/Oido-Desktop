@@ -7,6 +7,7 @@ pub mod compile;
 pub mod definition;
 pub mod editor;
 pub mod engine;
+pub mod examples;
 pub mod expr;
 pub mod layout;
 pub mod pause;

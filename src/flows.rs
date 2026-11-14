@@ -1725,6 +1725,90 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn the_example_workflows_are_added_once_and_the_ones_that_need_no_model_run() {
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(&db, vec![]);
+        app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        app.go(Route::Workflows);
+        app.add_examples();
+        let total = crate::workflow::examples::all().len();
+        assert_eq!(app.workflows.len(), total);
+        assert!(
+            app.wf_notice.as_deref().unwrap().contains("Added"),
+            "{:?}",
+            app.wf_notice
+        );
+        app.add_examples();
+        assert_eq!(app.workflows.len(), total, "none twice");
+        assert!(app.wf_notice.as_deref().unwrap().contains("already"));
+        // They are still there after a restart, and belong to the agent.
+        let mut later = db.open();
+        later.load_workflows();
+        assert_eq!(later.workflows.len(), total);
+
+        let mut run = |app: &mut App, name: &str| {
+            let id = app
+                .workflows
+                .iter()
+                .find(|w| w.name == name)
+                .unwrap()
+                .id
+                .clone();
+            app.select_workflow(&id);
+            app.run_open_workflow();
+            (id, app.wf_runs[0].clone())
+        };
+        let (_, greet) = run(&mut app, "Example: greet three");
+        assert_eq!(greet.status, RunStatus::Succeeded, "{}", greet.error);
+        for who in ["hello Ann", "hello Bo", "hello Cy"] {
+            assert!(greet.output.contains(who), "{}", greet.output);
+        }
+        let began = std::time::Instant::now();
+        let (_, at_once) = run(&mut app, "Example: three things at once");
+        assert_eq!(at_once.status, RunStatus::Succeeded, "{}", at_once.error);
+        assert!(
+            at_once.output.contains("first, second, third"),
+            "{}",
+            at_once.output
+        );
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(2600),
+            "{:?}",
+            began.elapsed()
+        );
+        let (_, retry) = run(&mut app, "Example: retry and recover");
+        assert_eq!(retry.status, RunStatus::Succeeded, "{}", retry.error);
+        assert!(
+            retry.output.starts_with("it worked") || retry.output.starts_with("gave up"),
+            "{}",
+            retry.output
+        );
+        let (_, sorted) = run(&mut app, "Example: sort files (dry run)");
+        assert_eq!(sorted.status, RunStatus::Succeeded, "{}", sorted.error);
+
+        // It asks before the last step, and goes on when answered.
+        let (id, asked) = run(&mut app, "Example: ask before it goes");
+        assert_eq!(asked.status, RunStatus::Waiting, "{}", asked.error);
+        assert!(
+            asked
+                .pause
+                .as_ref()
+                .unwrap()
+                .prompt
+                .contains("report ready")
+        );
+        app.answer_wait(&id, &asked.id, Decision::Go, true);
+        assert_eq!(
+            app.wf_runs[0].status,
+            RunStatus::Succeeded,
+            "{}",
+            app.wf_runs[0].error
+        );
+        assert!(app.wf_runs[0].output.contains("sent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_failing_step_ends_the_run_and_says_where_and_why_without_asking_the_model() {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![]);

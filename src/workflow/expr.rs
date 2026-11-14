@@ -42,6 +42,9 @@ fn base() -> Engine {
     engine.disable_symbol("eval");
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
+    // Rhai's own `trim` cuts the string it is called on and gives back nothing, so
+    // `out.stdout.trim()` is empty; this gives the trimmed text and leaves the value alone.
+    engine.register_fn("trimmed", |text: &str| text.trim().to_owned());
     engine
 }
 
@@ -322,5 +325,33 @@ mod tests {
         assert!(check_script(&["inputs"], "let a = nope; a").is_err());
         assert!(check_script(&["inputs"], "let a = ").is_err());
         assert!(check_script(&["inputs"], "").unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn trimmed_gives_the_text_without_its_ends_where_rhais_own_trim_gives_nothing() {
+        let e = ev();
+        let s = Scope::from([("out".to_owned(), json!({"stdout": "  hi there\n"}))]);
+        assert_eq!(
+            e.eval(&s, "out.stdout.trimmed()").unwrap(),
+            json!("hi there")
+        );
+        assert_eq!(
+            e.eval(&s, "out.stdout.trimmed().split(\" \")").unwrap(),
+            json!(["hi", "there"])
+        );
+        assert_eq!(
+            e.eval(&s, "out.stdout").unwrap(),
+            json!("  hi there\n"),
+            "the value is untouched"
+        );
+        assert_eq!(
+            e.eval(&s, "out.stdout.trim()").unwrap(),
+            Value::Null,
+            "which is why `trimmed` is here"
+        );
+        assert_eq!(
+            e.run(&s, "let t = out.stdout.trimmed(); t.len()").unwrap(),
+            json!(8)
+        );
     }
 }

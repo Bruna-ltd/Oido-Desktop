@@ -14,7 +14,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         return super::workflow_editor::screen(s, k, layer);
     }
     if s.workflows.is_empty() {
-        return empty(k);
+        return empty(s, k);
     }
     row()
         .key("workflows")
@@ -33,7 +33,27 @@ fn new_button(k: &Kit) -> El {
         .key("wf-new")
 }
 
-fn empty(k: &Kit) -> El {
+fn examples_button(k: &Kit) -> El {
+    Button::new("Add examples")
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.add_examples())
+        .build(k)
+        .key("wf-examples")
+}
+
+/// What the last press said, if anything.
+fn notice(s: &App, k: &Kit) -> Option<El> {
+    s.wf_notice.as_ref().map(|why| {
+        text(why.clone())
+            .font(k.ty.small)
+            .color(k.c.text_muted)
+            .max_w(460.0)
+            .wrap()
+    })
+}
+
+fn empty(s: &App, k: &Kit) -> El {
     col()
         .key("workflows-empty")
         .w_full()
@@ -42,13 +62,19 @@ fn empty(k: &Kit) -> El {
         .gap(6.0)
         .child(text("No workflows yet").font(k.ty.body_medium).color(k.c.text_base))
         .child(
-            text("Have an agent do something with its tools, then press Save as workflow above the chat. It becomes steps you can run again.")
+            text("Have an agent do something with its tools, then press Save as workflow above the chat. It becomes steps you can run again. Or add a few examples to try the builder on.")
                 .font(k.ty.small)
                 .color(k.c.text_muted)
                 .max_w(460.0)
                 .wrap(),
         )
-        .child(new_button(k))
+        .child(
+            row()
+                .gap(8.0)
+                .child(new_button(k))
+                .child(examples_button(k)),
+        )
+        .children(notice(s, k))
 }
 
 fn list(s: &App, k: &Kit) -> El {
@@ -63,6 +89,8 @@ fn list(s: &App, k: &Kit) -> El {
             stick_bottom: false,
         })
         .child(new_button(k))
+        .child(examples_button(k))
+        .children(notice(s, k))
         .children(s.workflows.iter().map(|w| item(s, w, k)))
 }
 

@@ -503,3 +503,15 @@ Left out on purpose: a minimap, colour per kind of step, a permanent palette col
 - **Graph is now the view the editor opens on**, as the plan said once it could show a run; Cards is
   one press away and keeps working.
 
+## Examples and a trap in the expression language
+
+- **Add examples.** On the Workflows page, Add examples puts seven small workflows (`workflow/examples.rs`)
+  on the open agent, skipping any it already has by name: sort files (dry run), retry and recover, three
+  things at once, ask before it goes, model steps, greet, and greet three (which runs greet). Between
+  them they use every kind of step but `while` and `delegate`. They run only `echo`, `ls`, `sleep` and
+  `date` and change nothing; a test holds them to that, and runs six of them through the app.
+- **`trimmed()`.** Rhai's own `trim()` cuts the string it is called on and gives back nothing, so
+  `out.stdout.trim()` is empty and `out.stdout.trim().split("\n")` fails. Expressions, `{{= … }}` and
+  scripts have `trimmed()` instead, which gives the trimmed text and leaves the value alone
+  (`files.stdout.trimmed().split("\n")`). The same holds for any Rhai method that edits in place.
+

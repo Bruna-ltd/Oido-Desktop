@@ -61,6 +61,47 @@ impl App {
             .collect()
     }
 
+    /// Adds the example workflows to the open agent (or the first), except any it already has by
+    /// name, and says how many it added. They only run harmless commands, to try the builder on.
+    pub fn add_examples(&mut self) {
+        let Some((agent_id, agent_name)) = self
+            .roster
+            .current()
+            .or_else(|| self.roster.list.first())
+            .map(|a| (a.id.clone(), a.name.clone()))
+        else {
+            self.wf_notice = Some("Make an agent first: a workflow belongs to one.".to_owned());
+            return;
+        };
+        let have: Vec<String> = self
+            .workflows
+            .iter()
+            .filter(|w| w.agent_id == agent_id)
+            .map(|w| w.name.to_lowercase())
+            .collect();
+        let mut added = 0;
+        for e in crate::workflow::examples::all() {
+            if have.contains(&e.name.to_lowercase()) {
+                continue;
+            }
+            let w = crate::workflow::Saved {
+                id: new_id(),
+                agent_id: agent_id.clone(),
+                name: e.name.to_owned(),
+                goal: e.goal.to_owned(),
+                definition: e.definition,
+                created_at: now(),
+            };
+            self.save("the workflow", |db| db.insert_workflow(&w));
+            added += 1;
+        }
+        self.reload_workflows();
+        self.wf_notice = Some(match added {
+            0 => format!("{agent_name} already has the examples."),
+            n => format!("Added {n} example workflows to {agent_name}."),
+        });
+    }
+
     /// Opens the editor on a new workflow, for the first agent until another is chosen.
     pub fn new_workflow(&mut self) {
         let agent = self
