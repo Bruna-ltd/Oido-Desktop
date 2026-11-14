@@ -468,10 +468,20 @@ fn card(s: &App, ed: &Editor, at: &Loc, n: &Node, len: usize, k: &Kit, layer: &m
 
     if n.kind == crate::workflow::definition::TOOL {
         let tool_at = at.clone();
+        // The built-in tools, then those of the MCP servers that are on, and the one this step
+        // already names if its server is not.
+        let mut tools: Vec<String> = STEP_TOOLS.iter().map(|t| (*t).to_owned()).collect();
+        for server in s.mcp.servers.iter().filter(|m| m.offers()) {
+            tools.extend(server.tools.iter().map(|t| server.qualified(&t.name)));
+        }
+        if !n.tool.is_empty() && !tools.contains(&n.tool) {
+            tools.push(n.tool.clone());
+        }
+        let tools: Vec<&str> = tools.iter().map(String::as_str).collect();
         out = out.child(row().child(pick(
             format!("wfe-tool-{key}"),
             Menu::Tool(at.clone()),
-            &STEP_TOOLS,
+            &tools,
             Some(&n.tool),
             "Tool",
             true,

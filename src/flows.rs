@@ -77,7 +77,25 @@ pub(crate) struct Prep {
     pub guard: crate::guard::Guard,
     /// Who a call a rule questions is put to, since nobody watches the work.
     pub asker: crate::guard::ask::Asker,
+    /// Whether the agent's working folder counts as the person's own, so what is read from it is
+    /// not outside text.
+    pub trust_folder: bool,
+    /// The MCP tools the workflow calls, each with how to reach its server.
+    pub mcp: Vec<McpTool>,
 }
+
+/// An MCP tool a workflow step calls.
+pub(crate) struct McpTool {
+    /// The name a step uses: `mcp__server__tool`.
+    pub name: String,
+    /// The name the server knows it by.
+    pub tool: String,
+    pub target: crate::mcp::client::Target,
+}
+
+/// What a run gave back: how it went, and the sign-in tokens MCP servers renewed on the way, to be
+/// saved.
+type Ran = (Outcome, Vec<(String, crate::mcp::oauth::Tokens)>);
 
 fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Completion, String> {
     let request = Request {
@@ -100,20 +118,21 @@ fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Com
 }
 
 /// Runs the workflow's steps with real tools and a real model. Blocks.
-fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> Outcome {
+fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> Ran {
+    let renewed = std::sync::Mutex::new(Vec::new());
     let cancel: &AtomicBool = stop;
     let place = crate::guard::Place {
         root: p.shell_dir.clone(),
         home: dirs::home_dir(),
     };
-    let tool = |name: &str, args: &Value| -> ToolOutcome {
+    let run_tool = |name: &str, args: &Value, outside: Option<&str>| -> ToolOutcome {
         // A step is one you saved, not one a model chose, so outside text does not hold it.
         let (_, found) = p.guard.review(
             &crate::guard::Hidden::default(),
             name,
             &args.to_string(),
             &place,
-            None,
+            outside,
         );
         if let Some(f) = found {
             let (_, refused) =
@@ -122,14 +141,33 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> O
                 return ToolOutcome {
                     value: Value::Null,
                     error: Some(told),
+                    ..ToolOutcome::default()
                 };
             }
+        }
+        if let Some(m) = p.mcp.iter().find(|m| m.name == name) {
+            let done =
+                crate::mcp::client::call_tool(m.target.clone(), &m.tool, args.clone(), cancel);
+            if let (Some(tokens), Ok(mut kept)) = (done.tokens, renewed.lock()) {
+                kept.push((m.target.id.clone(), tokens));
+            }
+            return match done.result {
+                Ok(text) => ToolOutcome {
+                    value: Value::String(text),
+                    ..ToolOutcome::default()
+                },
+                Err(why) => ToolOutcome {
+                    error: Some(why),
+                    ..ToolOutcome::default()
+                },
+            };
         }
         if name == crate::tools::SHELL {
             let Some(spec) = command::parse(&args.to_string()) else {
                 return ToolOutcome {
                     value: Value::Null,
                     error: Some("No command was given.".to_owned()),
+                    ..ToolOutcome::default()
                 };
             };
             let raw = command::run_raw(&spec, &p.shell_dir, cancel);
@@ -140,6 +178,7 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> O
                     "stderr": raw.stderr,
                 }),
                 error: (!raw.succeeded()).then(|| raw.text()),
+                ..ToolOutcome::default()
             };
         }
         if name == crate::web::NAME {
@@ -148,12 +187,14 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> O
             return ToolOutcome {
                 value: Value::String(text),
                 error,
+                ..ToolOutcome::default()
             };
         }
         let Some(root) = &p.workdir else {
             return ToolOutcome {
                 value: Value::Null,
                 error: Some("This agent has no working folder for files.".to_owned()),
+                ..ToolOutcome::default()
             };
         };
         let text = crate::files::run(root, name, &args.to_string());
@@ -161,7 +202,14 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> O
         ToolOutcome {
             value: Value::String(text),
             error,
+            ..ToolOutcome::default()
         }
+    };
+    // Where a result came from decides whether what is made of it is held, whatever the tool.
+    let tool = |name: &str, args: &Value, outside: Option<&str>| -> ToolOutcome {
+        let mut done = run_tool(name, args, outside);
+        done.outside = crate::guard::taint::result_source(name, p.trust_folder);
+        done
     };
     let model = |system: &str, message: &str| -> Result<(String, Usage), String> {
         ask(p, cancel, system, message).map(|c| {
@@ -177,7 +225,7 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> O
             )
         })
     };
-    engine::execute(
+    let outcome = engine::execute(
         def,
         inputs,
         &Env {
@@ -185,7 +233,8 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> O
             model: &model,
             cancel: stop,
         },
-    )
+    );
+    (outcome, renewed.into_inner().unwrap_or_default())
 }
 
 impl App {
@@ -239,6 +288,8 @@ impl App {
             workdir,
             guard: self.guard.clone(),
             asker: crate::guard::ask::Asker::nobody(),
+            trust_folder: agent.trust_workdir,
+            mcp: Vec::new(),
         })
     }
 
@@ -249,10 +300,25 @@ impl App {
             .roster
             .agent_ref(agent_id)
             .ok_or("That agent is gone.")?;
-        let prep = self.prepare_model(agent_id)?;
-        let files = crate::workflow::definition::tools_used(def)
-            .iter()
-            .any(|t| crate::files::is_file_tool(t));
+        let mut prep = self.prepare_model(agent_id)?;
+        let used = crate::workflow::definition::tools_used(def);
+        for name in used.iter().filter(|t| crate::mcp::is_tool(t)) {
+            let (server, tool) = crate::mcp::resolve(&self.mcp.servers, name).ok_or_else(|| {
+                format!("This workflow uses {name}, and no MCP server offers it now.")
+            })?;
+            if !server.enabled {
+                return Err(format!(
+                    "This workflow uses {name}, but {} is turned off on the MCP page.",
+                    server.name
+                ));
+            }
+            prep.mcp.push(McpTool {
+                name: name.clone(),
+                tool: tool.name.clone(),
+                target: self.mcp_target_for(&server.id)?,
+            });
+        }
+        let files = used.iter().any(|t| crate::files::is_file_tool(t));
         if files && prep.workdir.is_none() {
             return Err(format!(
                 "{} has no working folder, which this workflow needs for files. Choose one in the agent's settings.",
@@ -508,7 +574,10 @@ impl App {
         let agent_id = agent_id.to_owned();
         self.spawn(
             move || work(&def, &inputs, &prep, &cancel),
-            move |app, outcome| {
+            move |app, (outcome, renewed)| {
+                for (server, tokens) in renewed {
+                    app.mcp_keep_tokens(&server, tokens, false);
+                }
                 let mut record = record;
                 let who = Counted {
                     model: &model,
@@ -940,6 +1009,54 @@ mod tests {
         assert_eq!(run.steps.len(), 2);
         assert!(run.steps[0].output.contains("hello"));
         assert!(run.inputs.contains("hello"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_step_can_call_an_mcp_tool_and_a_tool_that_is_gone_or_off_stops_the_run_before_it_starts() {
+        let script =
+            std::env::temp_dir().join(format!("oido-flow-mcp-{}.sh", uuid::Uuid::new_v4()));
+        std::fs::write(&script, crate::mcp::client::tests::fake_script()).unwrap();
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(&db, vec![]);
+        app.mcp_set_kind(crate::mcp::Kind::Local);
+        app.mcp.form.name = TextEdit::new("Fake server");
+        app.mcp.form.command = TextEdit::new("sh");
+        app.mcp.form.args = TextEdit::new(script.display().to_string());
+        app.mcp_add();
+        app.mcp_add();
+        let server = app.mcp.servers[0].clone();
+        let tool = "mcp__fake_server__echo";
+        let call = Step {
+            id: "ping".into(),
+            kind: "tool".into(),
+            tool: Some(tool.into()),
+            args: json!({"text": "hi"}).as_object().cloned(),
+            bind: Some("got".into()),
+            ..Step::default()
+        };
+        let keep = Step {
+            id: "keep".into(),
+            kind: "set".into(),
+            values: Some([("said".to_owned(), "got".to_owned())].into()),
+            bind: Some("kept".into()),
+            ..Step::default()
+        };
+        let w = save_workflow(&mut app, vec![call, keep], json!({}));
+        app.go(Route::Workflows);
+        app.run_open_workflow();
+        let run = &app.wf_runs[0];
+        assert_eq!(run.status, RunStatus::Succeeded, "{}", run.error);
+        assert!(run.output.contains("pong"), "{}", run.output);
+
+        // Turned off, or no longer offered, it is said before anything runs.
+        app.mcp_toggle(&server.id);
+        let why = app.prepare_flow(&w.agent_id, &w.definition).err().unwrap();
+        assert!(why.contains("turned off"), "{why}");
+        app.mcp_remove(&server.id);
+        let why = app.prepare_flow(&w.agent_id, &w.definition).err().unwrap();
+        assert!(why.contains("no MCP server offers"), "{why}");
+        let _ = std::fs::remove_file(script);
     }
 
     #[cfg(unix)]

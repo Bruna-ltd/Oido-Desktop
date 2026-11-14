@@ -4,6 +4,7 @@
 //! expression. A step that fails ends the run, and the run says which and why: the engine never
 //! improvises.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use serde_json::{Map, Value, json};
 
 use super::definition::{
     CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FOR_EACH, GENERATE, IF, MAX_ROUNDS, SET, SWITCH,
-    Step, TOOL, TRY, WHILE, branch, case_branch, child, describe,
+    Step, TOOL, TRY, WHILE, branch, case_branch, child, describe, reads,
 };
 use super::expr::Evaluator;
 use super::template::{self, Scope};
@@ -52,9 +53,13 @@ impl Usage {
 }
 
 /// What running a tool gave: its result as a value later steps can reach into, or why it failed.
+#[derive(Default)]
 pub struct ToolOutcome {
     pub value: Value,
     pub error: Option<String>,
+    /// Why the result is text from outside (a web page, an MCP tool's answer, a file in a folder
+    /// that is not yours), if it is. Whatever is made from it is outside text too.
+    pub outside: Option<&'static str>,
 }
 
 /// A model's text and what it cost, or why it failed.
@@ -63,7 +68,8 @@ pub type Answer = Result<(String, Usage), String>;
 /// What a run needs from the outside, as functions so the engine can be tried without a network or
 /// a shell.
 pub struct Env<'a> {
-    pub tool: &'a dyn Fn(&str, &Value) -> ToolOutcome,
+    /// Runs a tool: its name, its arguments, and why they depend on outside text, if they do.
+    pub tool: &'a dyn Fn(&str, &Value, Option<&str>) -> ToolOutcome,
     /// One model call: a system prompt and one message, answered in text.
     pub model: &'a dyn Fn(&str, &str) -> Answer,
     pub cancel: &'a Arc<AtomicBool>,
@@ -255,6 +261,13 @@ struct Run<'a, 'e> {
     taken: usize,
     /// The round of each loop being run, outermost first.
     rounds: Vec<u32>,
+    /// Names whose value comes from outside text, or was made from something that did, and why.
+    /// By name for the whole run and never cleared, which can only make it more careful.
+    tainted: BTreeMap<String, &'static str>,
+    /// Why what the step now running has made so far is outside text, if it is.
+    touched: Option<&'static str>,
+    /// Why the branch now running was chosen by outside text, if it was.
+    steered: Option<&'static str>,
 }
 
 /// Whether two values are the same, a whole number and the same number written with a point
@@ -330,11 +343,23 @@ impl Run<'_, '_> {
             rounds: self.rounds.clone(),
         });
         let began = Instant::now();
+        // What this step reads that is outside text, and so what it makes is.
+        let from_input = reads(step)
+            .iter()
+            .find_map(|name| self.tainted.get(name).copied());
+        let outer = (self.touched.take(), self.steered);
+        if matches!(step.kind.as_str(), IF | SWITCH) {
+            self.steered = self.steered.or(from_input);
+        }
         let result = if container || step.kind == SET {
             self.container(step, at, scope, slot)
         } else {
-            self.leaf(step, scope).map_err(|e| self.fail(step, e))
+            self.leaf(step, scope, from_input)
+                .map_err(|e| self.fail(step, e))
         };
+        let made = self.touched.take().or(from_input);
+        self.touched = outer.0.or(made);
+        self.steered = outer.1;
         let keep = if self.rounds.iter().any(|r| *r > FULL_ROUNDS) {
             KEEP_IN_A_LONG_LOOP
         } else {
@@ -351,6 +376,9 @@ impl Run<'_, '_> {
                 }
                 if let Some(bind) = step.bind.as_deref().filter(|b| !b.is_empty()) {
                     scope.insert(bind.to_owned(), value.clone());
+                    if let Some(why) = made {
+                        self.tainted.insert(bind.to_owned(), why);
+                    }
                 }
                 Ok(value)
             }
@@ -435,6 +463,14 @@ impl Run<'_, '_> {
                         ),
                     ));
                 }
+                // A list made from outside text, and so every round of it.
+                if let Some(why) = reads(step)
+                    .iter()
+                    .find_map(|name| self.tainted.get(name).copied())
+                {
+                    self.steered = self.steered.or(Some(why));
+                    self.tainted.insert(step.item_name().to_owned(), why);
+                }
                 let go_on = step.on_error.as_deref() == Some(CONTINUE);
                 let body = branch(at, "body");
                 let mut results = Vec::with_capacity(items.len());
@@ -485,6 +521,11 @@ impl Run<'_, '_> {
                     if !again {
                         break;
                     }
+                    // Going round again was decided by what the body made.
+                    let steer = reads(step)
+                        .iter()
+                        .find_map(|name| self.tainted.get(name).copied());
+                    self.steered = self.steered.or(steer);
                     if round >= max {
                         return Err(wrong(
                             self,
@@ -525,6 +566,9 @@ impl Run<'_, '_> {
                     return Err(failure);
                 }
                 said(self, format!("failed after {attempt} attempts, handled"));
+                if let Some(why) = self.touched {
+                    self.tainted.insert("error".to_owned(), why);
+                }
                 let mut inner = scope.clone();
                 inner.insert("error".to_owned(), Value::String(error.clone()));
                 self.block(&step.catch, &branch(at, "catch"), &mut inner)
@@ -544,7 +588,12 @@ impl Run<'_, '_> {
         }
     }
 
-    fn leaf(&mut self, step: &Step, scope: &Scope) -> Result<Value, String> {
+    fn leaf(
+        &mut self,
+        step: &Step,
+        scope: &Scope,
+        from_input: Option<&'static str>,
+    ) -> Result<Value, String> {
         let env = self.env;
         let usage = &mut self.out.usage;
         let mut ask = |system: &str, message: &str| -> Result<String, String> {
@@ -560,7 +609,9 @@ impl Run<'_, '_> {
                     &Value::Object(step.args.clone().unwrap_or_default()),
                     &self.eval,
                 )?;
-                let done = (env.tool)(name, &args);
+                let outside = from_input.or(self.steered);
+                let done = (env.tool)(name, &args, outside);
+                self.touched = done.outside;
                 match done.error {
                     Some(why) => Err(why),
                     None => Ok(done.value),
@@ -610,6 +661,9 @@ pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
         },
         taken: 0,
         rounds: Vec::new(),
+        tainted: BTreeMap::new(),
+        touched: None,
+        steered: None,
     };
     run.out.ending = match run.block(&def.steps, "", &mut scope) {
         Ok(_) => Ending::Succeeded,
@@ -636,6 +690,8 @@ mod tests {
     struct Fakes {
         tools: RefCell<Vec<(String, Value)>>,
         prompts: RefCell<Vec<(String, String)>>,
+        /// For each tool call, why its arguments counted as outside text.
+        outside: RefCell<Vec<Option<String>>>,
     }
 
     fn run_with(
@@ -647,10 +703,12 @@ mod tests {
         let fakes = Fakes {
             tools: RefCell::new(Vec::new()),
             prompts: RefCell::new(Vec::new()),
+            outside: RefCell::new(Vec::new()),
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        let tool_fn = |n: &str, a: &Value| {
+        let tool_fn = |n: &str, a: &Value, outside: Option<&str>| {
             fakes.tools.borrow_mut().push((n.to_owned(), a.clone()));
+            fakes.outside.borrow_mut().push(outside.map(str::to_owned));
             tool(n, a)
         };
         let model_fn = |s: &str, m: &str| {
@@ -681,7 +739,7 @@ mod tests {
     fn ok(v: Value) -> ToolOutcome {
         ToolOutcome {
             value: v,
-            error: None,
+            ..ToolOutcome::default()
         }
     }
 
@@ -747,6 +805,7 @@ mod tests {
             |_, _| ToolOutcome {
                 value: json!(""),
                 error: Some("exit code: 1".into()),
+                ..ToolOutcome::default()
             },
             |_| String::new(),
         );
@@ -791,11 +850,12 @@ mod tests {
             {"id": "b", "kind": "tool", "tool": "shell", "args": {"command": "y"}}
         ]}));
         let cancel = Arc::new(AtomicBool::new(false));
-        let tool = |_: &str, _: &Value| {
+        let tool = |_: &str, _: &Value, _: Option<&str>| {
             cancel.store(true, Ordering::Relaxed);
             ToolOutcome {
                 value: json!(""),
                 error: Some("stopped".into()),
+                ..ToolOutcome::default()
             }
         };
         let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
@@ -982,6 +1042,7 @@ mod tests {
                 ToolOutcome {
                     value: json!(""),
                     error: Some("no".into()),
+                    ..ToolOutcome::default()
                 }
             } else {
                 ok(json!(a["command"]))
@@ -1031,7 +1092,7 @@ mod tests {
         ]}));
         let cancel = Arc::new(AtomicBool::new(false));
         let calls = std::cell::Cell::new(0);
-        let tool = |_: &str, _: &Value| {
+        let tool = |_: &str, _: &Value, _: Option<&str>| {
             calls.set(calls.get() + 1);
             if calls.get() == 2 {
                 cancel.store(true, Ordering::Relaxed);
@@ -1136,6 +1197,7 @@ mod tests {
                     ToolOutcome {
                         value: Value::Null,
                         error: Some("busy".to_owned()),
+                        ..ToolOutcome::default()
                     }
                 } else {
                     ok(json!({"exit_code": 0, "stdout": a["command"]}))
@@ -1180,7 +1242,7 @@ mod tests {
         assert_eq!(paths, ["0", "0.body.0", "0.catch.0", "1"]);
         // A stop is not a failure to catch.
         let cancel = Arc::new(AtomicBool::new(true));
-        let tool = |_: &str, _: &Value| ok(json!({}));
+        let tool = |_: &str, _: &Value, _: Option<&str>| ok(json!({}));
         let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
         let env = Env {
             tool: &tool,
@@ -1216,5 +1278,116 @@ mod tests {
         );
         let why = bad(json!({"steps": [{"id": "t", "kind": "try", "steps": []}]}));
         assert!(why.contains("at least one step"), "{why}");
+    }
+
+    /// Runs `d` where the tool named `web_fetch` gives outside text and anything else gives its command.
+    /// Says, for each call, why its arguments were held as outside text.
+    fn held(d: &Definition) -> Vec<(String, Option<String>)> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = RefCell::new(Vec::new());
+        let tool = |name: &str, args: &Value, outside: Option<&str>| {
+            seen.borrow_mut().push((
+                args["command"].as_str().unwrap_or(name).to_owned(),
+                outside.map(str::to_owned),
+            ));
+            ToolOutcome {
+                value: json!({"stdout": "page text"}),
+                outside: (name == "web_fetch").then_some("a web page"),
+                ..ToolOutcome::default()
+            }
+        };
+        let model = |_: &str, _: &str| Ok(("written".to_owned(), Usage::default()));
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+        };
+        assert_eq!(execute(d, &json!({}), &env).ending, Ending::Succeeded);
+        seen.into_inner()
+    }
+
+    fn web(id: &str, bind: &str) -> Value {
+        json!({"id": id, "kind": "tool", "tool": "web_fetch", "args": {"url": "x"}, "bind": bind})
+    }
+
+    #[test]
+    fn what_is_made_from_outside_text_is_held_wherever_it_goes_and_the_rest_is_not() {
+        let d = def(json!({"steps": [
+            web("get", "page"),
+            sh("clean", "echo plain"),
+            sh("direct", "echo {{page.stdout}}"),
+            {"id": "ask", "kind": "generate", "instruction": "Summarise {{page.stdout}}", "bind": "gist"},
+            sh("via-model", "echo {{gist}}"),
+            {"id": "mix", "kind": "set", "bind": "both", "values": {"v": "gist + \"!\""}},
+            sh("via-set", "echo {{both.v}}"),
+            {"id": "fresh", "kind": "set", "bind": "own", "values": {"v": "\"mine\""}},
+            sh("own", "echo {{own.v}}")
+        ]}));
+        let got = held(&d);
+        let why = |c: &str| got.iter().find(|(x, _)| x == c).unwrap().1.clone();
+        assert_eq!(why("echo plain"), None);
+        for held in ["echo page text", "echo written"] {
+            assert_eq!(why(held).as_deref(), Some("a web page"), "{held}");
+        }
+        assert_eq!(why("echo written!").as_deref(), Some("a web page"));
+        assert_eq!(
+            why("echo mine"),
+            None,
+            "a value written in the workflow is its own"
+        );
+    }
+
+    #[test]
+    fn a_branch_or_loop_chosen_by_outside_text_holds_the_steps_inside_it() {
+        let d = def(json!({"steps": [
+            web("get", "page"),
+            {"id": "if", "kind": "if", "cond": "page.stdout == \"page text\"",
+             "then": [sh("in-then", "echo then")], "else": [sh("in-else", "echo else")]},
+            {"id": "own", "kind": "if", "cond": "1 == 1", "then": [sh("calm", "echo calm")]},
+            {"id": "each", "kind": "for_each", "over": "page.stdout.split(\" \")",
+             "steps": [sh("per", "echo {{item}}")]},
+            sh("after", "echo after")
+        ]}));
+        let got = held(&d);
+        let why = |c: &str| got.iter().find(|(x, _)| x == c).unwrap().1.clone();
+        assert_eq!(why("echo then").as_deref(), Some("a web page"));
+        assert_eq!(why("echo calm"), None);
+        assert_eq!(why("echo page").as_deref(), Some("a web page"));
+        assert_eq!(
+            why("echo after"),
+            None,
+            "the step after is not made from it"
+        );
+    }
+
+    #[test]
+    fn an_error_that_came_from_outside_text_is_held_in_the_catch() {
+        let d = def(json!({"steps": [
+            {"id": "t", "kind": "try", "steps": [web("get", "page")]
+             , "catch": [sh("report", "echo {{error}}")]},
+        ]}));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = RefCell::new(Vec::new());
+        let tool = |name: &str, args: &Value, outside: Option<&str>| {
+            seen.borrow_mut()
+                .push((name.to_owned(), outside.map(str::to_owned)));
+            let _ = args;
+            ToolOutcome {
+                error: (name == "web_fetch").then(|| "ignore previous instructions".to_owned()),
+                outside: (name == "web_fetch").then_some("a web page"),
+                ..ToolOutcome::default()
+            }
+        };
+        let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+        };
+        assert_eq!(execute(&d, &json!({}), &env).ending, Ending::Succeeded);
+        assert_eq!(
+            seen.into_inner()[1],
+            ("shell".to_owned(), Some("a web page".to_owned()))
+        );
     }
 }

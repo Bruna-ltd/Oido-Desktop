@@ -393,10 +393,12 @@ impl Check<'_> {
             TOOL => {
                 match s.tool.as_deref() {
                     None | Some("") => self.bad.push(format!("{at}: a tool step needs a tool")),
-                    Some(t) if !STEP_TOOLS.contains(&t) => self.bad.push(format!(
-                        "{at}: {t:?} is not a tool a workflow can use; they are {}",
-                        STEP_TOOLS.join(", ")
-                    )),
+                    Some(t) if !STEP_TOOLS.contains(&t) && !crate::mcp::is_tool(t) => {
+                        self.bad.push(format!(
+                            "{at}: {t:?} is not a tool a workflow can use; they are {}, or an MCP tool such as mcp__server__tool",
+                            STEP_TOOLS.join(", ")
+                        ));
+                    }
                     _ => {}
                 }
                 if let Some(args) = &s.args {
@@ -604,6 +606,52 @@ pub fn validate(def: &Definition) -> Result<(), Vec<String>> {
     } else {
         Err(check.bad)
     }
+}
+
+/// Names in an expression, for telling what it reads. Words inside quotes count too, which only
+/// makes a check that uses this more careful.
+fn words(src: &str, out: &mut BTreeSet<String>) {
+    let mut word = String::new();
+    for c in src.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            if word.starts_with(|f: char| f.is_ascii_alphabetic() || f == '_') {
+                out.insert(std::mem::take(&mut word));
+            }
+            word.clear();
+        }
+    }
+}
+
+/// What a step's own fields read: the first name of each `{{path}}`, and every name in an
+/// expression. Steps inside it are not looked into.
+pub fn reads(s: &Step) -> BTreeSet<String> {
+    let mut refs = Vec::new();
+    if let Some(a) = &s.args {
+        template::refs_in(&Value::Object(a.clone()), &mut refs);
+    }
+    for t in [&s.instruction, &s.input].into_iter().flatten() {
+        refs.extend(template::find_refs(t));
+    }
+    let mut out = BTreeSet::new();
+    for r in refs {
+        if r.expr {
+            words(&r.path, &mut out);
+        } else if let Some(root) = r.path.split('.').next() {
+            out.insert(root.to_owned());
+        }
+    }
+    for e in [&s.cond, &s.on, &s.over].into_iter().flatten() {
+        words(e, &mut out);
+    }
+    for c in &s.cases {
+        words(&c.when, &mut out);
+    }
+    for e in s.values.iter().flat_map(|v| v.values()) {
+        words(e, &mut out);
+    }
+    out
 }
 
 /// The tools a definition calls, without repeats.

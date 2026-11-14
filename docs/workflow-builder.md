@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try` built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try`, MCP tools and taint tracking built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -223,6 +223,20 @@ is the one non-deterministic tool step and is marked as such.
   fails and sees `error` (the failure's text). The `try`'s own `bind` is the body's last value, or
   the catch's. A stop is never caught. What the body or catch binds stays inside, as in other
   containers. Without a `catch`, the run ends at the step that failed, as without a `try`.
+- MCP tools: a `tool` step may name any tool of an MCP server that is on (`mcp__server__tool`, as
+  the MCP page and chats show it). A tool that is gone or whose server is off is said before the
+  run starts. Sign-in tokens a call renews are saved when the run ends. A result is the server's
+  text.
+- Taint (ADR-4), as built: tracked by name for the whole run and never cleared. A tool result is
+  outside text when `guard::taint::result_source` says so (web, MCP, and, in a folder that is not
+  trusted, files and commands). A step's result is outside text if it is, or if the step reads a
+  name that is. That covers `{{name}}` and every name in an expression, so `generate`, `set`,
+  loops and `try`'s `error` carry it on and cannot launder it. A tool step that acts, and reads
+  such a name or sits in a branch or loop chosen by one, is passed to the guard as acting after
+  outside text: you are asked on a card, or the step is refused when nobody can be asked (a
+  schedule). So a flow that fetches a page and then writes a file from it now asks first, where
+  before it did not. Over-holding is possible (a name used in two places stays held, and words
+  inside quotes in an expression count); under-holding is not known.
 
 ## Phases
 
