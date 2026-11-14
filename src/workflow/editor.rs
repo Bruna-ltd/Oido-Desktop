@@ -466,8 +466,13 @@ pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
                 .unwrap_or_default()
                 .lines()
                 .next()
-                .unwrap_or_default()
-                .to_owned();
+                .unwrap_or_default();
+            // A box shows it as its hint, on one line: the first sentence, cut short.
+            let about = about.split_once(". ").map_or(about, |(first, _)| first);
+            let about = match about.char_indices().nth(30) {
+                Some((i, _)) => format!("{}…", about[..i].trim_end()),
+                None => about.to_owned(),
+            };
             let long = matches!(
                 key.as_str(),
                 "command" | "content" | "task" | "old_text" | "new_text" | "instruction"

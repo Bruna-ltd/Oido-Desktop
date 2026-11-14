@@ -772,7 +772,7 @@ fn card(
 
     if n.kind == TOOL {
         out = out.child(tool_field(s, at, n, &key, k, layer));
-        for p in tool_params(s, ed, at, n, &key, advanced, k, layer) {
+        for p in tool_params(s, ed, at, n, &key, k, layer) {
             out = out.child(p);
         }
     }
@@ -901,7 +901,7 @@ fn tool_field(s: &App, at: &Loc, n: &Node, key: &str, k: &Kit, layer: &mut Vec<E
 }
 
 /// The arguments of a tool step as a form: a box for each, named in words, those the tool needs
-/// first. The rest show when they have something in them, or under Advanced.
+/// first and the rest under "Optional".
 #[allow(clippy::too_many_arguments)]
 fn tool_params(
     s: &App,
@@ -909,7 +909,6 @@ fn tool_params(
     at: &Loc,
     n: &Node,
     key: &str,
-    advanced: bool,
     k: &Kit,
     layer: &mut Vec<El>,
 ) -> Vec<El> {
@@ -934,17 +933,16 @@ fn tool_params(
     }
     let blank = TextEdit::new("");
     let mut out = Vec::new();
+    let mut optional_shown = false;
     for p in specs {
         let given = n.params.get(&p.key);
         let typed = given.map_or("", |g| g.edit.text.as_str());
-        if !(p.required || advanced || !typed.trim().is_empty()) {
-            continue;
+        // What the tool does not need follows under its own heading, so none is out of sight.
+        if !p.required && !optional_shown {
+            optional_shown = true;
+            out.push(text("Optional").font(k.ty.small_medium).color(c.text_faint));
         }
-        let label = if p.required {
-            p.label.clone()
-        } else {
-            format!("{} (optional)", p.label)
-        };
+        let label = p.label.clone();
         let (at_for, name, kind) = (at.clone(), p.key.clone(), p.kind);
         let box_key = format!("wfe-param-{key}-{}", p.key);
         let item = if !p.options.is_empty() {
