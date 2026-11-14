@@ -873,6 +873,7 @@ pub fn describe(s: &Step) -> String {
             };
             let what = match tool {
                 "shell" => arg("command").map(|c| format!("`{}`", short(&c))),
+                crate::web::NAME => arg("url"),
                 crate::tools::DELEGATE => match (arg("agent"), arg("task")) {
                     (Some(who), Some(task)) => Some(format!("{who}: {}", short(&task))),
                     (who, _) => who,

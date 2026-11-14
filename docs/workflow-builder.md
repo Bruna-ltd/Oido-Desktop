@@ -325,7 +325,7 @@ Each phase ships alone and leaves workflows that ran before running the same.
 
 ## Graph view
 
-Status: designed 2026-11-14, not built. A second view of the same editor state, for people who think
+Status: designed 2026-11-14. **G1 built**; G2 and G3 not. A second view of the same editor state, for people who think
 in boxes and wires. The card editor stays: it is the keyboard and screen-reader route, and the place
 every box of a step is typed.
 
@@ -416,4 +416,30 @@ context menu; Option-arrows and Delete.
 nodes; a paused run's wait highlighted with Approve and Decline on the node.
 
 Left out on purpose: a minimap, colour per kind of step, a permanent palette column, drawn wires.
+
+### As built in G1
+
+- `workflow/layout.rs` is the pure layout and the arrow-key walk, with tests (no overlaps, every step
+  inside its frame, the same steps always drawn the same, navigation across frames and columns).
+  `flow_graph.rs` holds the view state and camera; `ui/workflow_graph.rs` draws it.
+- The camera is Rune's own: two `Live` values under the drawing, so a wheel scroll or pinch moves it
+  without the view running again. Middle-button and Space-drag panning, which Rune's canvas example
+  has, are not wired yet; the wheel and pinch (Ctrl-wheel) are.
+- A **Cards / Graph** switch sits by the title. It opens on Cards for now: in G1 the graph cannot add
+  or move steps, so Cards stays the working view. G2 flips the default to Graph.
+- Graph mode uses the whole window: the drawing, and a form column on the right. With a step selected
+  the column is that step's own form (the card editor's, without the steps inside it, which are boxes
+  on the canvas); with nothing selected it is the workflow's own: name, goal, agent, inputs, done-when,
+  problems and test run. A switch's cases and a `parallel` step's branches are edited there too.
+- Wires are drawn over the frames and under the steps. A step's way out of a frame goes straight down
+  to a join line under the tallest column and then in to the middle, so a short column's wire never
+  crosses the one beside it.
+- Fit makes the drawing as big as fits the view, from full size down to 70%, centred if it fits and
+  from its left edge if not; it runs by itself once, when the view first says how big it is, and on
+  the Fit button. Below 85% a node drops its second line.
+- One focus stop, not one per node: the canvas takes Tab once, and the arrows move the selection,
+  which is the cursor (Escape clears it). This replaces the design's separate focus ring and
+  selection on each node, which would have put every step in the Tab order. The canvas gets the ring.
+- Not yet: dragging, the Add step list and `+` on wires, undo, the context menu, run state on nodes
+  (all G2 and G3), and the 2 pt wire highlight beyond the selected step's own wires.
 

@@ -1296,6 +1296,51 @@ pub static SCENES: &[Scene] = &[
             s.wf_editor = Some(Editor::from_saved(w));
         }
     }),
+    ("workflow-graph", |s| {
+        use crate::flow_graph::View;
+        use crate::workflow::definition::Definition;
+        use crate::workflow::editor::{Editor, Loc};
+        nested_workflow(s);
+        let def: Definition = serde_json::from_value(serde_json::json!({
+            "inputs": {"folder": {"type": "string", "default": "downloads", "description": "Where to look"}},
+            "steps": [
+                {"id": "ls", "kind": "tool", "tool": "shell", "bind": "files",
+                 "args": {"command": "ls {{inputs.folder}}"}},
+                {"id": "gather", "kind": "parallel", "bind": "got", "branches": [
+                    {"name": "news", "steps": [{"id": "n", "kind": "tool", "tool": "web_fetch",
+                        "args": {"url": "https://example.com/news"}}]},
+                    {"name": "notes", "steps": [
+                        {"id": "r", "kind": "tool", "tool": "read_file", "args": {"path": "notes/today.md"}},
+                        {"id": "each", "kind": "for_each", "over": "files.stdout.split(\"\\n\")", "as": "name",
+                         "steps": [{"id": "kind", "kind": "switch", "on": "name.split(\".\").pop()",
+                            "cases": [{"when": "\"pdf\"", "steps": [{"id": "pdf", "kind": "tool", "tool": "shell",
+                                "args": {"command": "mv {{name}} docs/"}}]}],
+                            "default": [{"id": "skip", "kind": "tool", "tool": "shell",
+                                "args": {"command": "echo skip {{name}}"}}]}]}
+                    ]}
+                ]},
+                {"id": "say", "kind": "generate", "instruction": "Summarise {{got.news}}", "bind": "gist"},
+                {"id": "ok", "kind": "wait", "approve": "Send the summary?"},
+                {"id": "safe", "kind": "try", "retries": 2, "steps": [
+                    {"id": "send", "kind": "tool", "tool": "shell", "args": {"command": "mail {{gist}}"}}],
+                 "catch": []}
+            ]
+        }))
+        .unwrap_or_default();
+        if let Some(w) = s.workflows.first_mut() {
+            w.definition = def;
+            s.wf_editor = Some(Editor::from_saved(w));
+        }
+        s.wf_graph.shown = View::Graph;
+        // A snapshot draws one frame, so the view cannot report its size first: give it what the
+        // window leaves beside the form.
+        s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+        s.fit_graph();
+        s.wf_graph.selected = Some(Loc {
+            place: vec![(1, 1), (1, 0)],
+            index: 0,
+        });
+    }),
     ("workflow-parallel", |s| {
         use crate::workflow::definition::Step;
         use crate::workflow::editor::Editor;

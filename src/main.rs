@@ -20,6 +20,7 @@ mod delegate;
 mod demo;
 mod files;
 mod flow_editor;
+mod flow_graph;
 mod flows;
 mod folders;
 mod guard;

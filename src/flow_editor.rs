@@ -100,6 +100,9 @@ impl App {
     fn reset_test(&mut self) {
         self.stop_test();
         self.wf_test = TestRun::default();
+        // A workflow opened in the graph is fitted to the view and has nothing selected.
+        self.wf_graph.selected = None;
+        self.wf_graph.needs_fit = true;
     }
 
     pub fn stop_test(&mut self) {

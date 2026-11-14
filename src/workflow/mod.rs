@@ -8,6 +8,7 @@ pub mod definition;
 pub mod editor;
 pub mod engine;
 pub mod expr;
+pub mod layout;
 pub mod pause;
 pub mod template;
 

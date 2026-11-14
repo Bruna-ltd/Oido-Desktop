@@ -3,9 +3,13 @@
 //! typed is listed above the buttons.
 
 use rune::{El, ScrollSpec, TextEdit, col, el, row, text, text_input};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Select, SelectAppearance, Switch};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Select, SelectAppearance, Switch,
+};
 
+use super::workflow_graph;
 use crate::app::App;
+use crate::flow_graph::View;
 use crate::workflow::definition::{FOR_EACH, PARALLEL, STEP_TOOLS, SWITCH};
 use crate::workflow::editor::{
     Block, Editor, INPUT_KINDS, KINDS, Loc, Menu, Node, Part, Place, Refs, Target, specs,
@@ -18,24 +22,74 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(ed) = &s.wf_editor else {
         return el();
     };
-    let c = &k.c;
+    match s.wf_graph.shown {
+        View::Cards => cards(s, ed, k, layer),
+        View::Graph => graph(s, ed, k, layer),
+    }
+}
+
+/// The title and the switch between the two views.
+fn heading(s: &App, ed: &Editor, k: &Kit) -> El {
     let title = if ed.workflow.is_some() {
         "Change workflow"
     } else {
         "New workflow"
     };
-    let mut out = col()
-        .key("workflow-editor")
-        .grow(1.0)
-        .h_full()
-        .min_h(0.0)
-        .max_w(WIDTH)
-        .padding(20.0)
+    let shown = match s.wf_graph.shown {
+        View::Cards => 0,
+        View::Graph => 1,
+    };
+    row()
+        .w_full()
+        .center_y()
+        .gap(12.0)
+        .child(text(title).font(k.ty.body_medium).color(k.c.text_base))
+        .child(
+            SegmentedControl::new(&["Cards", "Graph"], Some(shown))
+                .label("View")
+                .fit()
+                .on_pick(|s: &mut App, i, _| {
+                    s.set_view(if i == 0 { View::Cards } else { View::Graph });
+                })
+                .build(k),
+        )
+}
+
+/// Save, Check and Cancel.
+fn buttons(k: &Kit) -> El {
+    row()
+        .gap(8.0)
+        .child(
+            Button::new("Save")
+                .variant(ButtonVariant::Submit)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.save_editor())
+                .build(k)
+                .key("wfe-save"),
+        )
+        .child(
+            Button::new("Check")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.check_editor())
+                .build(k)
+                .key("wfe-check"),
+        )
+        .child(
+            Button::new("Cancel")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.cancel_editor())
+                .build(k)
+                .key("wfe-cancel"),
+        )
+}
+
+/// Name, what it is for, who owns it, and what a run is given.
+fn basics(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
+    col()
+        .w_full()
         .gap(14.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .child(text(title).font(k.ty.body_medium).color(c.text_base))
         .child(field(
             "Name",
             &ed.name,
@@ -55,22 +109,23 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             None,
             k,
             |s: &mut App| s.editor_text(&Target::Goal),
-        ));
-    out = out.child(agent_row(s, ed, k, layer));
-    out = out.child(inputs(s, ed, k, layer));
-    out = out
-        .child(text("Steps").font(k.ty.ui_medium).color(c.text_base))
-        .child(steps(s, ed, &Vec::new(), k, layer))
-        .child(field(
-            "Done when",
-            &ed.success,
-            "wfe-success",
-            "What shows a run did its job",
-            1,
-            None,
-            k,
-            |s: &mut App| s.editor_text(&Target::Success),
-        ));
+        ))
+        .child(agent_row(s, ed, k, layer))
+        .child(inputs(s, ed, k, layer))
+}
+
+/// When it is done, what is wrong with it, and a test run.
+fn tail(s: &App, ed: &Editor, k: &Kit) -> El {
+    let mut out = col().w_full().gap(14.0).child(field(
+        "Done when",
+        &ed.success,
+        "wfe-success",
+        "What shows a run did its job",
+        1,
+        None,
+        k,
+        |s: &mut App| s.editor_text(&Target::Success),
+    ));
     if !ed.problems.is_empty() {
         out = out.child(col().key("wfe-problems").w_full().gap(4.0).children(
             ed.problems.iter().map(|p| {
@@ -82,35 +137,93 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             }),
         ));
     }
-    out = out.child(test_run(s, ed, k));
-    out.child(
-        row()
-            .gap(8.0)
-            .child(
-                Button::new("Save")
-                    .variant(ButtonVariant::Submit)
-                    .control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.save_editor())
-                    .build(k)
-                    .key("wfe-save"),
-            )
-            .child(
-                Button::new("Check")
-                    .variant(ButtonVariant::Outline)
-                    .control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.check_editor())
-                    .build(k)
-                    .key("wfe-check"),
-            )
-            .child(
-                Button::new("Cancel")
-                    .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.cancel_editor())
-                    .build(k)
-                    .key("wfe-cancel"),
-            ),
-    )
+    out.child(test_run(s, ed, k))
+}
+
+/// Every step as a form, one under the other.
+fn cards(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
+    let c = &k.c;
+    col()
+        .key("workflow-editor")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .max_w(WIDTH)
+        .padding(20.0)
+        .gap(14.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(heading(s, ed, k))
+        .child(basics(s, ed, k, layer))
+        .child(text("Steps").font(k.ty.ui_medium).color(c.text_base))
+        .child(steps(s, ed, &Vec::new(), k, layer))
+        .child(tail(s, ed, k))
+        .child(buttons(k))
+}
+
+/// The steps as boxes and wires, with the form of the selected one beside them.
+fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
+    let header = heading(s, ed, k)
+        .child(el().grow(1.0))
+        .child(
+            small("Fit", ButtonVariant::Ghost)
+                .on_press(|s: &mut App| s.fit_graph())
+                .build(k)
+                .key("wfg-fit"),
+        )
+        .child(buttons(k));
+    col()
+        .key("workflow-editor")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(20.0)
+        .gap(12.0)
+        .child(header)
+        .child(
+            row()
+                .grow(1.0)
+                .min_h(0.0)
+                .gap(16.0)
+                .child(workflow_graph::view(s, ed, k))
+                .child(inspector(s, ed, k, layer)),
+        )
+}
+
+/// The form of the selected step, or the workflow's own when nothing is selected.
+fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
+    let mut out = col()
+        .key("wfg-inspector")
+        .w(workflow_graph::INSPECTOR_W)
+        .h_full()
+        .min_h(0.0)
+        .gap(14.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        });
+    let chosen = s.selected_step().and_then(|at| {
+        let list = list_at(ed, &at.place);
+        list.get(at.index).map(|n| (at, n, list.len()))
+    });
+    match chosen {
+        Some((at, node, len)) => {
+            out = out
+                .child(
+                    row().child(
+                        small("Workflow settings", ButtonVariant::Ghost)
+                            .on_press(|s: &mut App| s.select_step(None))
+                            .build(k)
+                            .key("wfg-settings"),
+                    ),
+                )
+                .child(card(s, ed, &at, node, len, false, k, layer));
+        }
+        None => {
+            out = out.child(basics(s, ed, k, layer)).child(tail(s, ed, k));
+        }
+    }
+    out
 }
 
 /// Runs the workflow as it stands, for real, and shows each step as it went.
@@ -444,7 +557,7 @@ fn steps(s: &App, ed: &Editor, place: &Place, k: &Kit, layer: &mut Vec<El>) -> E
             place: place.clone(),
             index,
         };
-        out = out.child(card(s, ed, &at, node, list.len(), k, layer));
+        out = out.child(card(s, ed, &at, node, list.len(), true, k, layer));
     }
     let labels: Vec<&str> = KINDS.iter().map(|(_, l)| *l).collect();
     let target = place.clone();
@@ -488,7 +601,17 @@ fn kind_label(kind: &str) -> &'static str {
         .map_or("Step", |(_, l)| *l)
 }
 
-fn card(s: &App, ed: &Editor, at: &Loc, n: &Node, len: usize, k: &Kit, layer: &mut Vec<El>) -> El {
+#[allow(clippy::too_many_arguments)]
+fn card(
+    s: &App,
+    ed: &Editor,
+    at: &Loc,
+    n: &Node,
+    len: usize,
+    with_steps: bool,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
     let c = &k.c;
     let key = loc_key(at);
     let up = at.clone();
@@ -629,7 +752,7 @@ fn card(s: &App, ed: &Editor, at: &Loc, n: &Node, len: usize, k: &Kit, layer: &m
         );
     }
     for (b, block) in n.blocks.iter().enumerate() {
-        out = out.child(inside(s, ed, at, b, block, k, layer));
+        out = out.child(inside(s, ed, at, b, block, with_steps, k, layer));
     }
     if n.kind == PARALLEL {
         let branch_at = at.clone();
@@ -700,6 +823,7 @@ fn inside(
     at: &Loc,
     b: usize,
     block: &Block,
+    with_steps: bool,
     k: &Kit,
     layer: &mut Vec<El>,
 ) -> El {
@@ -762,11 +886,16 @@ fn inside(
                     .key(format!("wfe-remove-branch-{key}-{b}")),
             );
     }
-    col()
+    let block_el = col()
         .key(format!("wfe-block-{key}-{b}"))
         .w_full()
         .gap(6.0)
         .pl(12.0)
-        .child(head)
-        .child(steps(s, ed, &place, k, layer))
+        .child(head);
+    // Beside the graph the steps inside are boxes there, so only the heading of the list is here.
+    if with_steps {
+        block_el.child(steps(s, ed, &place, k, layer))
+    } else {
+        block_el
+    }
 }

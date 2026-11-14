@@ -27,6 +27,7 @@ mod settings;
 mod sidebar;
 pub(crate) mod usage;
 mod workflow_editor;
+mod workflow_graph;
 mod workflows;
 
 use std::time::Duration;

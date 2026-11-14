@@ -133,6 +133,8 @@ pub struct App {
     pub wf_editor: Option<crate::workflow::editor::Editor>,
     /// The editor's test run: what is given, and how the last one went.
     pub wf_test: crate::flow_editor::TestRun,
+    /// The editor's graph view: which view shows, what is selected, the camera.
+    pub wf_graph: crate::flow_graph::GraphView,
     pub wf_menu: Option<crate::workflow::editor::Menu>,
     /// Stands in for a box that is no longer there when something is typed into it.
     pub wf_stray: TextEdit,
@@ -313,6 +315,7 @@ impl App {
             wf_confirm: false,
             wf_editor: None,
             wf_test: crate::flow_editor::TestRun::default(),
+            wf_graph: crate::flow_graph::GraphView::default(),
             wf_menu: None,
             wf_stray: TextEdit::new(""),
             composer: crate::composer::Composer::new(),
