@@ -552,5 +552,5 @@ editor now hides that behind plain words, and the expert forms are one press awa
   summary?". `{{inputs.x}}` reads as ‹x›, `.stdout` as "output". The second line of a box is the kind of
   step, not its id. `describe()` keeps its older, more literal wording for run logs and the chat.
 
-Not done yet: the other tools' arguments and the `switch` / `for each` boxes are still typed
+Not done yet: the `switch` and `for each` boxes are still typed
 expressions, and a new workflow still starts blank.
