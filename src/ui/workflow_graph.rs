@@ -8,7 +8,7 @@ use rune::{
 };
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, MenuItem, context_menu, glyphs};
 
-use super::workflow_editor::pick;
+use super::workflow_editor::add_menu;
 use crate::app::App;
 use crate::workflow::editor::{Editor, KINDS, Loc, Menu};
 use crate::workflow::engine::StepLog;
@@ -217,7 +217,6 @@ fn end_of_top(s: &App) -> usize {
 
 /// The button on a wire that opens the list of steps to add there.
 fn add_button(s: &App, g: &Gap, k: &Kit, layer: &mut Vec<El>) -> El {
-    let labels: Vec<&str> = KINDS.iter().map(|(_, l)| *l).collect();
     let (place, index) = (g.place.clone(), g.index);
     let key = format!(
         "wfg-add-{}-{index}",
@@ -229,13 +228,10 @@ fn add_button(s: &App, g: &Gap, k: &Kit, layer: &mut Vec<El>) -> El {
     el().pin(Some(g.at[0] - 14.0), Some(g.at[1] - 14.0), None, None)
         .size(28.0, 28.0)
         .center()
-        .child(pick(
+        .child(add_menu(
             key,
             Menu::AddAt(g.place.clone(), g.index),
-            &labels,
-            None,
             "+",
-            false,
             s,
             k,
             layer,
@@ -521,7 +517,6 @@ fn frame(item: &Item, selected: bool, faded: bool, look: &Look, k: &Kit) -> El {
 /// Where a list with nothing in it will take its first step: press it to choose one.
 fn slot(item: &Item, s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let labels: Vec<&str> = KINDS.iter().map(|(_, l)| *l).collect();
     let place = item.loc.place.clone();
     let target = place.clone();
     pinned(
@@ -532,13 +527,10 @@ fn slot(item: &Item, s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     .border(1.0, c.border_base)
     .border_dash(4.0, 3.0)
     .center()
-    .child(pick(
+    .child(add_menu(
         format!("wfg-slot-add-{}", loc_key(&item.loc)),
         Menu::AddAt(place, 0),
-        &labels,
-        None,
         "Nothing here yet: add a step",
-        false,
         s,
         k,
         layer,

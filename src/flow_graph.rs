@@ -4,7 +4,7 @@
 use rune::{Drag, Live, Phase, Tx};
 
 use crate::app::App;
-use crate::workflow::editor::{KINDS, Loc, Place};
+use crate::workflow::editor::{Loc, Place, kind_named};
 use crate::workflow::engine::{Ending, StepLog};
 use crate::workflow::layout::{self, Dir, Drop};
 use crate::workflow::{Pause, RunStatus};
@@ -351,7 +351,7 @@ impl App {
 
     /// Adds a step of the kind with this label at a position, selects it, and closes the menu.
     pub fn editor_add_at(&mut self, place: &Place, index: usize, label: &str) {
-        let kind = KINDS.iter().find(|(_, l)| *l == label).map(|(k, _)| *k);
+        let kind = kind_named(label);
         if let (Some(ed), Some(kind)) = (&mut self.wf_editor, kind)
             && let Some(at) = ed.add_at(place, index, kind)
         {
@@ -658,12 +658,12 @@ mod tests {
     fn a_step_is_added_after_the_selected_one_or_at_the_end_and_selected() {
         let mut app = app_with_editor();
         assert_eq!(app.add_position(), (vec![], 2), "the end of the top list");
-        app.editor_add_at(&vec![], usize::MAX, "Set values");
+        app.editor_add_at(&vec![], usize::MAX, "Remember a value");
         assert_eq!(app.selected_step(), Some(at(&[], 2)));
         app.select_step(Some(at(&[], 0)));
         assert_eq!(app.add_position(), (vec![], 1));
         let (place, index) = app.add_position();
-        app.editor_add_at(&place, index, "Run a tool");
+        app.editor_add_at(&place, index, "Use a tool");
         assert_eq!(app.selected_step(), Some(at(&[], 1)));
         assert_eq!(ids(&app, &[]).len(), 4);
         app.select_step(Some(at(&[(2, 0)], 0)));

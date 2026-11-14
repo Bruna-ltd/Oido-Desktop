@@ -14,7 +14,8 @@ use crate::model::new_id;
 use crate::models::ModelRef;
 use crate::store::Counted;
 use crate::usage::Source;
-use crate::workflow::editor::{Editor, KINDS, Loc, Menu, Place, Target};
+use crate::workflow::cond::Op;
+use crate::workflow::editor::{Editor, Loc, Menu, Place, Target, kind_named};
 use crate::workflow::engine::{self, Outcome, StepLog};
 
 /// What a card raised by a test run of a workflow that is not saved yet is filed under.
@@ -331,7 +332,7 @@ impl App {
 
     /// Adds the kind of step the menu entry `label` names to the end of a list.
     pub fn editor_add(&mut self, place: &Place, label: &str) {
-        let kind = KINDS.iter().find(|(_, l)| *l == label).map(|(k, _)| *k);
+        let kind = kind_named(label);
         if let (Some(ed), Some(kind)) = (&mut self.wf_editor, kind) {
             ed.add(place, kind);
             ed.check();
@@ -424,6 +425,53 @@ impl App {
     }
 
     /// Puts a name into the box it was picked for, as `{{name}}` where the box reads braces.
+    /// Puts into a box the result a person chose by its words, giving the step it comes from a
+    /// name for it if it has none.
+    pub fn editor_use(&mut self, which: &Target, at: &Loc, key: &str, braces: bool, label: &str) {
+        let name = self.wf_editor.as_mut().and_then(|ed| {
+            let found = ed
+                .results(at, Some(key))
+                .into_iter()
+                .find(|f| f.label == label)?;
+            ed.resolve(&found.source)
+        });
+        match name {
+            Some(name) => self.editor_insert(which, braces, &name),
+            None => self.wf_menu = None,
+        }
+    }
+
+    /// Chooses by its words the result an `if` or `while` looks at.
+    pub fn editor_set_left(&mut self, at: &Loc, label: &str) {
+        if let Some(ed) = &mut self.wf_editor
+            && let Some(found) = ed
+                .results(at, Some("cond"))
+                .into_iter()
+                .find(|f| f.label == label)
+            && let Some(name) = ed.resolve(&found.source)
+        {
+            ed.set_condition_left(at, &name);
+        }
+        self.wf_menu = None;
+    }
+
+    pub fn editor_set_compare(&mut self, at: &Loc, label: &str) {
+        if let (Some(ed), Some(op)) = (&mut self.wf_editor, Op::from_label(label)) {
+            ed.set_condition_op(at, op);
+        }
+        self.wf_menu = None;
+    }
+
+    pub fn editor_toggle_expression(&mut self, at: &Loc) {
+        if let Some(ed) = &mut self.wf_editor {
+            if ed.node_mut(at).is_some_and(|n| n.when.is_some()) {
+                ed.condition_as_expression(at);
+            } else {
+                ed.condition_in_parts(at);
+            }
+        }
+    }
+
     pub fn editor_insert(&mut self, which: &Target, braces: bool, name: &str) {
         let text = if braces {
             format!("{{{{{name}}}}}")
@@ -476,25 +524,26 @@ mod tests {
         app.editor_set_input_kind(0, "boolean");
         set(&mut app, &Target::InputDefault(0), "true");
 
-        app.editor_add(&Vec::new(), "For each");
+        app.editor_add(&Vec::new(), "Repeat for each");
         set(&mut app, &Target::Field(top(0), 0), "[\"x\", \"y\"]");
         set(&mut app, &Target::Field(top(0), 1), "name");
         set(&mut app, &Target::Bind(top(0)), "greeted");
         let body: Place = vec![(0, 0)];
-        app.editor_add(&body, "Run a tool");
+        app.editor_add(&body, "Use a tool");
         let inner = Loc {
             place: body,
             index: 0,
         };
         set(
             &mut app,
-            &Target::Field(inner, 0),
+            &Target::Field(inner, 1),
             r#"{"command": "echo {{name}}-{{index}}"}"#,
         );
-        app.editor_add(&Vec::new(), "If");
+        app.editor_add(&Vec::new(), "Check something");
+        app.editor_toggle_expression(&top(1));
         set(&mut app, &Target::Field(top(1), 0), "inputs.loud");
         let then: Place = vec![(1, 0)];
-        app.editor_add(&then, "Run a tool");
+        app.editor_add(&then, "Use a tool");
         set(
             &mut app,
             &Target::Field(
@@ -502,7 +551,7 @@ mod tests {
                     place: then,
                     index: 0,
                 },
-                0,
+                1,
             ),
             r#"{"command": "echo {{= greeted.len() }} greeted"}"#,
         );
@@ -550,7 +599,8 @@ mod tests {
         assert!(app.workflows.is_empty());
 
         set(&mut app, &Target::Name, "X");
-        app.editor_add(&Vec::new(), "If");
+        app.editor_add(&Vec::new(), "Check something");
+        app.editor_toggle_expression(&top(0));
         set(&mut app, &Target::Field(top(0), 0), "ghost > 1");
         app.save_editor();
         let ed = app.wf_editor.as_ref().unwrap();
@@ -577,7 +627,7 @@ mod tests {
         let mut app = on_the_page(&db);
         app.new_workflow();
         set(&mut app, &Target::Name, "Old name");
-        app.editor_add(&Vec::new(), "Set values");
+        app.editor_add(&Vec::new(), "Remember a value");
         set(&mut app, &Target::Field(top(0), 0), "a = 1");
         set(&mut app, &Target::Bind(top(0)), "made");
         app.save_editor();
@@ -625,10 +675,10 @@ mod tests {
         set(&mut app, &Target::Name, "Echo");
         app.editor_add_input();
         set(&mut app, &Target::InputName(0), "word");
-        app.editor_add(&Vec::new(), "Run a tool");
+        app.editor_add(&Vec::new(), "Use a tool");
         set(
             &mut app,
-            &Target::Field(top(0), 0),
+            &Target::Field(top(0), 1),
             r#"{"command": "echo got-{{inputs.word}}"}"#,
         );
 
@@ -655,7 +705,7 @@ mod tests {
 
         // A step with a problem is not run.
         app.wf_test.inputs = TextEdit::new("word = hi");
-        set(&mut app, &Target::Field(top(0), 0), "{not json");
+        set(&mut app, &Target::Field(top(0), 1), "{not json");
         app.test_editor();
         assert!(
             app.wf_test
@@ -668,7 +718,7 @@ mod tests {
         // Good: it runs for real and shows each step.
         set(
             &mut app,
-            &Target::Field(top(0), 0),
+            &Target::Field(top(0), 1),
             r#"{"command": "echo got-{{inputs.word}}"}"#,
         );
         app.test_editor();

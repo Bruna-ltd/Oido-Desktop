@@ -1331,6 +1331,8 @@ pub static SCENES: &[Scene] = &[
             copy: false,
         });
     }),
+    ("workflow-simple", |s| simple_workflow(s, false)),
+    ("workflow-add", |s| simple_workflow(s, true)),
     ("workflow-new", |s| {
         nested_workflow(s);
         s.new_workflow();
@@ -1933,4 +1935,42 @@ fn nested_workflow(s: &mut App) {
     s.workflows = vec![w.clone()];
     s.wf_open = Some("w1".into());
     s.route = Route::Workflows;
+}
+
+/// A short workflow the way a person makes it: a command, then a check on what it printed. The
+/// step with the check is selected, or the list of steps to add is open.
+fn simple_workflow(s: &mut App, adding: bool) {
+    use crate::flow_graph::View;
+    use crate::workflow::definition::Definition;
+    use crate::workflow::editor::{Editor, Loc, Menu};
+    nested_workflow(s);
+    let def: Definition = serde_json::from_value(serde_json::json!({
+        "inputs": {"folder": {"type": "string", "default": "downloads"}},
+        "steps": [
+            {"id": "step-1", "kind": "tool", "tool": "shell",
+             "args": {"command": "ls {{inputs.folder}}"}},
+            {"id": "step-2", "kind": "if",
+             "cond": "command.stdout.trimmed().contains(\"pdf\")",
+             "then": [{"id": "step-3", "kind": "generate", "instruction": "Say what is in {{command.stdout}}"}],
+             "else": []}
+        ]
+    }))
+    .unwrap_or_default();
+    // The first step has no name for its result yet: the check reads it, so it has one.
+    if let Some(w) = s.workflows.first_mut() {
+        w.definition = def;
+        let mut ed = Editor::from_saved(w);
+        ed.steps[0].bind = rune::TextEdit::new("command");
+        s.wf_editor = Some(ed);
+    }
+    s.wf_graph.shown = View::Graph;
+    s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+    s.fit_graph();
+    s.wf_graph.selected = Some(Loc {
+        place: Vec::new(),
+        index: if adding { 0 } else { 1 },
+    });
+    if adding {
+        s.wf_menu = Some(Menu::AddStep);
+    }
 }

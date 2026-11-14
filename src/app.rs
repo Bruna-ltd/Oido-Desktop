@@ -138,6 +138,8 @@ pub struct App {
     pub wf_menu: Option<crate::workflow::editor::Menu>,
     /// Stands in for a box that is no longer there when something is typed into it.
     pub wf_stray: TextEdit,
+    /// Whether the workflow editor shows each step's id, result name and raw boxes.
+    pub wf_advanced: bool,
     pub composer: crate::composer::Composer,
     /// What was typed in the chats not open, by session id: each tab keeps its own draft.
     pub parked: std::collections::HashMap<String, crate::composer::Composer>,
@@ -325,6 +327,7 @@ impl App {
             wf_graph: crate::flow_graph::GraphView::default(),
             wf_menu: None,
             wf_stray: TextEdit::new(""),
+            wf_advanced: false,
             composer: crate::composer::Composer::new(),
             parked: std::collections::HashMap::new(),
             queued: std::collections::HashMap::new(),

@@ -10,7 +10,8 @@ use rune_kit::{
 use super::workflow_graph;
 use crate::app::App;
 use crate::flow_graph::View;
-use crate::workflow::definition::{FOR_EACH, PARALLEL, STEP_TOOLS, SWITCH};
+use crate::workflow::cond;
+use crate::workflow::definition::{FOR_EACH, PARALLEL, STEP_TOOLS, SWITCH, TOOL, WHILE};
 use crate::workflow::editor::{
     Block, Editor, INPUT_KINDS, KINDS, Loc, Menu, Node, Part, Place, Refs, Target, specs,
 };
@@ -186,16 +187,12 @@ fn cards(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
 /// The steps as boxes and wires, with the form of the selected one beside them.
 fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     let (place, index) = s.add_position();
-    let labels: Vec<&str> = KINDS.iter().map(|(_, l)| *l).collect();
     let target = place.clone();
     let header = heading(s, ed, k)
-        .child(pick(
+        .child(add_menu(
             "wfg-add-step".to_owned(),
             Menu::AddStep,
-            &labels,
-            None,
             "Add step",
-            false,
             s,
             k,
             layer,
@@ -461,6 +458,34 @@ where
         .build(k, layer)
 }
 
+/// The list of kinds of step to add, in two sections: what most workflows are made of, and the rest.
+pub(super) fn add_menu<F>(
+    key: String,
+    menu: Menu,
+    placeholder: &str,
+    s: &App,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    choose: F,
+) -> El
+where
+    F: Fn(&mut App, &str) + Clone + 'static,
+{
+    let options: Vec<(&str, &str)> = KINDS.iter().map(|x| (x.group, x.label)).collect();
+    let hints: Vec<Option<&str>> = KINDS.iter().map(|x| Some(x.hint)).collect();
+    let toggle = menu.clone();
+    Select::grouped(key, &options)
+        .details(&hints)
+        .placeholder(placeholder.to_owned())
+        .label(placeholder.to_owned())
+        .appearance(SelectAppearance::Inline)
+        .open(s.wf_menu.as_ref() == Some(&menu))
+        .on_toggle(move |s: &mut App| s.toggle_menu(&toggle))
+        .on_close(|s: &mut App| s.wf_menu = None)
+        .on_choose(move |s: &mut App, name: &str, _| choose(s, name))
+        .build(k, layer)
+}
+
 fn agent_row(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
     let people = s.agent_choices();
@@ -610,7 +635,6 @@ fn steps(s: &App, ed: &Editor, place: &Place, k: &Kit, layer: &mut Vec<El>) -> E
         };
         out = out.child(card(s, ed, &at, node, list.len(), true, k, layer));
     }
-    let labels: Vec<&str> = KINDS.iter().map(|(_, l)| *l).collect();
     let target = place.clone();
     let key = format!(
         "wfe-add-{}",
@@ -620,13 +644,10 @@ fn steps(s: &App, ed: &Editor, place: &Place, k: &Kit, layer: &mut Vec<El>) -> E
             .collect::<Vec<_>>()
             .join("-")
     );
-    out.child(row().child(pick(
+    out.child(row().child(add_menu(
         key,
         Menu::Add(place.clone()),
-        &labels,
-        None,
         "+ Add a step",
-        false,
         s,
         k,
         layer,
@@ -648,8 +669,8 @@ fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
 fn kind_label(kind: &str) -> &'static str {
     KINDS
         .iter()
-        .find(|(k, _)| *k == kind)
-        .map_or("Step", |(_, l)| *l)
+        .find(|x| x.kind == kind)
+        .map_or("Step", |x| x.label)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -670,28 +691,16 @@ fn card(
     let gone = at.clone();
     let id_at = at.clone();
     let bind_at = at.clone();
-    let id_field = field(
-        "Id",
-        &n.id,
-        &format!("wfe-id-{key}"),
-        "step-1",
-        1,
-        None,
-        k,
-        move |s: &mut App| s.editor_text(&Target::Id(id_at.clone())),
-    );
-    let bind_field = field(
-        "Keep the result as",
-        &n.bind,
-        &format!("wfe-bind-{key}"),
-        "name",
-        1,
-        None,
-        k,
-        move |s: &mut App| s.editor_text(&Target::Bind(bind_at.clone())),
-    );
+    let advanced = s.wf_advanced;
     let controls = row()
         .gap(2.0)
+        .center_y()
+        .child(
+            small("Advanced", ButtonVariant::Ghost)
+                .on_press(|s: &mut App| s.wf_advanced = !s.wf_advanced)
+                .build(k)
+                .key(format!("wfe-advanced-{key}")),
+        )
         .child(
             small("↑", ButtonVariant::Ghost)
                 .disabled(at.index == 0)
@@ -715,37 +724,13 @@ fn card(
     let label = text(kind_label(&n.kind))
         .font(k.ty.ui_medium)
         .color(c.text_base);
-    // Beside the graph the form is narrow: the boxes go under the name and buttons, not beside.
-    let head = if with_steps {
-        row()
-            .w_full()
-            .center_y()
-            .gap(8.0)
-            .child(label)
-            .child(col().w(150.0).child(id_field))
-            .child(col().w(150.0).child(bind_field))
-            .child(el().grow(1.0))
-            .child(controls)
-    } else {
-        col()
-            .w_full()
-            .gap(8.0)
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .child(label)
-                    .child(el().grow(1.0))
-                    .child(controls),
-            )
-            .child(
-                row()
-                    .w_full()
-                    .gap(8.0)
-                    .child(col().grow(1.0).min_w(0.0).child(id_field))
-                    .child(col().grow(1.0).min_w(0.0).child(bind_field)),
-            )
-    };
+    let head = row()
+        .w_full()
+        .center_y()
+        .gap(8.0)
+        .child(label)
+        .child(el().grow(1.0))
+        .child(controls);
     let mut out = col()
         .key(format!("wfe-card-{key}"))
         .w_full()
@@ -755,6 +740,36 @@ fn card(
         .fill(c.layer_01)
         .border(1.0, c.border_muted)
         .child(head);
+    // How the steps are named inside is for those who use the results by name.
+    if advanced {
+        let id_at = at.clone();
+        let bind_at = at.clone();
+        out = out.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .child(col().grow(1.0).min_w(0.0).child(field(
+                    "Id",
+                    &n.id,
+                    &format!("wfe-id-{key}"),
+                    "step-1",
+                    1,
+                    None,
+                    k,
+                    move |s: &mut App| s.editor_text(&Target::Id(id_at.clone())),
+                )))
+                .child(col().grow(1.0).min_w(0.0).child(field(
+                    "Keep the result as",
+                    &n.bind,
+                    &format!("wfe-bind-{key}"),
+                    "name",
+                    1,
+                    None,
+                    k,
+                    move |s: &mut App| s.editor_text(&Target::Bind(bind_at.clone())),
+                ))),
+        );
+    }
 
     if n.kind == crate::workflow::definition::TOOL {
         let tool_at = at.clone();
@@ -792,6 +807,19 @@ fn card(
         let Some(edit) = n.fields.get(i) else {
             continue;
         };
+        if spec.key == "cond" && n.when.is_some() {
+            out = out.child(comparison(s, ed, at, n, k, layer));
+            continue;
+        }
+        // A shell command is typed as it is; the JSON of the other tools' arguments, and of a
+        // shell command with more than a command, is there for those who ask or whose step has it.
+        let shell = n.tool == crate::tools::SHELL;
+        if n.kind == TOOL
+            && ((spec.key == "command" && !shell)
+                || (spec.key == "args" && shell && !advanced && edit.text.trim().is_empty()))
+        {
+            continue;
+        }
         let target = Target::Field(at.clone(), i);
         let names = names_for(s, ed, at, spec.key, spec.refs, &target, &key, k, layer);
         let f_at = at.clone();
@@ -805,6 +833,9 @@ fn card(
             k,
             move |s: &mut App| s.editor_text(&Target::Field(f_at.clone(), i)),
         ));
+        if spec.key == "cond" {
+            out = out.child(expression_toggle(at, n, k));
+        }
     }
     if n.kind == FOR_EACH || n.kind == PARALLEL {
         let on = n.go_on;
@@ -856,7 +887,8 @@ fn card(
     out
 }
 
-/// The picker of names for a box, when the box reads names.
+/// The picker of what a box can use, when the box reads results: "Output of: `ls`", not the name
+/// the step keeps it under.
 #[allow(clippy::too_many_arguments)]
 fn names_for(
     s: &App,
@@ -872,24 +904,120 @@ fn names_for(
     if refs == Refs::None {
         return None;
     }
-    let names = ed.names(at, Some(box_key));
-    if names.is_empty() {
+    let found = ed.results(at, Some(box_key));
+    if found.is_empty() {
         return None;
     }
-    let list: Vec<&str> = names.iter().map(String::as_str).collect();
-    let target_for = target.clone();
+    let list: Vec<&str> = found.iter().map(|f| f.label.as_str()).collect();
+    let (target_for, at_for, box_for) = (target.clone(), at.clone(), box_key.to_owned());
     Some(pick(
         format!("wfe-names-{key}-{box_key}"),
         Menu::Names(target.clone()),
         &list,
         None,
-        "Insert a name",
+        "Use a result",
         false,
         s,
         k,
         layer,
-        move |s, name| s.editor_insert(&target_for, refs == Refs::Braces, name),
+        move |s, label| {
+            s.editor_use(&target_for, &at_for, &box_for, refs == Refs::Braces, label);
+        },
     ))
+}
+
+/// An `if` or `while` condition as "[result] [is] [value]".
+fn comparison(s: &App, ed: &Editor, at: &Loc, n: &Node, k: &Kit, layer: &mut Vec<El>) -> El {
+    let c = &k.c;
+    let Some(when) = &n.when else {
+        return el();
+    };
+    let key = loc_key(at);
+    let found = ed.results(at, Some("cond"));
+    let labels: Vec<&str> = found.iter().map(|f| f.label.as_str()).collect();
+    // What is chosen shows in words when it is one of the results, else as it was written.
+    let current = found
+        .iter()
+        .find(|f| ed.named(&f.source).as_deref() == Some(when.left.as_str()))
+        .map(|f| f.label.as_str())
+        .or(Some(when.left.as_str()).filter(|l| !l.is_empty()));
+    let (left_at, op_at) = (at.clone(), at.clone());
+    let ops: Vec<&str> = cond::OPS.iter().map(|o| o.label()).collect();
+    let mut line = col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            text(if n.kind == WHILE {
+                "Repeat while"
+            } else {
+                "Check whether"
+            })
+            .font(k.ty.small)
+            .color(c.text_muted),
+        )
+        .child(row().w_full().child(pick(
+            format!("wfe-left-{key}"),
+            Menu::Left(at.clone()),
+            &labels,
+            current,
+            "Choose a result",
+            true,
+            s,
+            k,
+            layer,
+            move |s, label| s.editor_set_left(&left_at, label),
+        )))
+        .child(row().w_full().child(pick(
+            format!("wfe-compare-{key}"),
+            Menu::Compare(at.clone()),
+            &ops,
+            Some(when.op.label()),
+            "How",
+            true,
+            s,
+            k,
+            layer,
+            move |s, label| s.editor_set_compare(&op_at, label),
+        )));
+    if when.op.takes_value() {
+        let right_at = at.clone();
+        line = line.child(field(
+            "Value",
+            &when.right,
+            &format!("wfe-right-{key}"),
+            "pdf",
+            1,
+            None,
+            k,
+            move |s: &mut App| s.editor_text(&Target::Right(right_at.clone())),
+        ));
+    }
+    line.child(expression_toggle(at, n, k))
+}
+
+/// The button that changes a condition between its parts and the expression it stands for. An
+/// expression that is not of the parts' shape has none to go back to.
+fn expression_toggle(at: &Loc, n: &Node, k: &Kit) -> El {
+    let parts = n.when.is_some();
+    let src = n.condition_text();
+    if !parts && cond::parse(&src).is_none() && !src.trim().is_empty() {
+        return el();
+    }
+    let at = at.clone();
+    let key = loc_key(&at);
+    row().child(
+        small(
+            if parts {
+                "Write it as an expression"
+            } else {
+                "Use the simple form"
+            },
+            ButtonVariant::Ghost,
+        )
+        .on_press(move |s: &mut App| s.editor_toggle_expression(&at))
+        .build(k)
+        .key(format!("wfe-expression-{key}")),
+    )
 }
 
 /// One list of steps inside a step, under its heading.

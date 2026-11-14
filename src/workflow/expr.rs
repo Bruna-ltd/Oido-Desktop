@@ -43,8 +43,12 @@ fn base() -> Engine {
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
     // Rhai's own `trim` cuts the string it is called on and gives back nothing, so
-    // `out.stdout.trim()` is empty; this gives the trimmed text and leaves the value alone.
-    engine.register_fn("trimmed", |text: &str| text.trim().to_owned());
+    // `out.stdout.trim()` is empty; this gives the trimmed text and leaves the value alone. What is
+    // not text comes back as it is, so it can be put on any result.
+    engine.register_fn("trimmed", |v: Dynamic| match v.clone().into_string() {
+        Ok(text) => Dynamic::from(text.trim().to_owned()),
+        Err(_) => v,
+    });
     engine
 }
 
@@ -352,6 +356,12 @@ mod tests {
         assert_eq!(
             e.run(&s, "let t = out.stdout.trimmed(); t.len()").unwrap(),
             json!(8)
+        );
+        let n = Scope::from([("n".to_owned(), json!(3))]);
+        assert_eq!(e.eval(&n, "n.trimmed() == 3").unwrap(), json!(true));
+        assert_eq!(
+            e.eval(&s, "out.stdout.trimmed().contains(\"hi\")").unwrap(),
+            json!(true)
         );
     }
 }

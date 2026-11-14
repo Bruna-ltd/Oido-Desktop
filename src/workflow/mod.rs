@@ -4,6 +4,7 @@
 //! agent, no schedule.
 
 pub mod compile;
+pub mod cond;
 pub mod definition;
 pub mod editor;
 pub mod engine;

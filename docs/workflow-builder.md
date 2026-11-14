@@ -515,3 +515,28 @@ Left out on purpose: a minimap, colour per kind of step, a permanent palette col
   scripts have `trimmed()` instead, which gives the trimmed text and leaves the value alone
   (`files.stdout.trimmed().split("\n")`). The same holds for any Rhai method that edits in place.
 
+
+## Simpler to use (S1)
+
+The first version asked for expert knowledge: ids, result names, `{{x.stdout}}`, expressions. The
+editor now hides that behind plain words, and the expert forms are one press away.
+
+- **Add step** lists six steps under *Common* (Use a tool, Ask the AI, Check something, Repeat for
+  each, Pause or ask me, Do at once) and the rest under *More* (`KINDS` in `workflow/editor.rs`, each
+  with a group and a one-line hint). Labels are short because the list is narrow; the hints are the
+  entries' accessible descriptions only, as the kit's `Select` does not draw them.
+- **Id and "Keep the result as" are under Advanced** (`App.wf_advanced`, one switch for the editor).
+  A step is given a result name the first time something uses it, so nobody has to invent one.
+- **Use a result** (was "Insert a name") lists what a box can reach in words: *Input: folder*,
+  *Output of: shell: `ls`*, *Exit code of: …*, *The current item*. `Editor::scope` is the one walk of
+  what a box can see; `names` (for checking) and `results` (for the list) both read it. `resolve`
+  gives a step its name when its result is first used.
+- **A shell command has a box of its own** ("Command to run"). The JSON arguments show only for other
+  tools, or for a shell step that has more than a command.
+- **Conditions of `if` and `while` read "[result] [is / contains / …] [value]"** (`workflow/cond.rs`).
+  The saved form is still an expression, `x.trimmed() == "pdf"`; one that is not of that shape opens
+  as an expression, with no way to turn it into parts. `trimmed()` now accepts any value and only
+  trims text, because the builder puts it on every left side (a command's output ends in a new line).
+
+Not done yet: nodes in the graph still read as code (``shell: `ls …` ``), the other tools' arguments
+and `switch`/`for each` boxes are still typed expressions, and a new workflow still starts blank.

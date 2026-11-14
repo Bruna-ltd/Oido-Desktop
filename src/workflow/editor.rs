@@ -8,9 +8,10 @@ use rune::TextEdit;
 use serde_json::Value;
 
 use super::Saved;
+use super::cond::{self, Op};
 use super::definition::{
     Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input,
-    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, WAIT, WHILE, each_step, validate,
+    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, WAIT, WHILE, describe, each_step, validate,
 };
 
 /// How a text box is checked and what can be put into it.
@@ -51,13 +52,22 @@ const fn spec(
     }
 }
 
-static TOOL_BOXES: [Spec; 1] = [spec(
-    "args",
-    "Arguments (JSON)",
-    r#"{"command": "ls {{inputs.folder}}"}"#,
-    3,
-    Refs::Braces,
-)];
+static TOOL_BOXES: [Spec; 2] = [
+    spec(
+        "command",
+        "Command to run",
+        "ls -1 {{inputs.folder}}",
+        2,
+        Refs::Braces,
+    ),
+    spec(
+        "args",
+        "Arguments (JSON)",
+        r#"{"url": "https://example.com"}"#,
+        3,
+        Refs::Braces,
+    ),
+];
 static GENERATE_BOXES: [Spec; 1] = [spec(
     "instruction",
     "Instruction",
@@ -178,22 +188,116 @@ pub fn specs(kind: &str) -> &'static [Spec] {
     }
 }
 
-/// The kinds of step a person can add, in the order the menu lists them.
-pub const KINDS: [(&str, &str); 13] = [
-    (TOOL, "Run a tool"),
-    (GENERATE, "Write with the model"),
-    (DECIDE, "Let the model choose"),
-    (IF, "If"),
-    (SWITCH, "Switch"),
-    (FOR_EACH, "For each"),
-    (WHILE, "Repeat while"),
-    (SET, "Set values"),
-    (TRY, "Try, and recover"),
-    (FLOW, "Run another workflow"),
-    (CODE, "Run a script"),
-    (WAIT, "Wait or ask first"),
-    (PARALLEL, "Run branches at once"),
+/// A kind of step as the Add step list shows it.
+#[derive(Clone, Copy, Debug)]
+pub struct Kind {
+    pub kind: &'static str,
+    pub label: &'static str,
+    /// The heading it is listed under.
+    pub group: &'static str,
+    /// One line on what it is for.
+    pub hint: &'static str,
+}
+
+const fn kind(
+    kind: &'static str,
+    label: &'static str,
+    group: &'static str,
+    hint: &'static str,
+) -> Kind {
+    Kind {
+        kind,
+        label,
+        group,
+        hint,
+    }
+}
+
+pub const COMMON: &str = "Common";
+pub const MORE: &str = "More";
+
+/// The kinds of step a person can add, in the order the list shows them: what most workflows are
+/// made of first, then the rest.
+pub const KINDS: [Kind; 13] = [
+    kind(
+        TOOL,
+        "Use a tool",
+        COMMON,
+        "Run a command, read a file, fetch a web page",
+    ),
+    kind(
+        GENERATE,
+        "Ask the AI",
+        COMMON,
+        "The model writes text from your instruction",
+    ),
+    kind(
+        IF,
+        "Check something",
+        COMMON,
+        "Do one thing or another, depending on a result",
+    ),
+    kind(
+        FOR_EACH,
+        "Repeat for each",
+        COMMON,
+        "The same steps for every file, line or name",
+    ),
+    kind(
+        WAIT,
+        "Pause or ask me",
+        COMMON,
+        "Wait a while, or stop until you say yes",
+    ),
+    kind(
+        PARALLEL,
+        "Do at once",
+        COMMON,
+        "Several lists of steps, side by side",
+    ),
+    kind(
+        DECIDE,
+        "Let the AI choose",
+        MORE,
+        "The model picks one of the options you give it",
+    ),
+    kind(
+        SWITCH,
+        "Choose by value",
+        MORE,
+        "Different steps for different values",
+    ),
+    kind(
+        WHILE,
+        "Repeat until done",
+        MORE,
+        "Go round again while something is true",
+    ),
+    kind(
+        TRY,
+        "Retry if it fails",
+        MORE,
+        "Try again, then do something else if it still fails",
+    ),
+    kind(
+        FLOW,
+        "Run a workflow",
+        MORE,
+        "Use a workflow you already made",
+    ),
+    kind(
+        SET,
+        "Remember a value",
+        MORE,
+        "Work something out and keep it under a name",
+    ),
+    kind(CODE, "Run a script", MORE, "A few lines of code"),
 ];
+
+/// The kind of step an Add step list entry is.
+pub fn kind_named(label: &str) -> Option<&'static str> {
+    KINDS.iter().find(|k| k.label == label).map(|k| k.kind)
+}
 
 /// What a list of steps inside a step is for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -242,6 +346,24 @@ pub struct Node {
     /// One per [`specs`] of the kind.
     pub fields: Vec<TextEdit>,
     pub blocks: Vec<Block>,
+    /// For an `if` or a `while`: its condition said as "result, is, value". `None` when the
+    /// condition is an expression that does not say that, and the `cond` box holds it.
+    pub when: Option<Comparison>,
+}
+
+/// A condition as "[result] [is / contains / …] [value]".
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Comparison {
+    pub left: String,
+    pub op: Op,
+    pub right: TextEdit,
+}
+
+impl Comparison {
+    /// The expression this says, once there is a result to look at.
+    pub fn source(&self) -> Option<String> {
+        cond::build(&self.left, self.op, &self.right.text)
+    }
 }
 
 /// Where a list of steps is: through which step and which of its blocks, from the top. Empty is
@@ -291,6 +413,7 @@ impl Node {
             go_on: false,
             fields: specs(kind).iter().map(|_| TextEdit::new("")).collect(),
             blocks,
+            when: matches!(kind, IF | WHILE).then(Comparison::default),
         }
     }
 
@@ -302,6 +425,32 @@ impl Node {
     fn set_field(&mut self, key: &str, text: impl Into<String>) {
         if let Some(i) = specs(&self.kind).iter().position(|s| s.key == key) {
             self.fields[i] = TextEdit::new(text);
+        }
+    }
+
+    /// Takes a condition as it is saved: said in parts if it is one that can be, else as the
+    /// expression it is.
+    fn set_condition(&mut self, src: &str) {
+        self.when = cond::parse(src).map(|(left, op, right)| Comparison {
+            left,
+            op,
+            right: TextEdit::new(right),
+        });
+        if self.when.is_none() {
+            self.set_field("cond", src);
+        }
+    }
+
+    /// The condition as the expression it is, or what is typed in its box.
+    pub fn condition_text(&self) -> String {
+        self.condition().unwrap_or_default()
+    }
+
+    /// The condition of an `if` or `while`, whichever way it is written.
+    fn condition(&self) -> Option<String> {
+        match &self.when {
+            Some(c) => c.source(),
+            None => self.field_at("cond").and_then(opt),
         }
     }
 
@@ -321,7 +470,14 @@ impl Node {
         match s.kind.as_str() {
             TOOL => {
                 n.tool = s.tool.clone().unwrap_or_default();
-                let args = s.args.clone().unwrap_or_default();
+                let mut args = s.args.clone().unwrap_or_default();
+                // A shell command has a box of its own, so the arguments are what else there is.
+                if n.tool == crate::tools::SHELL
+                    && let Some(command) = args.get("command").and_then(Value::as_str)
+                {
+                    n.set_field("command", command);
+                    args.remove("command");
+                }
                 n.set_field(
                     "args",
                     if args.is_empty() {
@@ -338,7 +494,7 @@ impl Node {
                 n.set_field("input", text(&s.input));
             }
             IF => {
-                n.set_field("cond", text(&s.cond));
+                n.set_condition(&text(&s.cond));
                 n.blocks[0].steps = s.then.iter().map(Node::from_step).collect();
                 n.blocks[1].steps = s.otherwise.iter().map(Node::from_step).collect();
             }
@@ -366,7 +522,7 @@ impl Node {
                 n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
             }
             WHILE => {
-                n.set_field("cond", text(&s.cond));
+                n.set_condition(&text(&s.cond));
                 n.set_field("max", s.max.map(|m| m.to_string()).unwrap_or_default());
                 n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
             }
@@ -450,9 +606,16 @@ impl Node {
                 if let Some(text) = get("args") {
                     match serde_json::from_str::<Value>(&text) {
                         Ok(Value::Object(m)) => s.args = Some(m).filter(|m| !m.is_empty()),
-                        Ok(_) => bad.push(format!("step {at}: the arguments are a JSON object, like {{\"command\": \"ls\"}}")),
+                        Ok(_) => bad.push(format!("step {at}: the arguments are a JSON object, like {{\"url\": \"https://example.com\"}}")),
                         Err(e) => bad.push(format!("step {at}: the arguments are not JSON: {e}")),
                     }
+                }
+                if self.tool == crate::tools::SHELL
+                    && let Some(command) = get("command")
+                {
+                    s.args
+                        .get_or_insert_with(Default::default)
+                        .insert("command".to_owned(), Value::String(command));
                 }
             }
             GENERATE => s.instruction = get("instruction"),
@@ -462,7 +625,7 @@ impl Node {
                 s.input = get("input");
             }
             IF => {
-                s.cond = get("cond");
+                s.cond = self.condition();
                 s.then = steps(&self.blocks[0], bad, at);
                 s.otherwise = steps(&self.blocks[1], bad, at);
             }
@@ -486,7 +649,7 @@ impl Node {
                 s.steps = steps(&self.blocks[0], bad, at);
             }
             WHILE => {
-                s.cond = get("cond");
+                s.cond = self.condition();
                 if let Some(m) = get("max") {
                     match m.trim().parse::<u32>() {
                         Ok(n) => s.max = Some(n),
@@ -583,6 +746,8 @@ pub enum Target {
     Field(Loc, usize),
     /// The value a `switch` case is for: its block.
     When(Loc, usize),
+    /// What an `if` or `while` compares against.
+    Right(Loc),
 }
 
 /// Which pop-up list of the editor is open; one at a time.
@@ -597,6 +762,10 @@ pub enum Menu {
     /// The Add step button in the graph's header, which adds after the selected step.
     AddStep,
     Tool(Loc),
+    /// What an `if` or `while` looks at.
+    Left(Loc),
+    /// How it compares.
+    Compare(Loc),
     /// Names to put into a box.
     Names(Target),
 }
@@ -1001,6 +1170,10 @@ impl Editor {
             Target::Id(at) => self.node_mut(at).map(|n| &mut n.id),
             Target::Bind(at) => self.node_mut(at).map(|n| &mut n.bind),
             Target::Field(at, i) => self.node_mut(at).and_then(|n| n.fields.get_mut(*i)),
+            Target::Right(at) => self
+                .node_mut(at)
+                .and_then(|n| n.when.as_mut())
+                .map(|c| &mut c.right),
             Target::When(at, b) => self
                 .node_mut(at)
                 .and_then(|n| n.blocks.get_mut(*b))
@@ -1008,54 +1181,262 @@ impl Editor {
         }
     }
 
-    /// What a box can name: the inputs as `inputs.name`, what the steps before bind, and inside a
-    /// loop its item and `index`. A `while` condition also sees what its body binds.
-    pub fn names(&self, at: &Loc, key: Option<&str>) -> Vec<String> {
-        let mut names: Vec<String> = self
+    /// What a box at `at` can reach, in order: the inputs, the steps before it (those of the lists
+    /// it is in too), and inside a loop its item and `index`. A `while` condition also sees what
+    /// its body makes.
+    fn scope(&self, at: &Loc, key: Option<&str>) -> Vec<Seen> {
+        let mut seen: Vec<Seen> = self
             .inputs
             .iter()
             .map(|r| r.name.text.trim())
             .filter(|n| !n.is_empty())
-            .map(|n| format!("inputs.{n}"))
+            .map(|n| Seen::Input(n.to_owned()))
             .collect();
-        let bound = |list: &[Node], names: &mut Vec<String>| {
-            for n in list {
-                let b = n.bind.text.trim();
-                if !b.is_empty() && !names.iter().any(|x| x == b) {
-                    names.push(b.to_owned());
-                }
-            }
+        let before = |place: &Place, n: usize, seen: &mut Vec<Seen>| {
+            seen.extend((0..n).map(|index| {
+                Seen::Step(Loc {
+                    place: place.clone(),
+                    index,
+                })
+            }));
         };
         let mut list = &self.steps;
+        let mut place = Place::new();
         for &(step, block) in &at.place {
             let Some(node) = list.get(step) else {
-                return names;
+                return seen;
             };
-            bound(&list[..step], &mut names);
+            before(&place, step, &mut seen);
             match node.kind.as_str() {
                 FOR_EACH => {
-                    names.push(node.item_name());
-                    names.push("index".to_owned());
+                    seen.push(Seen::Item(node.item_name()));
+                    seen.push(Seen::Index);
                 }
-                WHILE => names.push("index".to_owned()),
-                TRY if block == 1 => names.push("error".to_owned()),
+                WHILE => seen.push(Seen::Index),
+                TRY if block == 1 => seen.push(Seen::Error),
                 _ => {}
             }
             let Some(b) = node.blocks.get(block) else {
-                return names;
+                return seen;
             };
             list = &b.steps;
+            place.push((step, block));
         }
-        bound(&list[..at.index.min(list.len())], &mut names);
+        before(&place, at.index.min(list.len()), &mut seen);
         if let Some(node) = list.get(at.index)
             && node.kind == WHILE
             && key == Some("cond")
         {
-            names.push("index".to_owned());
-            bound(&node.blocks[0].steps, &mut names);
+            seen.push(Seen::Index);
+            let mut inner = place.clone();
+            inner.push((at.index, 0));
+            before(&inner, node.blocks[0].steps.len(), &mut seen);
+        }
+        seen
+    }
+
+    fn node(&self, at: &Loc) -> Option<&Node> {
+        let mut list = &self.steps;
+        for &(step, block) in &at.place {
+            list = &list.get(step)?.blocks.get(block)?.steps;
+        }
+        list.get(at.index)
+    }
+
+    /// What a box can name: the inputs as `inputs.name`, what the steps before bind, and inside a
+    /// loop its item and `index`. A `while` condition also sees what its body binds.
+    pub fn names(&self, at: &Loc, key: Option<&str>) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for seen in self.scope(at, key) {
+            let name = match seen {
+                Seen::Input(n) => format!("inputs.{n}"),
+                Seen::Step(loc) => match self.node(&loc).map(|n| n.bind.text.trim()) {
+                    Some(b) if !b.is_empty() => b.to_owned(),
+                    _ => continue,
+                },
+                Seen::Item(n) => n,
+                Seen::Index => "index".to_owned(),
+                Seen::Error => "error".to_owned(),
+            };
+            if !names.contains(&name) {
+                names.push(name);
+            }
         }
         names
     }
+
+    /// What a box can use, said as a person would: "Output of: `ls`", not `files.stdout`. A step
+    /// that does not keep its result under a name yet is offered too; using it gives it one.
+    pub fn results(&self, at: &Loc, key: Option<&str>) -> Vec<Found> {
+        let mut out = Vec::new();
+        for seen in self.scope(at, key) {
+            match seen {
+                Seen::Input(n) => out.push(Found {
+                    label: format!("Input: {n}"),
+                    source: Source::Name(format!("inputs.{n}")),
+                }),
+                Seen::Item(n) => out.push(Found {
+                    label: format!("The current item ({n})"),
+                    source: Source::Name(n),
+                }),
+                Seen::Index => out.push(Found {
+                    label: "Which round this is (from 0)".to_owned(),
+                    source: Source::Name("index".to_owned()),
+                }),
+                Seen::Error => out.push(Found {
+                    label: "What went wrong".to_owned(),
+                    source: Source::Name("error".to_owned()),
+                }),
+                Seen::Step(loc) => {
+                    let Some(node) = self.node(&loc) else {
+                        continue;
+                    };
+                    if node.kind == WAIT {
+                        continue;
+                    }
+                    let what = describe(&node.to_step("", &mut Vec::new()));
+                    let shell = node.kind == TOOL && node.tool == crate::tools::SHELL;
+                    let parts: &[(&str, &'static str)] = if shell {
+                        &[("Output of", ".stdout"), ("Exit code of", ".exit_code")]
+                    } else {
+                        &[("Result of", "")]
+                    };
+                    for (what_it_is, suffix) in parts {
+                        out.push(Found {
+                            label: format!("{what_it_is}: {what}"),
+                            source: Source::Step {
+                                at: loc.clone(),
+                                suffix,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        // Two steps can read the same; the list needs each to be told apart.
+        for i in 1..out.len() {
+            let mut n = 1;
+            let base = out[i].label.clone();
+            while out[..i].iter().any(|f| f.label == out[i].label) {
+                n += 1;
+                out[i].label = format!("{base} ({n})");
+            }
+        }
+        out
+    }
+
+    /// The name a [`Found`] stands for, if it has one now.
+    pub fn named(&self, source: &Source) -> Option<String> {
+        match source {
+            Source::Name(n) => Some(n.clone()),
+            Source::Step { at, suffix } => {
+                let bind = self.node(at)?.bind.text.trim();
+                (!bind.is_empty()).then(|| format!("{bind}{suffix}"))
+            }
+        }
+    }
+
+    /// The name to put in a box for something it can use. A step with no name for its result is
+    /// given one.
+    pub fn resolve(&mut self, source: &Source) -> Option<String> {
+        match source {
+            Source::Name(n) => Some(n.clone()),
+            Source::Step { at, suffix } => {
+                let taken: Vec<String> = {
+                    let mut all = Vec::new();
+                    collect_binds(&self.steps, &mut all);
+                    all
+                };
+                let node = self.node_mut(at)?;
+                if node.bind.text.trim().is_empty() {
+                    node.bind = TextEdit::new(fresh_name(node, &taken));
+                }
+                Some(format!("{}{suffix}", node.bind.text.trim()))
+            }
+        }
+    }
+
+    /// Sets what an `if` or `while` looks at.
+    pub fn set_condition_left(&mut self, at: &Loc, left: &str) {
+        if let Some(c) = self.node_mut(at).and_then(|n| n.when.as_mut()) {
+            c.left = left.to_owned();
+        }
+    }
+
+    /// Sets how an `if` or `while` compares it.
+    pub fn set_condition_op(&mut self, at: &Loc, op: Op) {
+        if let Some(c) = self.node_mut(at).and_then(|n| n.when.as_mut()) {
+            c.op = op;
+        }
+    }
+
+    /// Turns a condition into the expression it says, to be edited as one.
+    pub fn condition_as_expression(&mut self, at: &Loc) {
+        if let Some(n) = self.node_mut(at) {
+            let src = n.condition().unwrap_or_default();
+            n.when = None;
+            n.set_field("cond", src);
+        }
+    }
+
+    /// Turns an expression back into "result, is, value", if it says that.
+    pub fn condition_in_parts(&mut self, at: &Loc) -> bool {
+        let Some(n) = self.node_mut(at) else {
+            return false;
+        };
+        let src = n.condition().unwrap_or_default();
+        if src.is_empty() {
+            n.when = Some(Comparison::default());
+            return true;
+        }
+        n.set_condition(&src);
+        n.when.is_some()
+    }
+}
+
+/// What a box at some place can reach, as the scope walk finds it.
+enum Seen {
+    Input(String),
+    Step(Loc),
+    Item(String),
+    Index,
+    Error,
+}
+
+/// Something a box can use, as the list of results shows it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Found {
+    pub label: String,
+    pub source: Source,
+}
+
+/// What a [`Found`] puts in a box.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Source {
+    /// A name that is there already: an input, a loop's item, the name a step keeps its result as.
+    Name(String),
+    /// The result of a step, or a part of it (`.stdout`).
+    Step { at: Loc, suffix: &'static str },
+}
+
+/// A name for the result of `node`, from what it is, that none in `taken` is.
+fn fresh_name(node: &Node, taken: &[String]) -> String {
+    let base = match node.kind.as_str() {
+        TOOL => match node.tool.as_str() {
+            crate::tools::SHELL => "command",
+            crate::web::NAME => "page",
+            crate::files::READ => "file",
+            _ => "tool",
+        },
+        GENERATE => "text",
+        DECIDE => "choice",
+        FLOW => "flow",
+        _ => "result",
+    };
+    std::iter::once(base.to_owned())
+        .chain((2..).map(|n| format!("{base}{n}")))
+        .find(|n| !taken.contains(n))
+        .unwrap_or_default()
 }
 
 fn collect_binds(list: &[Node], out: &mut Vec<String>) {
@@ -1189,7 +1570,7 @@ mod tests {
     #[test]
     fn a_problem_in_a_box_or_in_the_whole_is_said_in_words() {
         let mut e = Editor::from_saved(&saved(every_kind()));
-        e.steps[0].fields[0] = TextEdit::new("{not json");
+        e.steps[0].fields[1] = TextEdit::new("{not json");
         let wait = 5;
         e.steps[wait].fields[1] = TextEdit::new("lots");
         e.steps[4].blocks[0].steps[0].fields[0] = TextEdit::new("no equals sign");
@@ -1504,5 +1885,130 @@ mod tests {
         let inner = e.add_at(&vec![(3, 1)], 9, "set").unwrap();
         assert_eq!(inner, at(&[(3, 1)], 1), "past the end is the end");
         assert_eq!(e.add_at(&vec![(8, 0)], 0, "set"), None);
+    }
+
+    #[test]
+    fn a_shell_command_has_a_box_of_its_own_and_the_rest_of_its_arguments_stay_json() {
+        let e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls -1"}},
+            {"id": "b", "kind": "tool", "tool": "shell", "args": {"command": "ls", "cwd": "/tmp"}},
+            {"id": "c", "kind": "tool", "tool": "web_fetch", "args": {"url": "https://x.test"}}
+        ]})));
+        let text = |n: usize, i: usize| e.steps[n].fields[i].text.clone();
+        assert_eq!(
+            (text(0, 0), text(0, 1)),
+            ("ls -1".to_owned(), String::new())
+        );
+        assert_eq!(text(1, 0), "ls");
+        assert!(text(1, 1).contains("cwd") && !text(1, 1).contains("command"));
+        assert_eq!(text(2, 0), "", "another tool has no command");
+        assert!(text(2, 1).contains("url"));
+        // Said back, it is what it was.
+        let def = e.definition().unwrap();
+        let args = |n: usize| def.steps[n].args.clone().unwrap();
+        assert_eq!(args(0)["command"], "ls -1");
+        assert_eq!(
+            (args(1)["command"].clone(), args(1)["cwd"].clone()),
+            (json!("ls"), json!("/tmp"))
+        );
+        assert_eq!(args(2)["url"], "https://x.test");
+    }
+
+    #[test]
+    fn a_result_is_offered_in_words_and_a_step_that_keeps_none_gets_a_name_when_one_is_used() {
+        let mut e = Editor::from_saved(&saved(json!({
+            "inputs": {"folder": {"type": "string"}},
+            "steps": [
+                {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls"}},
+                {"id": "b", "kind": "tool", "tool": "shell", "bind": "files", "args": {"command": "ls"}},
+                {"id": "w", "kind": "wait", "seconds": 1},
+                {"id": "g", "kind": "generate", "instruction": "x"},
+                {"id": "z", "kind": "tool", "tool": "shell", "args": {"command": "ls"}}
+            ]
+        })));
+        let here = at(&[], 4);
+        let found = e.results(&here, None);
+        let labels: Vec<&str> = found.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(labels[0], "Input: folder");
+        assert!(labels.contains(&"Output of: shell: `ls`"));
+        assert!(
+            labels.contains(&"Exit code of: shell: `ls` (2)"),
+            "{labels:?}"
+        );
+        assert!(labels.iter().any(|l| l.starts_with("Result of: Write")));
+        assert!(
+            !labels.iter().any(|l| l.contains("Wait")),
+            "a wait gives nothing"
+        );
+        let mut unique = labels.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len(), "each can be told apart");
+        // The first has no name for its result: using it gives it one, and the same again is the same.
+        let first = found
+            .iter()
+            .find(|f| f.label == "Output of: shell: `ls`")
+            .unwrap();
+        assert_eq!(e.named(&first.source), None);
+        assert_eq!(e.resolve(&first.source).as_deref(), Some("command.stdout"));
+        assert_eq!(e.steps[0].bind.text, "command");
+        assert_eq!(e.resolve(&first.source).as_deref(), Some("command.stdout"));
+        assert_eq!(e.named(&first.source).as_deref(), Some("command.stdout"));
+        // The second keeps the name it has. A name already taken is not given again.
+        let named = found
+            .iter()
+            .find(|f| f.label == "Output of: shell: `ls` (2)");
+        assert_eq!(
+            e.resolve(&named.unwrap().source).as_deref(),
+            Some("files.stdout")
+        );
+        let last = e.results(&at(&[], 4), None);
+        let third = last
+            .iter()
+            .find(|f| f.label.starts_with("Result of: Write"))
+            .unwrap();
+        assert_eq!(e.resolve(&third.source).as_deref(), Some("text"));
+        // What a box could name is unchanged by any of this.
+        assert_eq!(
+            e.names(&here, None),
+            ["inputs.folder", "command", "files", "text"]
+        );
+    }
+
+    #[test]
+    fn a_condition_said_in_parts_is_the_expression_it_stands_for_and_reads_back_as_parts() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], IF);
+        let here = at(&[], 0);
+        // Nothing chosen yet: no condition.
+        assert_eq!(e.steps[0].condition(), None);
+        assert!(e.definition().is_err());
+        e.set_condition_left(&here, "files.stdout");
+        e.set_condition_op(&here, Op::Contains);
+        e.text_mut(&Target::Right(here.clone())).unwrap().text = "pdf".into();
+        assert_eq!(
+            e.steps[0].condition().as_deref(),
+            Some("files.stdout.trimmed().contains(\"pdf\")")
+        );
+        // Saved and opened again it is in parts.
+        let def = e.definition();
+        let step = e.steps[0].to_step("1", &mut Vec::new());
+        let again = Node::from_step(&step);
+        let parts = |n: &Node| {
+            n.when
+                .as_ref()
+                .map(|c| (c.left.clone(), c.op, c.right.text.clone()))
+        };
+        assert_eq!(parts(&again), parts(&e.steps[0]), "{def:?}");
+        assert!(parts(&again).is_some());
+        // As an expression it can be written freely; one of another shape has no parts to go back to.
+        e.condition_as_expression(&here);
+        assert!(e.steps[0].when.is_none());
+        e.text_mut(&Target::Field(here.clone(), 0)).unwrap().text = "a > 1 && b".into();
+        assert!(!e.condition_in_parts(&here));
+        assert_eq!(e.steps[0].condition().as_deref(), Some("a > 1 && b"));
+        e.text_mut(&Target::Field(here.clone(), 0)).unwrap().text = "x.trimmed() != \"\"".into();
+        assert!(e.condition_in_parts(&here));
+        assert_eq!(e.steps[0].when.as_ref().unwrap().op, Op::IsNotEmpty);
     }
 }
