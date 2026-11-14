@@ -62,6 +62,7 @@ pub fn trace_of(messages: &[Message]) -> (String, Vec<Trace>) {
 }
 
 /// What a model call or a run needs, worked out before leaving the UI thread.
+#[derive(Clone)]
 pub(crate) struct Prep {
     pub endpoint: Endpoint,
     pub credential: Option<Credential>,
@@ -84,9 +85,12 @@ pub(crate) struct Prep {
     pub mcp: Vec<McpTool>,
     /// The workflows its `flow` steps run, those they run too, and so on.
     pub flows: Vec<Saved>,
+    /// The team members its `delegate` steps hand tasks to.
+    pub crew: Vec<crate::delegate::Crew>,
 }
 
 /// An MCP tool a workflow step calls.
+#[derive(Clone)]
 pub(crate) struct McpTool {
     /// The name a step uses: `mcp__server__tool`.
     pub name: String,
@@ -97,7 +101,11 @@ pub(crate) struct McpTool {
 
 /// What a run gave back: how it went, and the sign-in tokens MCP servers renewed on the way, to be
 /// saved.
-type Ran = (Outcome, Vec<(String, crate::mcp::oauth::Tokens)>);
+type Ran = (
+    Outcome,
+    Vec<(String, crate::mcp::oauth::Tokens)>,
+    Vec<crate::delegate::Taken>,
+);
 
 fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Completion, String> {
     let request = Request {
@@ -122,6 +130,7 @@ fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Com
 /// Runs the workflow's steps with real tools and a real model. Blocks.
 fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> Ran {
     let renewed = std::sync::Mutex::new(Vec::new());
+    let handed = std::sync::Mutex::new(Vec::new());
     let cancel: &AtomicBool = stop;
     let place = crate::guard::Place {
         root: p.shell_dir.clone(),
@@ -146,6 +155,33 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> R
                     ..ToolOutcome::default()
                 };
             }
+        }
+        if name == crate::tools::DELEGATE {
+            let (who, task) = crate::delegate::parse(&args.to_string());
+            let Some(member) = p.crew.iter().find(|c| c.is(&who)) else {
+                return ToolOutcome {
+                    error: Some(format!("{who:?} is not on this agent's team.")),
+                    ..ToolOutcome::default()
+                };
+            };
+            let taken = member.take(&task, outside, stop);
+            let done = match taken.answer() {
+                Ok(text) => ToolOutcome {
+                    value: Value::String(text),
+                    outside: taken
+                        .outside()
+                        .then_some("a team member's answer, written with outside text in view"),
+                    ..ToolOutcome::default()
+                },
+                Err(why) => ToolOutcome {
+                    error: Some(why),
+                    ..ToolOutcome::default()
+                },
+            };
+            if let Ok(mut all) = handed.lock() {
+                all.push(taken);
+            }
+            return done;
         }
         if let Some(m) = p.mcp.iter().find(|m| m.name == name) {
             let done =
@@ -210,7 +246,9 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> R
     // Where a result came from decides whether what is made of it is held, whatever the tool.
     let tool = |name: &str, args: &Value, outside: Option<&str>| -> ToolOutcome {
         let mut done = run_tool(name, args, outside);
-        done.outside = crate::guard::taint::result_source(name, p.trust_folder);
+        done.outside = done
+            .outside
+            .or_else(|| crate::guard::taint::result_source(name, p.trust_folder));
         done
     };
     let model = |system: &str, message: &str| -> Result<(String, Usage), String> {
@@ -242,7 +280,11 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> R
             },
         },
     );
-    (outcome, renewed.into_inner().unwrap_or_default())
+    (
+        outcome,
+        renewed.into_inner().unwrap_or_default(),
+        handed.into_inner().unwrap_or_default(),
+    )
 }
 
 impl App {
@@ -299,6 +341,7 @@ impl App {
             trust_folder: agent.trust_workdir,
             mcp: Vec::new(),
             flows: Vec::new(),
+            crew: Vec::new(),
         })
     }
 
@@ -340,6 +383,8 @@ impl App {
                 target: self.mcp_target_for(&server.id)?,
             });
         }
+        let team = self.team_named(def, &prep.flows);
+        prep.crew = self.crew_for(agent_id, own.unwrap_or_default(), &team)?;
         let files = used.iter().any(|t| crate::files::is_file_tool(t));
         if files && prep.workdir.is_none() {
             return Err(format!(
@@ -348,6 +393,28 @@ impl App {
             ));
         }
         Ok(prep)
+    }
+
+    /// The team members that `def` and the workflows it runs hand tasks to, by name, once each.
+    fn team_named(&self, def: &Definition, others: &[Saved]) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let defs = std::iter::once(def).chain(others.iter().map(|w| &w.definition));
+        for d in defs {
+            crate::workflow::definition::each_step(&d.steps, &mut |s| {
+                if s.tool.as_deref() == Some(crate::tools::DELEGATE)
+                    && let Some(who) = s
+                        .args
+                        .as_ref()
+                        .and_then(|a| a.get("agent"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                    && !names.iter().any(|n| n.eq_ignore_ascii_case(who))
+                {
+                    names.push(who.to_owned());
+                }
+            });
+        }
+        names
     }
 
     /// The workflows of `agent_id` that `def` runs, and those they run, each once. Errs, in
@@ -612,10 +679,13 @@ impl App {
             Some(sid) => crate::guard::ask::Where::Chat(sid.to_owned()),
             None => crate::guard::ask::Where::Workflow(wf.id.clone()),
         };
-        let prep = Prep {
+        let mut prep = Prep {
             asker: self.asker(at, &wf.name),
             ..self.prepare_flow(agent_id, Some(&wf.id), &wf.definition)?
         };
+        for member in &mut prep.crew {
+            member.ask_through(&prep.asker);
+        }
         let record = RunRecord {
             id: new_id(),
             workflow_id: wf.id.clone(),
@@ -642,9 +712,12 @@ impl App {
         let agent_id = agent_id.to_owned();
         self.spawn(
             move || work(&def, &inputs, &prep, &cancel),
-            move |app, (outcome, renewed)| {
+            move |app, (outcome, renewed, handed)| {
                 for (server, tokens) in renewed {
                     app.mcp_keep_tokens(&server, tokens, false);
+                }
+                for taken in handed {
+                    app.record_taken(taken);
                 }
                 let mut record = record;
                 let who = Counted {
@@ -1220,6 +1293,65 @@ mod tests {
             .err()
             .unwrap();
         assert!(why.contains("no workflow called \"Nothing\""), "{why}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_step_can_hand_a_task_to_a_team_member_whose_answer_comes_back_and_whose_run_is_recorded() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(&db, vec![(200, EVENTS, text_stream("Ann says hi"))]);
+        let mut ann = crate::agents::Agent::blank(new_id());
+        ann.name = "Ann".into();
+        ann.description = "Greets people.".into();
+        ann.model = app.current().unwrap().model.clone();
+        app.roster.current_mut().unwrap().subagents.push(ann);
+        let hand = Step {
+            id: "hand".into(),
+            kind: "tool".into(),
+            tool: Some(crate::tools::DELEGATE.into()),
+            args: json!({"agent": "ann", "task": "Greet {{inputs.who}}"})
+                .as_object()
+                .cloned(),
+            bind: Some("greeting".into()),
+            ..Step::default()
+        };
+        save_workflow(
+            &mut app,
+            vec![hand],
+            json!({"who": {"type": "string", "default": "Bo"}}),
+        );
+        app.go(Route::Workflows);
+        app.run_open_workflow();
+
+        let asked = seen.try_recv().unwrap();
+        assert!(asked.contains("greet bo"), "{asked}");
+        let run = &app.wf_runs[0];
+        assert_eq!(run.status, RunStatus::Succeeded, "{}", run.error);
+        assert!(run.output.contains("Ann says hi"), "{}", run.output);
+        let filed = app.store.as_ref().unwrap().list_runs(10).unwrap();
+        assert!(
+            filed
+                .iter()
+                .any(|r| r.agent_name == "Ann" && r.title.contains("Greet Bo")),
+            "{:?}",
+            filed.iter().map(|r| &r.title).collect::<Vec<_>>()
+        );
+
+        // Someone who is not on the team is said before anything runs.
+        let stranger = Step {
+            id: "oops".into(),
+            kind: "tool".into(),
+            tool: Some(crate::tools::DELEGATE.into()),
+            args: json!({"agent": "Zed", "task": "x"}).as_object().cloned(),
+            bind: Some("z".into()),
+            ..Step::default()
+        };
+        let w = save_workflow(&mut app, vec![stranger], json!({}));
+        let why = app
+            .prepare_flow(&w.agent_id, Some(&w.id), &w.definition)
+            .err()
+            .unwrap();
+        assert!(why.contains("not on") && why.contains("team"), "{why}");
     }
 
     #[cfg(unix)]

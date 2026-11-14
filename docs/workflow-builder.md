@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try`, MCP tools, taint tracking and `flow` built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try`, MCP tools, taint tracking, `flow` and `delegate` built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -246,6 +246,17 @@ is the one non-deterministic tool step and is marked as such.
   workflows use). Renaming or deleting a workflow another one runs is found when that one next
   runs or is saved, not at the moment. Outside text: the other workflow is held only if what it
   was given is outside text; what it fetches itself comes back as outside text as usual.
+- `delegate` is a `tool` step with the tool `delegate` and arguments `agent` (a team member of the
+  workflow's agent, fixed text, any case) and `task` (text; `{{...}}` allowed). The editor offers
+  it only when the agent has a team. A member the workflow names is made ready before the run
+  starts (so one that is not on the team, or has no model, is said up front). It takes the task as
+  in a chat: fresh, with its own brief, model, tools and folder, unattended, up to 20 model calls.
+  Stop ends it. The answer is the step's result, as text. Each task is filed as a run of the
+  member's own under the Runs page. It goes through the guard like any acting step: if its task
+  reads outside text, you are asked first, and the member then works with that outside text in
+  view, so what it does is held too. Its answer counts as outside text if it wrote it with outside
+  text in view. Cards it raises go where the workflow's do. A model writes the answer, so the
+  step is not deterministic; the editor shows it as a tool step, with its agent and task.
 
 ## Phases
 
@@ -253,7 +264,7 @@ is the one non-deterministic tool step and is marked as such.
 `while`; `{{= expr}}`; nested validation; nested step log and run view; the editor (create, edit,
 validate, delete, open a taught draft). No new tools.
 
-**P2 — recovery and reach (`try` built).** `try` with retry and catch; `http`; MCP tools in `tool` steps;
+**P2 — recovery and reach (`try`, MCP tools, `flow`, `delegate` built; `http` not).** `try` with retry and catch; `http`; MCP tools in `tool` steps;
 `flow`; `delegate`.
 
 **P3 — concurrency and humans.** `parallel`; `code`; `wait` with approval and persisted runs

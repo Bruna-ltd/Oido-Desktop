@@ -474,6 +474,13 @@ fn card(s: &App, ed: &Editor, at: &Loc, n: &Node, len: usize, k: &Kit, layer: &m
         for server in s.mcp.servers.iter().filter(|m| m.offers()) {
             tools.extend(server.tools.iter().map(|t| server.qualified(&t.name)));
         }
+        // Handing a task over needs a team to hand it to.
+        if s.roster
+            .agent_ref(&ed.agent_id)
+            .is_some_and(|a| !a.subagents.is_empty())
+        {
+            tools.push(crate::tools::DELEGATE.to_owned());
+        }
         if !n.tool.is_empty() && !tools.contains(&n.tool) {
             tools.push(n.tool.clone());
         }

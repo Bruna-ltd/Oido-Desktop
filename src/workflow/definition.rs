@@ -404,7 +404,11 @@ impl Check<'_> {
             TOOL => {
                 match s.tool.as_deref() {
                     None | Some("") => self.bad.push(format!("{at}: a tool step needs a tool")),
-                    Some(t) if !STEP_TOOLS.contains(&t) && !crate::mcp::is_tool(t) => {
+                    Some(t)
+                        if !STEP_TOOLS.contains(&t)
+                            && !crate::mcp::is_tool(t)
+                            && t != crate::tools::DELEGATE =>
+                    {
                         self.bad.push(format!(
                             "{at}: {t:?} is not a tool a workflow can use; they are {}, or an MCP tool such as mcp__server__tool",
                             STEP_TOOLS.join(", ")
@@ -414,6 +418,30 @@ impl Check<'_> {
                 }
                 if let Some(args) = &s.args {
                     template::refs_in(&Value::Object(args.clone()), &mut refs);
+                }
+                if s.tool.as_deref() == Some(crate::tools::DELEGATE) {
+                    // The team member is fixed, so it is known and ready before the run starts.
+                    let who = s
+                        .args
+                        .as_ref()
+                        .and_then(|a| a.get("agent"))
+                        .and_then(Value::as_str);
+                    if who.is_none_or(|w| w.trim().is_empty() || !template::find_refs(w).is_empty())
+                    {
+                        self.bad.push(format!(
+                            "{at}: delegate needs `agent`, the name of a team member, as fixed text"
+                        ));
+                    }
+                    if s.args
+                        .as_ref()
+                        .and_then(|a| a.get("task"))
+                        .and_then(Value::as_str)
+                        .is_none_or(|t| t.trim().is_empty())
+                    {
+                        self.bad.push(format!(
+                            "{at}: delegate needs `task`, what the team member is to do"
+                        ));
+                    }
                 }
             }
             GENERATE => match s.instruction.as_deref() {
@@ -736,6 +764,10 @@ pub fn describe(s: &Step) -> String {
             };
             let what = match tool {
                 "shell" => arg("command").map(|c| format!("`{}`", short(&c))),
+                crate::tools::DELEGATE => match (arg("agent"), arg("task")) {
+                    (Some(who), Some(task)) => Some(format!("{who}: {}", short(&task))),
+                    (who, _) => who,
+                },
                 _ => arg("path"),
             };
             match what {
@@ -1052,5 +1084,22 @@ mod tests {
             {"id": "f", "kind": "flow", "workflow": "W", "bind": "r", "cond": "true"}
         ]}));
         assert!(why.contains("a flow step has no cond"), "{why}");
+    }
+
+    #[test]
+    fn handing_a_task_over_names_a_team_member_in_fixed_text_and_says_what_to_do() {
+        let ok = def(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "delegate", "bind": "r",
+             "args": {"agent": "Ann", "task": "Do {{inputs.x}}"}}
+        ], "inputs": {"x": {"type": "string"}}}));
+        assert_eq!(validate(&ok), Ok(()));
+        assert_eq!(describe(&ok.steps[0]), "delegate: Ann: Do {{inputs.x}}");
+        let why = problems(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "delegate", "args": {"agent": "{{inputs.x}}"}}
+        ], "inputs": {"x": {"type": "string"}}}));
+        assert!(
+            why.contains("fixed text") && why.contains("needs `task`"),
+            "{why}"
+        );
     }
 }
