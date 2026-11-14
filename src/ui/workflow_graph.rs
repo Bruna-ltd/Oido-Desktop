@@ -822,8 +822,7 @@ mod tests {
         assert_eq!(app.wf_editor.as_ref().unwrap().steps.len(), 3);
         // `/` opens the list to add a step after the selected one.
         assert!(press(&mut app, Key::Text("/".into()), false, false, false));
-        let (place, index) = app.add_position();
-        assert_eq!(app.wf_menu, Some(Menu::AddAt(place, index)));
+        assert_eq!(app.wf_menu, Some(Menu::AddStep));
         // Escape clears the selection; a key it has no use for is not taken.
         assert!(press(&mut app, Key::Escape, false, false, false));
         assert_eq!(app.selected_step(), None);

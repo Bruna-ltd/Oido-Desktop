@@ -594,6 +594,8 @@ pub enum Menu {
     Add(Place),
     /// Add a step at this position in this list.
     AddAt(Place, usize),
+    /// The Add step button in the graph's header, which adds after the selected step.
+    AddStep,
     Tool(Loc),
     /// Names to put into a box.
     Names(Target),

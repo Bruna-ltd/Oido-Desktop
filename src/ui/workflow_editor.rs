@@ -191,7 +191,7 @@ fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     let header = heading(s, ed, k)
         .child(pick(
             "wfg-add-step".to_owned(),
-            Menu::AddAt(place, index),
+            Menu::AddStep,
             &labels,
             None,
             "Add step",

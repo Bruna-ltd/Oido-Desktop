@@ -346,8 +346,7 @@ impl App {
 
     /// Opens the list of steps to add at the position the Add step button would use.
     pub fn open_add_menu(&mut self) {
-        let (place, index) = self.add_position();
-        self.wf_menu = Some(crate::workflow::editor::Menu::AddAt(place, index));
+        self.wf_menu = Some(crate::workflow::editor::Menu::AddStep);
     }
 
     /// Adds a step of the kind with this label at a position, selects it, and closes the menu.
