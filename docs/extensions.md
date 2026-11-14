@@ -160,7 +160,7 @@ made again (the card says "Sign in again to allow …" and lists what Google lef
 |---|---|---|
 | Gmail | `gmail.modify`, `gmail.send` | `create_draft`, `send_message`, `send_draft`, `reply`, `modify_labels`, `archive`, `mark_read`, `trash` |
 | Google Drive | `drive` (full) | `create_file`, `create_folder`, `update_file_info`, `move_file`, `copy_file`, `update_file_content`, `trash_file`, `restore_file` |
-| YouTube | `youtube.force-ssl` | `create_playlist`, `add_to_playlist`, `remove_from_playlist`, `rate_video`, `post_comment`, `reply_to_comment` |
+| YouTube | `youtube.force-ssl`, `yt-analytics.readonly` | `create_playlist`, `add_to_playlist`, `remove_from_playlist`, `rate_video`, `post_comment`, `reply_to_comment` |
 | Google Docs | `documents` | `create_doc`, `append_text`, `replace_text` (and `read_doc`) |
 | Google Sheets | `spreadsheets` | `update_range`, `append_rows`, `clear_range`, `create_spreadsheet`, `add_tab` (and reads) |
 
@@ -181,3 +181,11 @@ Things that were decided on the way:
 - **YouTube writes cost quota:** 50 units each, and the descriptions say so.
 - **Not built:** Gmail attachments, Docs formatting (styles, images), Sheets formatting and
   formulas beyond writing them as text, YouTube playlist editing and deleting.
+
+**YouTube Studio analytics.** The YouTube extension also reads the channel's analytics through the
+YouTube Analytics API (`youtubeanalytics.googleapis.com/v2/reports`, scope `yt-analytics.readonly`,
+which needs that API turned on in the Google Cloud project): `analytics_report` (any metrics and
+dimensions, filters and sort; last 28 days by default), `top_videos` (best videos with their titles)
+and `video_analytics` (one video's totals, or split by day, country, device or traffic source).
+Revenue is not offered: it has its own scope (`yt-analytics-monetary.readonly`). Data runs a day or
+two behind.

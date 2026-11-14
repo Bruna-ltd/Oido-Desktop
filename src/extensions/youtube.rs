@@ -1,5 +1,6 @@
 //! YouTube: search, watch details, channels, playlists, subscriptions and comments, and making
-//! playlists, filling them, rating videos and commenting.
+//! playlists, filling them, rating videos and commenting, and the channel's YouTube Studio
+//! analytics (views, watch time, subscribers, where viewers come from).
 //!
 //! The YouTube Data API has a daily quota (10,000 units by default): a search costs 100 units,
 //! a write 50, and a read 1, so the search description says to prefer the cheaper tools.
@@ -12,6 +13,13 @@ use crate::mcp::catalog::Logo;
 
 /// Manage the account over SSL: read, and everything below. (Posting comments needs this one.)
 const MANAGE: &str = "https://www.googleapis.com/auth/youtube.force-ssl";
+/// The channel's analytics (not its revenue, which has a scope of its own).
+const ANALYTICS: &str = "https://www.googleapis.com/auth/yt-analytics.readonly";
+const REPORTS: &str = "https://youtubeanalytics.googleapis.com/v2/reports";
+/// What a report shows when no metrics are asked for.
+const DEFAULT_METRICS: &str = "views,estimatedMinutesWatched,averageViewDuration,likes,comments,shares,subscribersGained,subscribersLost";
+/// A report covers this many days up to today when no dates are given.
+const DEFAULT_DAYS: i64 = 28;
 const BASE: &str = "https://www.googleapis.com/youtube/v3";
 const DEFAULT_RESULTS: u64 = 10;
 const MAX_RESULTS: u64 = 50;
@@ -30,11 +38,11 @@ impl Extension for YouTube {
     }
 
     fn blurb(&self) -> &'static str {
-        "Search videos, read their details and comments, see the person's channel, playlists and subscriptions, and make playlists, rate videos and comment."
+        "Search videos, read their details and comments, see the person's channel, playlists and subscriptions, make playlists, rate videos and comment, and read the channel's analytics."
     }
 
     fn scopes(&self) -> &'static [&'static str] {
-        &[MANAGE]
+        &[MANAGE, ANALYTICS]
     }
 
     fn tools(&self) -> Vec<ToolDef> {
@@ -194,6 +202,52 @@ impl Extension for YouTube {
                     "type": "object",
                     "properties": {"comment_id": {"type": "string"}, "text": {"type": "string"}},
                     "required": ["comment_id", "text"]
+                }),
+            },
+            ToolDef {
+                name: "analytics_report",
+                description: "A YouTube Studio analytics report for the person's own channel. Pick metrics (views, estimatedMinutesWatched, averageViewDuration, averageViewPercentage, likes, dislikes, comments, shares, subscribersGained, subscribersLost, annotationClickThroughRate, cardClickRate ...) and optionally a dimension to split by (day, month, video, country, deviceType, operatingSystem, insightTrafficSourceType, subscribedStatus, ageGroup, gender ...). Not every mix is allowed; Google says which when one is not. No dates means the last 28 days. Revenue is not available. Data runs a day or two behind. Needs the YouTube Analytics API turned on in the Google Cloud project.",
+                access: Access::Reads,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "YYYY-MM-DD. Default: 27 days before end_date."},
+                        "end_date": {"type": "string", "description": "YYYY-MM-DD. Default: today."},
+                        "metrics": {"type": "string", "description": "Comma-separated. Default: views, estimatedMinutesWatched, averageViewDuration, likes, comments, shares, subscribersGained, subscribersLost."},
+                        "dimensions": {"type": "string", "description": "Comma-separated, to split the numbers by. Empty gives one row of totals."},
+                        "filters": {"type": "string", "description": "Like video==VIDEO_ID, or country==US;deviceType==MOBILE (semicolons mean and)."},
+                        "sort": {"type": "string", "description": "A metric or dimension, with - in front for biggest first, like -views."},
+                        "max_results": {"type": "integer", "description": "How many rows, 1 to 200. Default 50."}
+                    }
+                }),
+            },
+            ToolDef {
+                name: "top_videos",
+                description: "The channel's best videos over a period, with their titles: views, watch time, average view duration, likes, comments and subscribers gained for each.",
+                access: Access::Reads,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "YYYY-MM-DD. Default: 27 days before end_date."},
+                        "end_date": {"type": "string", "description": "YYYY-MM-DD. Default: today."},
+                        "sort_by": {"type": "string", "enum": ["views", "estimatedMinutesWatched", "likes", "comments", "shares", "subscribersGained"], "description": "What makes a video the best. Default views."},
+                        "max_results": {"type": "integer", "description": "How many videos, 1 to 50. Default 10."}
+                    }
+                }),
+            },
+            ToolDef {
+                name: "video_analytics",
+                description: "One video's analytics over a period: totals, or split by day, country, device or where viewers found it (insightTrafficSourceType).",
+                access: Access::Reads,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "video_id": {"type": "string"},
+                        "start_date": {"type": "string", "description": "YYYY-MM-DD. Default: 27 days before end_date."},
+                        "end_date": {"type": "string", "description": "YYYY-MM-DD. Default: today."},
+                        "by": {"type": "string", "enum": ["day", "country", "deviceType", "insightTrafficSourceType"], "description": "Split the numbers by this. Default: one row of totals."}
+                    },
+                    "required": ["video_id"]
                 }),
             },
         ]
@@ -373,11 +427,233 @@ impl Extension for YouTube {
                     made["id"].as_str().unwrap_or("?")
                 ))
             }
+            "analytics_report" => {
+                let (start, end) = period(args, chrono::Utc::now().date_naive())?;
+                let metrics =
+                    tokens(args, "metrics")?.unwrap_or_else(|| DEFAULT_METRICS.to_owned());
+                let max = args["max_results"]
+                    .as_u64()
+                    .unwrap_or(50)
+                    .clamp(1, 200)
+                    .to_string();
+                let mut query = vec![
+                    ("ids", "channel==MINE"),
+                    ("startDate", start.as_str()),
+                    ("endDate", end.as_str()),
+                    ("metrics", metrics.as_str()),
+                    ("maxResults", max.as_str()),
+                ];
+                let (dimensions, filters, sort) = (
+                    tokens(args, "dimensions")?,
+                    tokens(args, "filters")?,
+                    tokens(args, "sort")?,
+                );
+                for (key, value) in [
+                    ("dimensions", &dimensions),
+                    ("filters", &filters),
+                    ("sort", &sort),
+                ] {
+                    if let Some(v) = value {
+                        query.push((key, v.as_str()));
+                    }
+                }
+                Ok(render_report(&api.get(REPORTS, &query)?))
+            }
+            "top_videos" => top_videos(args, api),
+            "video_analytics" => {
+                let video = required(args, "video_id")?;
+                let (start, end) = period(args, chrono::Utc::now().date_naive())?;
+                let filter = format!("video=={video}");
+                let mut query = vec![
+                    ("ids", "channel==MINE"),
+                    ("startDate", start.as_str()),
+                    ("endDate", end.as_str()),
+                    ("metrics", DEFAULT_METRICS),
+                    ("filters", filter.as_str()),
+                ];
+                match arg(args, "by") {
+                    None => {}
+                    Some(by @ ("day" | "country" | "deviceType" | "insightTrafficSourceType")) => {
+                        query.push(("dimensions", by));
+                        query.push(("sort", if by == "day" { "day" } else { "-views" }));
+                    }
+                    Some(other) => {
+                        return Err(Failure::other(format!(
+                            "`by` must be day, country, deviceType or insightTrafficSourceType, not {other}"
+                        )));
+                    }
+                }
+                Ok(render_report(&api.get(REPORTS, &query)?))
+            }
             other => Err(Failure::other(format!(
                 "YouTube has no tool called {other}"
             ))),
         }
     }
+}
+
+/// The dates a report covers: `start_date` to `end_date`, as asked, else the 28 days up to `today`.
+fn period(args: &Value, today: chrono::NaiveDate) -> Result<(String, String), Failure> {
+    let date = |name: &str| -> Result<Option<chrono::NaiveDate>, Failure> {
+        arg(args, name)
+            .map(|d| {
+                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+                    Failure::other(format!(
+                        "`{name}` must be a date like 2025-03-01, not {d:?}"
+                    ))
+                })
+            })
+            .transpose()
+    };
+    let end = date("end_date")?.unwrap_or(today);
+    let start = date("start_date")?.unwrap_or(end - chrono::Duration::days(DEFAULT_DAYS - 1));
+    if start > end {
+        return Err(Failure::other("`start_date` is after `end_date`"));
+    }
+    Ok((start.to_string(), end.to_string()))
+}
+
+/// A list of metric, dimension, filter or sort names: letters, digits and the few marks they use.
+fn tokens(args: &Value, name: &str) -> Result<Option<String>, Failure> {
+    match arg(args, name).map(str::trim) {
+        None => Ok(None),
+        Some(v)
+            if v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || ",;=-_".contains(c)) =>
+        {
+            Ok(Some(v.to_owned()))
+        }
+        Some(v) => Err(Failure::other(format!(
+            "`{name}` holds something that is not a name: {v:?}"
+        ))),
+    }
+}
+
+/// A report as a table: its column names, then a row per line, cells separated by tabs.
+fn render_report(report: &Value) -> String {
+    let columns: Vec<&str> = report["columnHeaders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let rows = report["rows"].as_array().map_or(&[][..], Vec::as_slice);
+    if rows.is_empty() {
+        return "No data for that period. Analytics run a day or two behind, and a new or small channel may have none.".to_owned();
+    }
+    let mut out = columns.join("\t");
+    for row in rows {
+        out.push('\n');
+        let cells: Vec<String> = row.as_array().into_iter().flatten().map(cell).collect();
+        out.push_str(&cells.join("\t"));
+    }
+    out
+}
+
+fn cell(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.as_i64().map_or_else(
+            || {
+                let f = n.as_f64().unwrap_or(0.0);
+                format!("{f:.2}")
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_owned()
+            },
+            |i| i.to_string(),
+        ),
+        other => other.to_string(),
+    }
+}
+
+fn top_videos(args: &Value, api: &Api) -> Result<String, Failure> {
+    let (start, end) = period(args, chrono::Utc::now().date_naive())?;
+    let by = match arg(args, "sort_by") {
+        None => "views",
+        Some(
+            m @ ("views"
+            | "estimatedMinutesWatched"
+            | "likes"
+            | "comments"
+            | "shares"
+            | "subscribersGained"),
+        ) => m,
+        Some(other) => {
+            return Err(Failure::other(format!(
+                "`sort_by` must be views, estimatedMinutesWatched, likes, comments, shares or subscribersGained, not {other}"
+            )));
+        }
+    };
+    let sort = format!("-{by}");
+    let max = args["max_results"]
+        .as_u64()
+        .unwrap_or(10)
+        .clamp(1, 50)
+        .to_string();
+    let report = api.get(
+        REPORTS,
+        &[
+            ("ids", "channel==MINE"),
+            ("startDate", start.as_str()),
+            ("endDate", end.as_str()),
+            ("dimensions", "video"),
+            ("metrics", "views,estimatedMinutesWatched,averageViewDuration,likes,comments,subscribersGained"),
+            ("sort", sort.as_str()),
+            ("maxResults", max.as_str()),
+        ],
+    )?;
+    let ids: Vec<&str> = report["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r[0].as_str())
+        .collect();
+    if ids.is_empty() {
+        return Ok(render_report(&report));
+    }
+    let joined = ids.join(",");
+    let titles = api.get(
+        &format!("{BASE}/videos"),
+        &[("part", "snippet"), ("id", joined.as_str())],
+    )?;
+    Ok(render_top(&report, &titles))
+}
+
+/// The best videos, each with its title: a report whose first column is the video's id.
+fn render_top(report: &Value, titles: &Value) -> String {
+    let title_of = |id: &str| {
+        items(titles)
+            .iter()
+            .find(|v| v["id"].as_str() == Some(id))
+            .and_then(|v| v["snippet"]["title"].as_str())
+            .unwrap_or("(title not found)")
+            .to_owned()
+    };
+    let names: Vec<&str> = report["columnHeaders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .skip(1)
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let mut lines = Vec::new();
+    for (i, row) in report["rows"].as_array().into_iter().flatten().enumerate() {
+        let cells = row.as_array().map_or(&[][..], Vec::as_slice);
+        let id = cells.first().and_then(Value::as_str).unwrap_or("?");
+        let numbers: Vec<String> = names
+            .iter()
+            .zip(cells.iter().skip(1))
+            .map(|(n, v)| format!("{n} {}", cell(v)))
+            .collect();
+        lines.push(format!(
+            "{}. {} ({id}): {}",
+            i + 1,
+            title_of(id),
+            numbers.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 fn arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
@@ -681,6 +957,78 @@ mod tests {
                 &json!({"id": "P", "snippet": {"title": "Mix"}, "contentDetails": {"itemCount": 4}})
             ),
             "P · Mix · 4 videos"
+        );
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn a_report_covers_the_asked_dates_or_the_28_days_up_to_today() {
+        let today = day(2025, 3, 31);
+        assert_eq!(
+            period(&json!({}), today).unwrap(),
+            ("2025-03-04".to_owned(), "2025-03-31".to_owned())
+        );
+        assert_eq!(
+            period(&json!({"end_date": "2025-02-10"}), today).unwrap(),
+            ("2025-01-14".to_owned(), "2025-02-10".to_owned())
+        );
+        assert_eq!(
+            period(
+                &json!({"start_date": "2025-01-01", "end_date": "2025-01-31"}),
+                today
+            )
+            .unwrap(),
+            ("2025-01-01".to_owned(), "2025-01-31".to_owned())
+        );
+        for bad in [
+            json!({"start_date": "yesterday"}),
+            json!({"start_date": "2025-05-01", "end_date": "2025-04-01"}),
+        ] {
+            assert!(period(&bad, today).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn names_in_a_report_request_are_plain() {
+        assert_eq!(
+            tokens(&json!({"filters": "video==abc;country==US"}), "filters")
+                .unwrap()
+                .as_deref(),
+            Some("video==abc;country==US")
+        );
+        assert_eq!(tokens(&json!({}), "metrics").unwrap(), None);
+        assert!(tokens(&json!({"metrics": "views&ids=channel==OTHER"}), "metrics").is_err());
+        assert!(tokens(&json!({"sort": "-views "}), "sort").is_ok());
+    }
+
+    #[test]
+    fn a_report_is_a_table_with_whole_numbers_and_short_decimals() {
+        let report = json!({
+            "columnHeaders": [{"name": "day"}, {"name": "views"}, {"name": "averageViewDuration"}],
+            "rows": [["2025-03-01", 120, 61.5], ["2025-03-02", 80, 59.123456]]
+        });
+        assert_eq!(
+            render_report(&report),
+            "day\tviews\taverageViewDuration\n2025-03-01\t120\t61.5\n2025-03-02\t80\t59.12"
+        );
+        assert!(
+            render_report(&json!({"columnHeaders": []})).starts_with("No data for that period")
+        );
+    }
+
+    #[test]
+    fn the_best_videos_get_their_titles_and_numbers() {
+        let report = json!({
+            "columnHeaders": [{"name": "video"}, {"name": "views"}, {"name": "likes"}],
+            "rows": [["v1", 900, 40], ["v2", 5, 1]]
+        });
+        let titles = json!({"items": [{"id": "v1", "snippet": {"title": "Big one"}}]});
+        assert_eq!(
+            render_top(&report, &titles),
+            "1. Big one (v1): views 900, likes 40\n2. (title not found) (v2): views 5, likes 1"
         );
     }
 
