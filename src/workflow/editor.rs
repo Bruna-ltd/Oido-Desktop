@@ -592,6 +592,8 @@ pub enum Menu {
     InputKind(usize),
     /// Add a step at the end of this list.
     Add(Place),
+    /// Add a step at this position in this list.
+    AddAt(Place, usize),
     Tool(Loc),
     /// Names to put into a box.
     Names(Target),
@@ -610,7 +612,14 @@ pub struct Editor {
     pub steps: Vec<Node>,
     /// What is wrong, as of the last check.
     pub problems: Vec<String>,
+    /// The steps as they were before each change to their structure, newest last, with what the
+    /// change was. Typing in a box is not one: it has the box's own undo.
+    undo: Vec<(String, Vec<Node>)>,
+    redo: Vec<(String, Vec<Node>)>,
 }
+
+/// How many changes can be taken back.
+const HISTORY: usize = 200;
 
 impl Editor {
     pub fn blank(agent_id: &str) -> Editor {
@@ -623,6 +632,8 @@ impl Editor {
             inputs: Vec::new(),
             steps: Vec::new(),
             problems: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -654,6 +665,8 @@ impl Editor {
                 .collect(),
             steps: d.steps.iter().map(Node::from_step).collect(),
             problems: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -774,19 +787,69 @@ impl Editor {
             .unwrap_or_default()
     }
 
+    /// Remembers the steps as they are, before a change called `what`.
+    fn record(&mut self, what: &str) {
+        self.undo.push((what.to_owned(), self.steps.clone()));
+        if self.undo.len() > HISTORY {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// What undo would take back, if anything.
+    pub fn undoes(&self) -> Option<&str> {
+        self.undo.last().map(|(what, _)| what.as_str())
+    }
+
+    /// What redo would do again, if anything.
+    pub fn redoes(&self) -> Option<&str> {
+        self.redo.last().map(|(what, _)| what.as_str())
+    }
+
+    /// Takes back the last change to the steps. Gives what it was.
+    pub fn undo(&mut self) -> Option<String> {
+        let (what, steps) = self.undo.pop()?;
+        self.redo
+            .push((what.clone(), std::mem::replace(&mut self.steps, steps)));
+        Some(what)
+    }
+
+    /// Does again what undo took back. Gives what it was.
+    pub fn redo(&mut self) -> Option<String> {
+        let (what, steps) = self.redo.pop()?;
+        self.undo
+            .push((what.clone(), std::mem::replace(&mut self.steps, steps)));
+        Some(what)
+    }
+
     /// Adds a step of `kind` at the end of the list at `place`.
     pub fn add(&mut self, place: &Place, kind: &str) {
+        self.add_at(place, usize::MAX, kind);
+    }
+
+    /// Adds a step of `kind` to the list at `place`, at `index` (the end if that is past it). Gives
+    /// where it went.
+    pub fn add_at(&mut self, place: &Place, index: usize, kind: &str) -> Option<Loc> {
+        let len = self.block_mut(place)?.len();
+        let index = index.min(len);
         let node = Node::new(kind, self.fresh_id());
-        if let Some(list) = self.block_mut(place) {
-            list.push(node);
-        }
+        self.record("Add step");
+        self.block_mut(place)?.insert(index, node);
+        Some(Loc {
+            place: place.clone(),
+            index,
+        })
     }
 
     pub fn remove(&mut self, at: &Loc) {
-        if let Some(list) = self.block_mut(&at.place)
-            && at.index < list.len()
-        {
-            list.remove(at.index);
+        let there = self
+            .block_mut(&at.place)
+            .is_some_and(|list| at.index < list.len());
+        if there {
+            self.record("Delete step");
+            if let Some(list) = self.block_mut(&at.place) {
+                list.remove(at.index);
+            }
         }
     }
 
@@ -797,38 +860,130 @@ impl Editor {
         };
         let to = at.index.checked_add_signed(by);
         if let Some(to) = to.filter(|t| *t < list.len() && at.index < list.len()) {
-            list.swap(at.index, to);
+            self.record("Move step");
+            if let Some(list) = self.block_mut(&at.place) {
+                list.swap(at.index, to);
+            }
         }
+    }
+
+    /// Whether `to` is a list inside the step at `from`, or the step's own: where it cannot go.
+    fn within(from: &Loc, to: &Place) -> bool {
+        let depth = from.place.len();
+        to.len() > depth && to[..depth] == from.place[..] && to[depth].0 == from.index
+    }
+
+    /// Moves the step at `from` to the position `to` (a list and an index in it, counted as the
+    /// lists are now). Gives where the step ends up. It cannot go inside itself, and a move that
+    /// changes nothing is not recorded.
+    pub fn move_to(&mut self, from: &Loc, to: &Loc) -> Result<Loc, &'static str> {
+        if self.node_mut(from).is_none() {
+            return Err("There is no such step.");
+        }
+        if Self::within(from, &to.place) {
+            return Err("A step cannot go inside itself.");
+        }
+        let len = self
+            .block_mut(&to.place)
+            .map(|l| l.len())
+            .ok_or("There is nowhere to put it.")?;
+        if to.index > len {
+            return Err("There is nowhere to put it.");
+        }
+        if to.place == from.place && (to.index == from.index || to.index == from.index + 1) {
+            return Ok(from.clone());
+        }
+        self.record("Move step");
+        let node = self
+            .block_mut(&from.place)
+            .map(|l| l.remove(from.index))
+            .ok_or("There is no such step.")?;
+        // Taking it out moved what came after it up by one, in its own list and in the path to
+        // the new place if that goes through one of them.
+        let mut place = to.place.clone();
+        let mut index = to.index;
+        let depth = from.place.len();
+        if place == from.place && index > from.index {
+            index -= 1;
+        } else if place.len() > depth
+            && place[..depth] == from.place[..]
+            && place[depth].0 > from.index
+        {
+            place[depth].0 -= 1;
+        }
+        let list = self
+            .block_mut(&place)
+            .ok_or("There is nowhere to put it.")?;
+        list.insert(index.min(list.len()), node);
+        Ok(Loc { place, index })
+    }
+
+    /// Puts a copy of the step at `from` at the position `to`, with ids of its own and its results
+    /// kept under new names so none is taken twice. Gives where the copy is.
+    pub fn duplicate(&mut self, from: &Loc, to: &Loc) -> Result<Loc, &'static str> {
+        let mut copy = self.node_mut(from).ok_or("There is no such step.")?.clone();
+        let len = self
+            .block_mut(&to.place)
+            .map(|l| l.len())
+            .ok_or("There is nowhere to put it.")?;
+        let mut ids = Vec::new();
+        collect_ids(&self.steps, &mut ids);
+        let mut binds = Vec::new();
+        collect_binds(&self.steps, &mut binds);
+        renew(&mut copy, &mut ids, &mut binds);
+        self.record("Duplicate step");
+        let index = to.index.min(len);
+        self.block_mut(&to.place)
+            .ok_or("There is nowhere to put it.")?
+            .insert(index, copy);
+        Ok(Loc {
+            place: to.place.clone(),
+            index,
+        })
     }
 
     /// Adds a case before the default of the `switch` at `at`.
     pub fn add_case(&mut self, at: &Loc) {
-        if let Some(n) = self.node_mut(at).filter(|n| n.kind == SWITCH) {
-            let at = n.blocks.len().saturating_sub(1);
-            n.blocks.insert(at, Block::new(Part::Case));
+        if self.node_mut(at).is_some_and(|n| n.kind == SWITCH) {
+            self.record("Add case");
+            if let Some(n) = self.node_mut(at) {
+                let at = n.blocks.len().saturating_sub(1);
+                n.blocks.insert(at, Block::new(Part::Case));
+            }
         }
     }
 
     /// Adds a branch at the end of the `parallel` step at `at`.
     pub fn add_branch(&mut self, at: &Loc) {
-        if let Some(n) = self.node_mut(at).filter(|n| n.kind == PARALLEL) {
-            n.blocks.push(Block::new(Part::Branch));
+        if self.node_mut(at).is_some_and(|n| n.kind == PARALLEL) {
+            self.record("Add branch");
+            if let Some(n) = self.node_mut(at) {
+                n.blocks.push(Block::new(Part::Branch));
+            }
         }
     }
 
     pub fn remove_branch(&mut self, at: &Loc, block: usize) {
-        if let Some(n) = self.node_mut(at).filter(|n| n.kind == PARALLEL)
-            && n.blocks.get(block).is_some_and(|b| b.part == Part::Branch)
-        {
-            n.blocks.remove(block);
+        let there = self.node_mut(at).is_some_and(|n| {
+            n.kind == PARALLEL && n.blocks.get(block).is_some_and(|b| b.part == Part::Branch)
+        });
+        if there {
+            self.record("Delete branch");
+            if let Some(n) = self.node_mut(at) {
+                n.blocks.remove(block);
+            }
         }
     }
 
     pub fn remove_case(&mut self, at: &Loc, block: usize) {
-        if let Some(n) = self.node_mut(at).filter(|n| n.kind == SWITCH)
-            && n.blocks.get(block).is_some_and(|b| b.part == Part::Case)
-        {
-            n.blocks.remove(block);
+        let there = self.node_mut(at).is_some_and(|n| {
+            n.kind == SWITCH && n.blocks.get(block).is_some_and(|b| b.part == Part::Case)
+        });
+        if there {
+            self.record("Delete case");
+            if let Some(n) = self.node_mut(at) {
+                n.blocks.remove(block);
+            }
         }
     }
 
@@ -898,6 +1053,42 @@ impl Editor {
             bound(&node.blocks[0].steps, &mut names);
         }
         names
+    }
+}
+
+fn collect_binds(list: &[Node], out: &mut Vec<String>) {
+    for n in list {
+        let b = n.bind.text.trim();
+        if !b.is_empty() {
+            out.push(b.to_owned());
+        }
+        for block in &n.blocks {
+            collect_binds(&block.steps, out);
+        }
+    }
+}
+
+/// Gives `node` and the steps inside it ids no step has, and results under names no step uses.
+fn renew(node: &mut Node, ids: &mut Vec<String>, binds: &mut Vec<String>) {
+    let id = (1..)
+        .map(|n| format!("step-{n}"))
+        .find(|id| !ids.contains(id))
+        .unwrap_or_default();
+    ids.push(id.clone());
+    node.id = TextEdit::new(id);
+    let bind = node.bind.text.trim().to_owned();
+    if !bind.is_empty() {
+        let fresh = (2..)
+            .map(|n| format!("{bind}_{n}"))
+            .find(|b| !binds.contains(b))
+            .unwrap_or_default();
+        binds.push(fresh.clone());
+        node.bind = TextEdit::new(fresh);
+    }
+    for block in &mut node.blocks {
+        for inner in &mut block.steps {
+            renew(inner, ids, binds);
+        }
     }
 }
 
@@ -1166,5 +1357,150 @@ mod tests {
         e.add(&vec![], TOOL);
         e.add_branch(&at(&[], 1));
         assert!(e.steps[1].blocks.is_empty());
+    }
+
+    fn ids(e: &Editor, place: &[(usize, usize)]) -> Vec<String> {
+        let mut list = &e.steps;
+        for &(step, block) in place {
+            list = &list[step].blocks[block].steps;
+        }
+        list.iter().map(|n| n.id.text.clone()).collect()
+    }
+
+    fn tool(id: &str) -> Value {
+        json!({"id": id, "kind": "tool", "tool": "shell", "args": {"command": "x"}})
+    }
+
+    fn tree() -> Editor {
+        Editor::from_saved(&saved(json!({"steps": [
+            tool("a"), tool("b"),
+            {"id": "i", "kind": "if", "cond": "true", "then": [tool("t1"), tool("t2")], "else": [tool("e1")]},
+            tool("c")
+        ]})))
+    }
+
+    #[test]
+    fn a_step_moves_within_its_list_and_into_and_out_of_frames_with_the_indexes_right() {
+        // `to` is a position counted as the lists are now: before step 3 of the top list is 3.
+        let mut e = tree();
+        let moved = e.move_to(&at(&[], 0), &at(&[], 3)).unwrap();
+        assert_eq!(
+            (ids(&e, &[]), moved),
+            (["b", "i", "a", "c"].map(String::from).to_vec(), at(&[], 2))
+        );
+        // Into the then list, between t1 and t2: the frame moved up one by taking b... a was first.
+        let mut e = tree();
+        let moved = e.move_to(&at(&[], 0), &at(&[(2, 0)], 1)).unwrap();
+        assert_eq!(ids(&e, &[(1, 0)]), ["t1", "a", "t2"]);
+        assert_eq!(
+            moved,
+            at(&[(1, 0)], 1),
+            "the frame is step 1 once a has left"
+        );
+        assert_eq!(ids(&e, &[]), ["b", "i", "c"]);
+        // Out of a frame, to the top, before the last step.
+        let mut e = tree();
+        let moved = e.move_to(&at(&[(2, 0)], 1), &at(&[], 3)).unwrap();
+        assert_eq!(
+            (ids(&e, &[]), moved),
+            (
+                ["a", "b", "i", "t2", "c"].map(String::from).to_vec(),
+                at(&[], 3)
+            )
+        );
+        assert_eq!(ids(&e, &[(2, 0)]), ["t1"]);
+        // Across frames: from the else list into the then list.
+        let mut e = tree();
+        e.move_to(&at(&[(2, 1)], 0), &at(&[(2, 0)], 0)).unwrap();
+        assert_eq!(
+            (ids(&e, &[(2, 0)]), ids(&e, &[(2, 1)])),
+            (["e1", "t1", "t2"].map(String::from).to_vec(), vec![])
+        );
+    }
+
+    #[test]
+    fn a_step_cannot_go_inside_itself_and_a_move_that_changes_nothing_is_not_remembered() {
+        let mut e = tree();
+        let err = e.move_to(&at(&[], 2), &at(&[(2, 0)], 0)).unwrap_err();
+        assert!(err.contains("inside itself"), "{err}");
+        assert_eq!(e.undoes(), None, "nothing happened");
+        // Where it already is: before itself, or just after.
+        for to in [at(&[], 1), at(&[], 2)] {
+            assert_eq!(e.move_to(&at(&[], 1), &to), Ok(at(&[], 1)));
+        }
+        assert_eq!(e.undoes(), None);
+        assert!(e.move_to(&at(&[], 9), &at(&[], 0)).is_err());
+        assert!(e.move_to(&at(&[], 0), &at(&[], 9)).is_err());
+        assert!(e.move_to(&at(&[], 0), &at(&[(7, 0)], 0)).is_err());
+    }
+
+    #[test]
+    fn changes_to_the_steps_can_be_undone_and_done_again_and_a_new_change_ends_the_redo() {
+        let mut e = tree();
+        let before = ids(&e, &[]);
+        e.add_at(&vec![], 1, "set").unwrap();
+        e.remove(&at(&[], 0));
+        e.move_to(&at(&[], 0), &at(&[], 3)).unwrap();
+        assert_eq!(e.undoes(), Some("Move step"));
+        assert_eq!(e.undo().as_deref(), Some("Move step"));
+        assert_eq!(e.undo().as_deref(), Some("Delete step"));
+        assert_eq!(e.redoes(), Some("Delete step"));
+        assert_eq!(e.undo().as_deref(), Some("Add step"));
+        assert_eq!(ids(&e, &[]), before, "back to the start");
+        assert_eq!(e.undo(), None);
+        assert_eq!(e.redo().as_deref(), Some("Add step"));
+        assert_eq!(e.steps.len(), 5);
+        // A new change after an undo forgets what was undone.
+        e.undo();
+        e.remove(&at(&[], 3));
+        assert_eq!(e.redoes(), None);
+        // Every kind of structural change is one step of history, and one that does nothing (a
+        // case added to something that is not a switch) is none.
+        let mut e = tree();
+        e.add_case(&at(&[], 2));
+        e.shift(&at(&[], 0), 1);
+        e.duplicate(&at(&[], 0), &at(&[], 0)).unwrap();
+        let mut seen = Vec::new();
+        while let Some(what) = e.undo() {
+            seen.push(what);
+        }
+        assert_eq!(seen, ["Duplicate step", "Move step"]);
+    }
+
+    #[test]
+    fn a_copy_has_ids_and_result_names_of_its_own_all_through() {
+        let mut e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "step-1", "kind": "for_each", "over": "[1]", "bind": "all",
+             "steps": [{"id": "step-2", "kind": "tool", "tool": "shell", "args": {"command": "x"}, "bind": "out"}]}
+        ]})));
+        let copy = e.duplicate(&at(&[], 0), &at(&[], 1)).unwrap();
+        assert_eq!(copy, at(&[], 1));
+        let (a, b) = (&e.steps[0], &e.steps[1]);
+        assert_eq!(
+            (b.id.text.as_str(), b.bind.text.as_str()),
+            ("step-3", "all_2")
+        );
+        assert_eq!(
+            (
+                b.blocks[0].steps[0].id.text.as_str(),
+                b.blocks[0].steps[0].bind.text.as_str()
+            ),
+            ("step-4", "out_2")
+        );
+        assert_eq!(a.id.text, "step-1", "the original is untouched");
+        // Copied again, the names go on from where they are.
+        e.duplicate(&at(&[], 0), &at(&[], 2)).unwrap();
+        assert_eq!(e.steps[2].bind.text, "all_3");
+        assert!(e.definition().is_ok(), "{:?}", e.definition().err());
+    }
+
+    #[test]
+    fn a_step_is_added_at_a_position() {
+        let mut e = tree();
+        let at_two = e.add_at(&vec![], 2, "generate").unwrap();
+        assert_eq!((at_two, e.steps[2].kind.as_str()), (at(&[], 2), "generate"));
+        let inner = e.add_at(&vec![(3, 1)], 9, "set").unwrap();
+        assert_eq!(inner, at(&[(3, 1)], 1), "past the end is the end");
+        assert_eq!(e.add_at(&vec![(8, 0)], 0, "set"), None);
     }
 }

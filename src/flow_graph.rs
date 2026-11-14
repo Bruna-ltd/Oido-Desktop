@@ -1,11 +1,11 @@
 //! The workflow editor's graph view: which view is showing, what is selected, and the camera. The
 //! drawing is `ui/workflow_graph.rs` and where things go is `workflow/layout.rs`.
 
-use rune::Live;
+use rune::{Drag, Live, Phase, Tx};
 
 use crate::app::App;
-use crate::workflow::editor::Loc;
-use crate::workflow::layout::{self, Dir};
+use crate::workflow::editor::{KINDS, Loc, Place};
+use crate::workflow::layout::{self, Dir, Drop};
 
 /// Zoom stays where text can still be read: the smallest type on a node is 11 pt.
 pub const ZOOM_MIN: f32 = 0.7;
@@ -35,7 +35,30 @@ pub struct GraphView {
     pub viewport: [f32; 4],
     /// The drawing is to be fitted to the view as soon as the view's size is known.
     pub needs_fit: bool,
+    /// A step being dragged, or the background being dragged to pan.
+    pub drag: Option<StepDrag>,
+    panning: Option<[f32; 2]>,
+    /// The right-click menu: the step it is for, and where in the window it opened.
+    pub menu: Option<(Loc, [f32; 2])>,
 }
+
+/// A step being dragged: where it is from, where the pointer is in the drawing, and where it
+/// would land.
+#[derive(Clone, PartialEq, Debug)]
+pub struct StepDrag {
+    pub from: Loc,
+    /// Where in the step the pointer took hold of it, so it is carried by the same spot.
+    pub grab: [f32; 2],
+    /// The pointer has gone far enough from where it was pressed for this to be a drag.
+    pub moving: bool,
+    pub point: [f32; 2],
+    pub drop: Option<Drop>,
+    /// Option is held: it would leave a copy.
+    pub copy: bool,
+}
+
+/// How far the pointer goes, in points, before a press on a step is a drag.
+const DRAG_FROM: f32 = 3.0;
 
 impl Default for GraphView {
     fn default() -> Self {
@@ -48,6 +71,9 @@ impl Default for GraphView {
             live_zoom: Live::new(1.0),
             viewport: [0.0; 4],
             needs_fit: true,
+            drag: None,
+            panning: None,
+            menu: None,
         }
     }
 }
@@ -105,6 +131,17 @@ impl App {
         }
     }
 
+    /// The point in the drawing at the point `q` of the view, undoing the camera.
+    pub fn world_point(&self, q: [f32; 2]) -> [f32; 2] {
+        let [w, h] = self.world_size();
+        let (cx, cy, x0) = (w / 2.0, h / 2.0, self.world_origin());
+        let g = &self.wf_graph;
+        [
+            cx + (q[0] - x0 - cx - g.pan[0]) / g.zoom,
+            cy + (q[1] - cy - g.pan[1]) / g.zoom,
+        ]
+    }
+
     /// The drawing's size, for working out where the camera is.
     fn world_size(&self) -> [f32; 2] {
         self.wf_editor.as_ref().map_or([0.0; 2], |ed| {
@@ -142,6 +179,187 @@ impl App {
             zoom,
         );
         (before < ZOOM_COMPACT) != (zoom < ZOOM_COMPACT)
+    }
+
+    /// A drag in the drawing: on a step it moves the step (or copies it, with Option held); on
+    /// the background it pans.
+    pub fn drag_graph(&mut self, d: &Drag, tx: &mut Tx) {
+        let point = self.world_point([d.x, d.y]);
+        let Some(ed) = self.wf_editor.as_ref() else {
+            return;
+        };
+        match d.phase {
+            Phase::Down => {
+                let lay = layout::layout(ed);
+                match lay.hit(point).map(|i| (i.loc.clone(), i.rect)) {
+                    Some((from, rect)) => {
+                        self.wf_graph.selected = Some(from.clone());
+                        self.wf_graph.drag = Some(StepDrag {
+                            from,
+                            grab: [point[0] - rect.x, point[1] - rect.y],
+                            moving: false,
+                            point,
+                            drop: None,
+                            copy: false,
+                        });
+                    }
+                    None => self.wf_graph.panning = Some(self.wf_graph.pan),
+                }
+            }
+            Phase::Move => {
+                if let Some(start) = self.wf_graph.panning {
+                    let g = &mut self.wf_graph;
+                    g.set_camera([start[0] + d.dx, start[1] + d.dy], g.zoom);
+                    tx.live_only();
+                    return;
+                }
+                let lay = layout::layout(ed);
+                let copy = tx.mods().alt;
+                if let Some(drag) = &mut self.wf_graph.drag {
+                    drag.moving |= d.dx.hypot(d.dy) > DRAG_FROM;
+                    drag.point = point;
+                    drag.copy = copy;
+                    drag.drop = drag
+                        .moving
+                        .then(|| lay.drop_target(&drag.from, point))
+                        .flatten();
+                }
+            }
+            Phase::Up => {
+                self.wf_graph.panning = None;
+                let Some(drag) = self.wf_graph.drag.take() else {
+                    return;
+                };
+                if d.cancelled() || !drag.moving {
+                    return;
+                }
+                if let Some(drop) = drag.drop.filter(|x| !x.unchanged || drag.copy) {
+                    self.drop_step(&drag.from, &drop, drag.copy);
+                }
+            }
+        }
+    }
+
+    /// Puts the dragged step where it was dropped, or a copy of it, and selects it there.
+    fn drop_step(&mut self, from: &Loc, drop: &Drop, copy: bool) {
+        let Some(ed) = self.wf_editor.as_mut() else {
+            return;
+        };
+        let to = Loc {
+            place: drop.place.clone(),
+            index: drop.index,
+        };
+        let done = if copy {
+            ed.duplicate(from, &to)
+        } else {
+            ed.move_to(from, &to)
+        };
+        if let Ok(at) = done {
+            ed.check();
+            self.wf_graph.selected = Some(at);
+        }
+    }
+
+    /// Where a step added from the Add step button goes: after the selected one, else at the end
+    /// of the top list.
+    pub fn add_position(&self) -> (Place, usize) {
+        match self.selected_step() {
+            Some(at) => (at.place, at.index + 1),
+            None => (
+                Vec::new(),
+                self.wf_editor.as_ref().map_or(0, |ed| ed.steps.len()),
+            ),
+        }
+    }
+
+    /// Opens the list of steps to add at the position the Add step button would use.
+    pub fn open_add_menu(&mut self) {
+        let (place, index) = self.add_position();
+        self.wf_menu = Some(crate::workflow::editor::Menu::AddAt(place, index));
+    }
+
+    /// Adds a step of the kind with this label at a position, selects it, and closes the menu.
+    pub fn editor_add_at(&mut self, place: &Place, index: usize, label: &str) {
+        let kind = KINDS.iter().find(|(_, l)| *l == label).map(|(k, _)| *k);
+        if let (Some(ed), Some(kind)) = (&mut self.wf_editor, kind)
+            && let Some(at) = ed.add_at(place, index, kind)
+        {
+            ed.check();
+            self.wf_graph.selected = Some(at);
+        }
+        self.wf_menu = None;
+    }
+
+    /// Deletes the selected step.
+    pub fn delete_selected(&mut self) {
+        let Some(at) = self.selected_step() else {
+            return;
+        };
+        if let Some(ed) = &mut self.wf_editor {
+            ed.remove(&at);
+            ed.check();
+        }
+        // What was after it, or before it, or nothing.
+        self.wf_graph.selected = self.wf_editor.as_ref().and_then(|ed| {
+            [
+                at.clone(),
+                Loc {
+                    index: at.index.saturating_sub(1),
+                    ..at.clone()
+                },
+            ]
+            .into_iter()
+            .find(|l| layout::layout(ed).find(l).is_some())
+        });
+    }
+
+    /// Moves the selected step up or down among its list, and keeps it selected.
+    pub fn shift_selected(&mut self, by: isize) {
+        let Some(at) = self.selected_step() else {
+            return;
+        };
+        let Some(ed) = &mut self.wf_editor else {
+            return;
+        };
+        let len = ed.block_mut(&at.place).map_or(0, |list| list.len());
+        let Some(to) = at.index.checked_add_signed(by).filter(|t| *t < len) else {
+            return;
+        };
+        ed.shift(&at, by);
+        ed.check();
+        self.wf_graph.selected = Some(Loc { index: to, ..at });
+    }
+
+    /// Puts a copy of the selected step right after it, and selects the copy.
+    pub fn duplicate_selected(&mut self) {
+        let Some(at) = self.selected_step() else {
+            return;
+        };
+        let to = Loc {
+            place: at.place.clone(),
+            index: at.index + 1,
+        };
+        if let Some(ed) = &mut self.wf_editor
+            && let Ok(copy) = ed.duplicate(&at, &to)
+        {
+            ed.check();
+            self.wf_graph.selected = Some(copy);
+        }
+    }
+
+    /// Takes back the last change to the steps.
+    pub fn undo_editor(&mut self) {
+        if let Some(ed) = &mut self.wf_editor {
+            ed.undo();
+            ed.check();
+        }
+    }
+
+    pub fn redo_editor(&mut self) {
+        if let Some(ed) = &mut self.wf_editor {
+            ed.redo();
+            ed.check();
+        }
     }
 
     /// Makes the drawing as big as fits the view, up to full size and down to where text can
@@ -289,5 +507,99 @@ mod tests {
         let was = app.wf_graph.pan;
         app.pan_graph(-30.0, 12.0);
         assert_eq!(app.wf_graph.pan, [was[0] - 30.0, was[1] + 12.0]);
+    }
+
+    fn ids(app: &App, place: &[(usize, usize)]) -> Vec<String> {
+        let mut list = &app.wf_editor.as_ref().unwrap().steps;
+        for &(step, block) in place {
+            list = &list[step].blocks[block].steps;
+        }
+        list.iter().map(|n| n.id.text.clone()).collect()
+    }
+
+    #[test]
+    fn a_dropped_step_moves_or_is_copied_to_where_the_drop_says_and_is_selected_there() {
+        let mut app = app_with_editor();
+        let lay = layout::layout(app.wf_editor.as_ref().unwrap());
+        let t = lay.find(&at(&[(1, 0)], 0)).unwrap().rect;
+        // Drag `a` into the then list, after `t`.
+        let drop = lay
+            .drop_target(&at(&[], 0), [t.centre_x(), t.bottom() + 3.0])
+            .unwrap();
+        app.drop_step(&at(&[], 0), &drop, false);
+        assert_eq!(
+            (ids(&app, &[]), ids(&app, &[(0, 0)])),
+            (vec!["i".to_owned()], vec!["t".to_owned(), "a".to_owned()])
+        );
+        assert_eq!(app.selected_step(), Some(at(&[(0, 0)], 1)));
+        app.undo_editor();
+        assert_eq!(ids(&app, &[]), ["a", "i"]);
+        // With Option held it leaves a copy, which has an id of its own.
+        app.drop_step(&at(&[], 0), &drop, true);
+        assert_eq!(ids(&app, &[]), ["a", "i"]);
+        let copy = ids(&app, &[(1, 0)]);
+        assert_eq!(copy.len(), 2);
+        assert_ne!(copy[1], "a");
+        assert!(app.wf_editor.as_ref().unwrap().definition().is_ok());
+    }
+
+    #[test]
+    fn delete_duplicate_and_shift_work_on_the_selected_step_and_keep_something_selected() {
+        let mut app = app_with_editor();
+        app.select_step(Some(at(&[], 0)));
+        app.duplicate_selected();
+        assert_eq!(
+            app.selected_step(),
+            Some(at(&[], 1)),
+            "the copy is selected"
+        );
+        assert_eq!(ids(&app, &[]).len(), 3);
+        app.shift_selected(1);
+        assert_eq!(app.selected_step(), Some(at(&[], 2)));
+        app.shift_selected(1);
+        assert_eq!(app.selected_step(), Some(at(&[], 2)), "at the end it stays");
+        app.shift_selected(-3);
+        assert_eq!(
+            app.selected_step(),
+            Some(at(&[], 2)),
+            "past the start it stays"
+        );
+        app.shift_selected(-1);
+        assert_eq!(app.selected_step(), Some(at(&[], 1)));
+        app.delete_selected();
+        assert_eq!(ids(&app, &[]).len(), 2);
+        assert!(
+            app.selected_step().is_some(),
+            "the step after it, now in its place"
+        );
+        app.delete_selected();
+        app.delete_selected();
+        assert_eq!(app.selected_step(), None, "nothing left to select");
+        for _ in 0..3 {
+            app.undo_editor();
+        }
+        assert_eq!(ids(&app, &[]).len(), 3, "each change took one undo");
+        app.redo_editor();
+        assert_eq!(ids(&app, &[]).len(), 2);
+    }
+
+    #[test]
+    fn a_step_is_added_after_the_selected_one_or_at_the_end_and_selected() {
+        let mut app = app_with_editor();
+        assert_eq!(app.add_position(), (vec![], 2), "the end of the top list");
+        app.editor_add_at(&vec![], usize::MAX, "Set values");
+        assert_eq!(app.selected_step(), Some(at(&[], 2)));
+        app.select_step(Some(at(&[], 0)));
+        assert_eq!(app.add_position(), (vec![], 1));
+        let (place, index) = app.add_position();
+        app.editor_add_at(&place, index, "Run a tool");
+        assert_eq!(app.selected_step(), Some(at(&[], 1)));
+        assert_eq!(ids(&app, &[]).len(), 4);
+        app.select_step(Some(at(&[(2, 0)], 0)));
+        assert_eq!(
+            app.add_position(),
+            (vec![(2, 0)], 1),
+            "inside a frame, after the step there"
+        );
     }
 }

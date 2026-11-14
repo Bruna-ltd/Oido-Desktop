@@ -24,6 +24,10 @@ pub const COL_GAP: f32 = 24.0;
 pub const LABEL_H: f32 = 24.0;
 /// The chip that names a column.
 pub const CHIP_H: f32 = 20.0;
+/// Under a frame's columns: room for the join line and an add button on it.
+pub const FOOT: f32 = 28.0;
+/// How far under a list's last step the button that adds one after it sits.
+const END_GAP: f32 = 14.0;
 /// An empty list's slot.
 pub const EMPTY_H: f32 = 36.0;
 /// Around the whole drawing.
@@ -46,6 +50,11 @@ impl Rect {
 
     pub fn centre_x(&self) -> f32 {
         self.x + self.w / 2.0
+    }
+
+    /// Whether the point is inside.
+    pub fn has(&self, p: [f32; 2]) -> bool {
+        p[0] >= self.x && p[0] <= self.x + self.w && p[1] >= self.y && p[1] <= self.bottom()
     }
 }
 
@@ -110,12 +119,46 @@ pub struct Wire {
     pub to: [f32; 2],
 }
 
+/// A list of steps (the top one, or one inside a frame) as an area of the drawing: where a step
+/// dropped there would go among the others.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ListRegion {
+    pub place: Place,
+    pub rect: Rect,
+    /// Each step's top and bottom, in order. Empty when the list is.
+    pub spans: Vec<[f32; 2]>,
+}
+
+/// A place a step can be added, drawn as a button on the wire: the list, and the position in it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Gap {
+    pub place: Place,
+    pub index: usize,
+    pub at: [f32; 2],
+}
+
+/// Where a step dragged to a point would land.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Drop {
+    /// The list and the position in it, counted as the lists are now.
+    pub place: Place,
+    pub index: usize,
+    /// The line to draw between the steps there, or the slot of an empty list.
+    pub marker: Rect,
+    /// The frame the list is in, to light up.
+    pub frame: Option<Loc>,
+    /// The step would stay where it is.
+    pub unchanged: bool,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Layout {
     pub start: Rect,
     pub items: Vec<Item>,
     pub labels: Vec<Label>,
     pub wires: Vec<Wire>,
+    pub lists: Vec<ListRegion>,
+    pub gaps: Vec<Gap>,
     pub width: f32,
     pub height: f32,
 }
@@ -125,6 +168,86 @@ impl Layout {
         self.items
             .iter()
             .find(|i| i.form != Form::Empty && i.loc == *loc)
+    }
+
+    /// The step under the point: the innermost box, so a step inside a frame and not the frame.
+    pub fn hit(&self, p: [f32; 2]) -> Option<&Item> {
+        self.items
+            .iter()
+            .filter(|i| i.form != Form::Empty && i.rect.has(p))
+            .min_by(|a, b| {
+                (a.rect.w * a.rect.h)
+                    .partial_cmp(&(b.rect.w * b.rect.h))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    /// Where the step at `from` would land if dropped at `p`: in the innermost list under the
+    /// point that is not inside the step itself, at the position among its steps the point is at.
+    pub fn drop_target(&self, from: &Loc, p: [f32; 2]) -> Option<Drop> {
+        let depth = from.place.len();
+        let region = self
+            .lists
+            .iter()
+            .filter(|r| r.rect.has(p))
+            .filter(|r| {
+                // Not a list of the step's own, nor one inside it.
+                !(r.place.len() > depth
+                    && r.place[..depth] == from.place[..]
+                    && r.place[depth].0 == from.index)
+            })
+            .min_by(|a, b| {
+                (a.rect.w * a.rect.h)
+                    .partial_cmp(&(b.rect.w * b.rect.h))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })?;
+        let index = region
+            .spans
+            .iter()
+            .filter(|s| (s[0] + s[1]) / 2.0 < p[1])
+            .count();
+        let marker = match (
+            region.spans.first(),
+            region.spans.get(index.wrapping_sub(1)),
+            region.spans.get(index),
+        ) {
+            (None, _, _) => self
+                .items
+                .iter()
+                .find(|i| i.form == Form::Empty && i.loc.place == region.place)
+                .map(|i| i.rect)?,
+            (Some(first), None, _) => Rect {
+                x: region.rect.x + 8.0,
+                y: first[0] - GAP / 2.0 - 1.5,
+                w: region.rect.w - 16.0,
+                h: 3.0,
+            },
+            (Some(_), Some(before), None) => Rect {
+                x: region.rect.x + 8.0,
+                y: before[1] + END_GAP - 1.5,
+                w: region.rect.w - 16.0,
+                h: 3.0,
+            },
+            (Some(_), Some(before), Some(after)) => Rect {
+                x: region.rect.x + 8.0,
+                y: (before[1] + after[0]) / 2.0 - 1.5,
+                w: region.rect.w - 16.0,
+                h: 3.0,
+            },
+        };
+        let frame = region.place.split_last().map(|(&(step, _), rest)| Loc {
+            place: rest.to_vec(),
+            index: step,
+        });
+        let unchanged =
+            region.place == from.place && (index == from.index || index == from.index + 1);
+        Some(Drop {
+            place: region.place.clone(),
+            index,
+            marker,
+            frame,
+            unchanged,
+        })
     }
 }
 
@@ -179,7 +302,7 @@ fn measure(node: &Node) -> (f32, f32) {
     let label = if node.blocks.len() > 1 { LABEL_H } else { 0.0 };
     (
         width.max(NODE_W) + 2.0 * PAD,
-        HEAD + PAD + label + tallest + PAD,
+        HEAD + PAD + label + tallest + FOOT,
     )
 }
 
@@ -217,6 +340,16 @@ impl Pen {
                 w: NODE_W,
                 h: EMPTY_H,
             };
+            self.out.lists.push(ListRegion {
+                place: place.clone(),
+                rect: Rect {
+                    x,
+                    y,
+                    w: width,
+                    h: EMPTY_H,
+                },
+                spans: Vec::new(),
+            });
             self.out.items.push(Item {
                 loc: Loc {
                     place: place.clone(),
@@ -234,6 +367,7 @@ impl Pen {
         let mut cursor = y;
         let mut previous: Option<[f32; 2]> = None;
         let mut first = [centre, y];
+        let mut spans = Vec::with_capacity(nodes.len());
         for (index, node) in nodes.iter().enumerate() {
             let (w, h) = measure(node);
             let rect = Rect {
@@ -245,9 +379,24 @@ impl Pen {
             let top = [centre, rect.y];
             if let Some(from) = previous {
                 self.out.wires.push(Wire { from, to: top });
+                self.out.gaps.push(Gap {
+                    place: place.clone(),
+                    index,
+                    at: [centre, from[1] + GAP / 2.0],
+                });
             } else {
                 first = top;
+                // Before the first step there is room only on the top list; inside a frame the
+                // column's label is there.
+                if place.is_empty() {
+                    self.out.gaps.push(Gap {
+                        place: place.clone(),
+                        index: 0,
+                        at: [centre, y - GAP / 2.0],
+                    });
+                }
             }
+            spans.push([rect.y, rect.bottom()]);
             let loc = Loc {
                 place: place.clone(),
                 index,
@@ -272,7 +421,23 @@ impl Pen {
             previous = Some([centre, rect.bottom()]);
             cursor = rect.bottom() + GAP;
         }
-        (first, previous.unwrap_or(first))
+        let last = previous.unwrap_or(first);
+        self.out.gaps.push(Gap {
+            place: place.clone(),
+            index: nodes.len(),
+            at: [centre, last[1] + END_GAP],
+        });
+        self.out.lists.push(ListRegion {
+            place: place.clone(),
+            rect: Rect {
+                x,
+                y,
+                w: width,
+                h: last[1] - y,
+            },
+            spans,
+        });
+        (first, last)
     }
 
     /// The columns inside the frame of `node`, with the wires into and out of each.
@@ -290,6 +455,14 @@ impl Pen {
             let mut place = at.place.clone();
             place.push((at.index, b));
             let (first, last) = self.list(&block.steps, &place, x, top, w);
+            // A step dropped anywhere in the column goes in this list: from under the frame's
+            // title bar to its foot.
+            if let Some(region) = self.out.lists.iter_mut().rev().find(|r| r.place == place) {
+                region.rect.x = x;
+                region.rect.w = w;
+                region.rect.y = frame.y + HEAD;
+                region.rect.h = frame.bottom() - region.rect.y;
+            }
             let centre = x + w / 2.0;
             if let Some(text) = label_of(node, b) {
                 let chip = Rect {
@@ -315,7 +488,7 @@ impl Pen {
             }
             // Straight down to a join line under the tallest column, then in to the middle, so
             // a short column's wire does not cut across the one beside it.
-            let join = [centre, frame.bottom() - PAD / 2.0];
+            let join = [centre, frame.bottom() - FOOT / 2.0];
             self.out.wires.push(Wire {
                 from: last,
                 to: join,
@@ -354,6 +527,17 @@ pub fn layout(ed: &Editor) -> Layout {
     );
     pen.out.width = width + 2.0 * MARGIN;
     pen.out.height = below + height + MARGIN;
+    // The top list is the whole drawing under the start, so a step dropped anywhere there that is
+    // not in a frame goes in it.
+    let (full_w, full_h) = (pen.out.width, pen.out.height);
+    if let Some(root) = pen.out.lists.iter_mut().find(|r| r.place.is_empty()) {
+        root.rect = Rect {
+            x: 0.0,
+            y: start.bottom(),
+            w: full_w,
+            h: full_h - start.bottom(),
+        };
+    }
     pen.out
 }
 
@@ -643,5 +827,130 @@ mod tests {
         assert_eq!(go(&at(&[(1, 0)], 0), Dir::Up), Some(at(&[], 1)));
         // Into a switch goes to its first list that has steps.
         assert_eq!(go(&at(&[], 2), Dir::Right), Some(at(&[(2, 0)], 0)));
+    }
+
+    fn centre_of(r: &Rect) -> [f32; 2] {
+        [r.centre_x(), r.y + r.h / 2.0]
+    }
+
+    #[test]
+    fn a_button_to_add_a_step_sits_on_each_wire_of_the_top_list_and_after_the_last_in_a_frame() {
+        let l = layout(&editor(json!([sh("a"), sh("b"), sh("c")])));
+        let mut top: Vec<usize> = l.gaps.iter().map(|g| g.index).collect();
+        top.sort_unstable();
+        assert_eq!(
+            top,
+            [0, 1, 2, 3],
+            "before the first, between, and after the last"
+        );
+        let (a, b) = (
+            l.find(&at(&[], 0)).unwrap().rect,
+            l.find(&at(&[], 1)).unwrap().rect,
+        );
+        let between = l.gaps.iter().find(|g| g.index == 1).unwrap();
+        assert!((between.at[1] - (a.bottom() + b.y) / 2.0).abs() < 0.01);
+        // In a frame's column: after the last step, and between two, but not before the first,
+        // where the column's label is.
+        let l = layout(&editor(json!([
+            {"id": "i", "kind": "if", "cond": "true", "then": [sh("t1"), sh("t2")], "else": []}
+        ])));
+        let then: Vec<usize> = l
+            .gaps
+            .iter()
+            .filter(|g| g.place == [(0, 0)])
+            .map(|g| g.index)
+            .collect();
+        assert_eq!(then, [1, 2]);
+        assert!(
+            l.gaps.iter().all(|g| g.place != [(0, 1)]),
+            "an empty list has its slot, not a button"
+        );
+    }
+
+    #[test]
+    fn the_step_under_a_point_is_the_innermost_box() {
+        let l = layout(&editor(json!([
+            sh("a"),
+            {"id": "i", "kind": "if", "cond": "true", "then": [sh("t")], "else": []}
+        ])));
+        let inner = l.find(&at(&[(1, 0)], 0)).unwrap();
+        assert_eq!(l.hit(centre_of(&inner.rect)).unwrap().loc, at(&[(1, 0)], 0));
+        let frame = l.find(&at(&[], 1)).unwrap();
+        let padding = [frame.rect.x + 4.0, frame.rect.bottom() - 4.0];
+        assert_eq!(
+            l.hit(padding).unwrap().loc,
+            at(&[], 1),
+            "the frame, in its own padding"
+        );
+        assert!(l.hit([-5.0, -5.0]).is_none());
+    }
+
+    #[test]
+    fn a_dragged_step_lands_in_the_list_under_the_pointer_at_the_place_between_its_steps() {
+        let l = layout(&editor(json!([
+            sh("a"), sh("b"), sh("c"),
+            {"id": "i", "kind": "if", "cond": "true", "then": [sh("t1")], "else": []}
+        ])));
+        let rect = |place: &[(usize, usize)], index| l.find(&at(place, index)).unwrap().rect;
+        let (a, b, c) = (rect(&[], 0), rect(&[], 1), rect(&[], 2));
+        // Between b and c: a goes to position 2 of the top list (counted as the list is now).
+        let p = [b.centre_x(), (b.bottom() + c.y) / 2.0];
+        let drop = l.drop_target(&at(&[], 0), p).unwrap();
+        assert_eq!(
+            (drop.place.clone(), drop.index, drop.unchanged),
+            (vec![], 2, false)
+        );
+        assert!((drop.marker.y + drop.marker.h / 2.0 - (b.bottom() + c.y) / 2.0).abs() < 0.01);
+        assert_eq!(drop.frame, None);
+        // Just under itself, or just over: it would stay.
+        let under = [a.centre_x(), a.bottom() + 4.0];
+        assert!(l.drop_target(&at(&[], 0), under).unwrap().unchanged);
+        let over = [b.centre_x(), b.y - 4.0];
+        assert!(l.drop_target(&at(&[], 1), over).unwrap().unchanged);
+        // Above the first step, and below the last.
+        assert_eq!(
+            l.drop_target(&at(&[], 2), [a.centre_x(), a.y - 6.0])
+                .unwrap()
+                .index,
+            0
+        );
+        // Into the frame's then column: that list, after t1, with the frame to light.
+        let t1 = rect(&[(3, 0)], 0);
+        let into = l
+            .drop_target(&at(&[], 0), [t1.centre_x(), t1.bottom() + 3.0])
+            .unwrap();
+        assert_eq!((into.place.clone(), into.index), (vec![(3, 0)], 1));
+        assert_eq!(into.frame, Some(at(&[], 3)));
+        // Into the empty otherwise list: its slot is the marker.
+        let slot = l.items.iter().find(|i| i.form == Form::Empty).unwrap().rect;
+        let empty = l.drop_target(&at(&[], 0), centre_of(&slot)).unwrap();
+        assert_eq!(
+            (empty.place.clone(), empty.index, empty.marker),
+            (vec![(3, 1)], 0, slot)
+        );
+        assert!(
+            l.drop_target(&at(&[], 0), [-9.0, -9.0]).is_none(),
+            "nowhere is nothing"
+        );
+    }
+
+    #[test]
+    fn a_frame_dragged_over_its_own_columns_lands_outside_it_and_never_inside_itself() {
+        let l = layout(&editor(json!([
+            sh("a"),
+            {"id": "i", "kind": "if", "cond": "true", "then": [sh("t1")], "else": [sh("e1")]},
+            sh("z")
+        ])));
+        let from = at(&[], 1);
+        for item in l.items.iter().filter(|i| {
+            i.loc.place.first() == Some(&(1, 0)) || i.loc.place.first() == Some(&(1, 1))
+        }) {
+            let drop = l.drop_target(&from, centre_of(&item.rect)).unwrap();
+            assert!(
+                !(!drop.place.is_empty() && drop.place[0].0 == 1),
+                "{:?} landed inside the frame itself: {drop:?}",
+                item.loc
+            );
+        }
     }
 }

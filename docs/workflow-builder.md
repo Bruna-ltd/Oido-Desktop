@@ -325,7 +325,7 @@ Each phase ships alone and leaves workflows that ran before running the same.
 
 ## Graph view
 
-Status: designed 2026-11-14. **G1 built**; G2 and G3 not. A second view of the same editor state, for people who think
+Status: designed 2026-11-14. **G1 and G2 built**; G3 not. A second view of the same editor state, for people who think
 in boxes and wires. The card editor stays: it is the keyboard and screen-reader route, and the place
 every box of a step is typed.
 
@@ -442,4 +442,36 @@ Left out on purpose: a minimap, colour per kind of step, a permanent palette col
   selection on each node, which would have put every step in the Tab order. The canvas gets the ring.
 - Not yet: dragging, the Add step list and `+` on wires, undo, the context menu, run state on nodes
   (all G2 and G3), and the 2 pt wire highlight beyond the selected step's own wires.
+
+### As built in G2
+
+- **Drag.** Press a step or frame and move more than 3 pt: it is dimmed where it was, a translucent
+  copy follows the pointer by the spot it was held at, a 3 pt accent line shows the place between steps
+  where it would land (an empty list's slot is outlined instead), and the frame that would hold it is
+  outlined. Where it would stay, or outside every list, nothing is drawn and the drop does nothing.
+  Release moves it; Option held at release leaves a copy (with new ids, and its results kept under
+  `name_2`, `name_3`… so none is taken twice; a reference inside the copy to a name that was renamed
+  shows as a problem to fix). Escape during a drag cancels. A step cannot be dropped inside itself:
+  the lists inside it are not offered, so over its own columns it lands in the list around it.
+  Dragging the background pans, as the wheel does. All of this is in `Layout::drop_target`, tested
+  without a pointer.
+- **Add.** The Add step button in the header opens the list of kinds and adds after the selected step
+  (or at the end of the top list). A `+` also shows on the wires either side of the selected step, and
+  an empty list's slot is itself the button. The `+` is not on every wire at once, so the drawing is not
+  covered in buttons; and there is none before the first step of a frame, where the column's name is
+  (drag a step there, or select the step and use Add step). The list is not searchable: with 13 kinds
+  it is short.
+- **Keys** (on the canvas): Delete or Backspace removes the step; Alt and an arrow moves it among its
+  list; Ctrl-D copies it after itself; Ctrl-Z and Shift-Ctrl-Z (or Ctrl-Y) undo and redo; `/` opens
+  the Add step list. A right-click on a step selects it and opens a menu: Duplicate, Move up, Move
+  down, Delete, with the same shortcuts shown.
+- **Undo** covers changes to the structure of the steps: add, delete, move, copy, a case or branch added
+  or removed. It is a stack of the steps as they were, 200 deep, named ("Undo move step" on the button's
+  hint), and a change after an undo ends the redo. Typing in a box is not on it (the box has its own
+  undo), so undoing a change also takes back what was typed into the steps since it. Undo and Redo
+  buttons sit in the header in both views.
+- The form beside the graph is narrow, so the Id and result-name boxes sit under the step's name and its
+  move and remove buttons instead of beside them.
+- Still to do: run state on nodes and problems on nodes (G3); a search box in the Add step list; the
+  graph as the default view, which waits for G3 so the first thing shown is the one that shows a run.
 

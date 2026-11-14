@@ -53,6 +53,27 @@ fn heading(s: &App, ed: &Editor, k: &Kit) -> El {
                 })
                 .build(k),
         )
+        .child(history(ed, k))
+}
+
+/// Undo and redo, each naming what it would do.
+fn history(ed: &Editor, k: &Kit) -> El {
+    let button = |label: &str, what: Option<&str>, key: &str| {
+        Button::new(label.to_owned())
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .disabled(what.is_none())
+            .build(k)
+            .key(key.to_owned())
+            .help(match what {
+                Some(w) => format!("{label} {}", w.to_lowercase()),
+                None => format!("Nothing to {}", label.to_lowercase()),
+            })
+    };
+    row()
+        .gap(2.0)
+        .child(button("Undo", ed.undoes(), "wfe-undo").on_press(|s: &mut App| s.undo_editor()))
+        .child(button("Redo", ed.redoes(), "wfe-redo").on_press(|s: &mut App| s.redo_editor()))
 }
 
 /// Save, Check and Cancel.
@@ -164,7 +185,22 @@ fn cards(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
 
 /// The steps as boxes and wires, with the form of the selected one beside them.
 fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
+    let (place, index) = s.add_position();
+    let labels: Vec<&str> = KINDS.iter().map(|(_, l)| *l).collect();
+    let target = place.clone();
     let header = heading(s, ed, k)
+        .child(pick(
+            "wfg-add-step".to_owned(),
+            Menu::AddAt(place, index),
+            &labels,
+            None,
+            "Add step",
+            false,
+            s,
+            k,
+            layer,
+            move |s, label| s.editor_add_at(&target, index, label),
+        ))
         .child(el().grow(1.0))
         .child(
             small("Fit", ButtonVariant::Ghost)
@@ -186,7 +222,7 @@ fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .gap(16.0)
-                .child(workflow_graph::view(s, ed, k))
+                .child(workflow_graph::view(s, ed, k, layer))
                 .child(inspector(s, ed, k, layer)),
         )
 }
@@ -377,7 +413,7 @@ fn field(
 
 /// A list that opens from a small trigger and gives back the entry chosen.
 #[allow(clippy::too_many_arguments)]
-fn pick<F>(
+pub(super) fn pick<F>(
     key: String,
     menu: Menu,
     options: &[&str],
@@ -619,36 +655,28 @@ fn card(
     let gone = at.clone();
     let id_at = at.clone();
     let bind_at = at.clone();
-    let head = row()
-        .w_full()
-        .center_y()
-        .gap(8.0)
-        .child(
-            text(kind_label(&n.kind))
-                .font(k.ty.ui_medium)
-                .color(c.text_base),
-        )
-        .child(col().w(150.0).child(field(
-            "Id",
-            &n.id,
-            &format!("wfe-id-{key}"),
-            "step-1",
-            1,
-            None,
-            k,
-            move |s: &mut App| s.editor_text(&Target::Id(id_at.clone())),
-        )))
-        .child(col().w(150.0).child(field(
-            "Keep the result as",
-            &n.bind,
-            &format!("wfe-bind-{key}"),
-            "name",
-            1,
-            None,
-            k,
-            move |s: &mut App| s.editor_text(&Target::Bind(bind_at.clone())),
-        )))
-        .child(el().grow(1.0))
+    let id_field = field(
+        "Id",
+        &n.id,
+        &format!("wfe-id-{key}"),
+        "step-1",
+        1,
+        None,
+        k,
+        move |s: &mut App| s.editor_text(&Target::Id(id_at.clone())),
+    );
+    let bind_field = field(
+        "Keep the result as",
+        &n.bind,
+        &format!("wfe-bind-{key}"),
+        "name",
+        1,
+        None,
+        k,
+        move |s: &mut App| s.editor_text(&Target::Bind(bind_at.clone())),
+    );
+    let controls = row()
+        .gap(2.0)
         .child(
             small("↑", ButtonVariant::Ghost)
                 .disabled(at.index == 0)
@@ -669,6 +697,40 @@ fn card(
                 .build(k)
                 .key(format!("wfe-remove-{key}")),
         );
+    let label = text(kind_label(&n.kind))
+        .font(k.ty.ui_medium)
+        .color(c.text_base);
+    // Beside the graph the form is narrow: the boxes go under the name and buttons, not beside.
+    let head = if with_steps {
+        row()
+            .w_full()
+            .center_y()
+            .gap(8.0)
+            .child(label)
+            .child(col().w(150.0).child(id_field))
+            .child(col().w(150.0).child(bind_field))
+            .child(el().grow(1.0))
+            .child(controls)
+    } else {
+        col()
+            .w_full()
+            .gap(8.0)
+            .child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .child(label)
+                    .child(el().grow(1.0))
+                    .child(controls),
+            )
+            .child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .child(col().grow(1.0).min_w(0.0).child(id_field))
+                    .child(col().grow(1.0).min_w(0.0).child(bind_field)),
+            )
+    };
     let mut out = col()
         .key(format!("wfe-card-{key}"))
         .w_full()
