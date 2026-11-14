@@ -96,6 +96,8 @@ pub struct Item {
     pub loc: Loc,
     pub form: Form,
     pub kind: String,
+    /// The step's id, as typed.
+    pub id: String,
     /// What the step does, in a line.
     pub title: String,
     /// Its id, and what it keeps its result as.
@@ -357,6 +359,7 @@ impl Pen {
                 },
                 form: Form::Empty,
                 kind: String::new(),
+                id: String::new(),
                 title: "Nothing here yet".to_owned(),
                 detail: String::new(),
                 model: false,
@@ -410,6 +413,7 @@ impl Pen {
                     Form::Frame
                 },
                 kind: node.kind.clone(),
+                id: node.id.text.trim().to_owned(),
                 title,
                 detail,
                 model: is_model(node),

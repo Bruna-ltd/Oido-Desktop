@@ -11,6 +11,7 @@ pub mod expr;
 pub mod layout;
 pub mod pause;
 pub mod template;
+pub mod trace;
 
 use definition::Definition;
 use engine::StepLog;

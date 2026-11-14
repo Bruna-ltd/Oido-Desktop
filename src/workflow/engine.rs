@@ -78,6 +78,9 @@ pub struct ToolOutcome {
 /// A model's text and what it cost, or why it failed.
 pub type Answer = Result<(String, Usage), String>;
 
+/// Told a run's log as it goes.
+pub type Watcher<'a> = &'a (dyn Fn(&[StepLog]) + Sync);
+
 /// What a run needs from the outside, as functions so the engine can be tried without a network or
 /// a shell.
 pub struct Env<'a> {
@@ -88,6 +91,9 @@ pub struct Env<'a> {
     pub cancel: &'a Arc<AtomicBool>,
     /// The workflow called this, of the agent running, as its id and steps.
     pub flow: &'a (dyn Fn(&str) -> Option<(String, Definition)> + Sync),
+    /// Told the whole log as it stands each time a step begins or ends, so a screen can show a run
+    /// as it goes.
+    pub progress: Option<Watcher<'a>>,
 }
 
 /// One step as it ran.
@@ -107,6 +113,9 @@ pub struct StepLog {
     /// Which round of each loop around it this was, outermost first, counting from 1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rounds: Vec<u32>,
+    /// The step has begun and not ended. Only a run as it goes has it; a saved run never does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running: bool,
 }
 
 impl StepLog {
@@ -452,7 +461,9 @@ impl Run<'_, '_> {
                 ms: 0,
                 path: at.to_owned(),
                 rounds: self.rounds.clone(),
+                running: true,
             });
+            self.report();
             self.out.steps.len() - 1
         };
         let began = Instant::now();
@@ -482,7 +493,8 @@ impl Run<'_, '_> {
         };
         let log = &mut self.out.steps[slot];
         log.ms = began.elapsed().as_millis() as u64;
-        match result {
+        log.running = false;
+        let result = match result {
             Ok(value) => {
                 let text = template::as_text(&value);
                 if !container {
@@ -514,6 +526,20 @@ impl Run<'_, '_> {
                 }
                 Err(halt)
             }
+        };
+        self.report();
+        result
+    }
+
+    /// Tells whoever is watching the log as it stands. A branch of a `parallel` step has a log of
+    /// its own that is only joined to the run's afterwards, so it says nothing; and a very long run
+    /// says it less often, so the watching does not cost more than the run.
+    fn report(&self) {
+        let Some(tell) = self.env.progress else {
+            return;
+        };
+        if self.group.is_none() && (self.out.steps.len() <= 400 || self.taken.is_multiple_of(25)) {
+            tell(&self.out.steps);
         }
     }
 
@@ -1248,6 +1274,7 @@ mod tests {
             model: &model_fn,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         let out = execute(d, &inputs, &env);
         (out, fakes)
@@ -1381,6 +1408,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         let out = execute(&d, &json!({}), &env);
         assert_eq!(out.ending, Ending::Stopped);
@@ -1623,6 +1651,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         let out = execute(&d, &json!({}), &env);
         assert_eq!(out.ending, Ending::Stopped);
@@ -1688,6 +1717,7 @@ mod tests {
             ms: 0,
             path: path.into(),
             rounds,
+            running: false,
         };
         assert_eq!(at("", vec![]).depth(), 0);
         assert_eq!(at("3", vec![]).depth(), 0);
@@ -1768,6 +1798,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         assert_eq!(execute(&d, &json!({}), &env).ending, Ending::Stopped);
     }
@@ -1822,6 +1853,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         assert_eq!(execute(d, &json!({}), &env).ending, Ending::Succeeded);
         seen.into_inner()
@@ -1905,6 +1937,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         assert_eq!(execute(&d, &json!({}), &env).ending, Ending::Succeeded);
         assert_eq!(
@@ -1946,6 +1979,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &flow,
+            progress: None,
         };
         let inputs = bind_inputs(d, &Map::new()).unwrap();
         let out = execute(d, &inputs, &env);
@@ -2145,6 +2179,7 @@ mod tests {
                 model: &model,
                 cancel: &cancel,
                 flow: &flow,
+                progress: None,
             })
         }
 
@@ -2405,6 +2440,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         let inputs = bind_inputs(d, &Map::new()).unwrap();
         let out = execute(d, &inputs, &env);
@@ -2579,6 +2615,7 @@ mod tests {
             model: &model,
             cancel: &cancel,
             flow: &|_: &str| None,
+            progress: None,
         };
         let out = execute(&d, &json!({}), &env);
         assert_eq!(out.ending, Ending::Stopped);
@@ -2586,5 +2623,43 @@ mod tests {
             said.into_inner().len() <= 2,
             "no branch started a second step"
         );
+    }
+
+    #[test]
+    fn a_watcher_is_told_the_log_as_each_step_begins_and_ends_and_nothing_is_running_at_the_end() {
+        let d = def(json!({"steps": [
+            sh("a", "echo a"),
+            {"id": "i", "kind": "if", "cond": "true", "then": [sh("t", "echo t")], "else": []}
+        ]}));
+        let seen = RefCell::new(Vec::new());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tool = |_: &str, _: &Value, _: Option<&str>| ToolOutcome::default();
+        let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+        let watch = |log: &[StepLog]| {
+            seen.borrow_mut().push(
+                log.iter()
+                    .map(|l| format!("{}{}", l.id, if l.running { "*" } else { "" }))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        };
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+            flow: &|_: &str| None,
+            progress: Some(&watch),
+        };
+        let out = execute(&d, &json!({}), &env);
+        assert_eq!(out.ending, Ending::Succeeded);
+        assert_eq!(
+            seen.into_inner(),
+            ["a*", "a", "a i*", "a i* t*", "a i* t", "a i t"],
+            "a container runs while what is inside it does"
+        );
+        assert!(out.steps.iter().all(|l| !l.running));
+        // And a log that was saved never says so: the field is not written.
+        let saved = serde_json::to_string(&out.steps[0]).unwrap();
+        assert!(!saved.contains("running"), "{saved}");
     }
 }

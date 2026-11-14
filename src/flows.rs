@@ -129,13 +129,16 @@ fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Com
 }
 
 /// Runs the workflow's steps with real tools and a real model. Blocks.
+/// Told the log of a run each time a step begins or ends, from the worker's thread.
+pub(crate) type Watch = Arc<dyn Fn(Vec<crate::workflow::engine::StepLog>) + Send + Sync>;
+
 /// How a run begins: from the top with its inputs, or from where a paused one stopped.
 pub(crate) enum Go {
     Fresh(Value),
     Resume(Snapshot, Decision),
 }
 
-fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>) -> Ran {
+fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Option<&Watch>) -> Ran {
     let renewed = std::sync::Mutex::new(Vec::new());
     let handed = std::sync::Mutex::new(Vec::new());
     let cancel: &AtomicBool = stop;
@@ -272,6 +275,11 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>) -> Ran {
             )
         })
     };
+    let progress = |steps: &[crate::workflow::engine::StepLog]| {
+        if let Some(watch) = watch {
+            watch(steps.to_vec());
+        }
+    };
     let env = Env {
         tool: &tool,
         model: &model,
@@ -282,6 +290,7 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>) -> Ran {
                 .find(|w| w.name.eq_ignore_ascii_case(name))
                 .map(|w| (w.id.clone(), w.definition.clone()))
         },
+        progress: watch.is_some().then_some(&progress),
     };
     let outcome = match go {
         Go::Fresh(inputs) => engine::execute(def, &inputs, &env),
@@ -717,6 +726,7 @@ impl App {
             wf.definition.clone(),
             Go::Fresh(inputs),
             cancel,
+            None,
             move |app, outcome| {
                 let mut record = record;
                 let who = Counted {
@@ -762,12 +772,13 @@ impl App {
         def: Definition,
         go: Go,
         cancel: Arc<AtomicBool>,
+        watch: Option<Watch>,
         done: D,
     ) where
         D: FnOnce(&mut App, Outcome) + Send + 'static,
     {
         self.spawn(
-            move || work(&def, go, &prep, &cancel),
+            move || work(&def, go, &prep, &cancel, watch.as_ref()),
             move |app, (outcome, renewed, handed)| {
                 for (server, tokens) in renewed {
                     app.mcp_keep_tokens(&server, tokens, false);
@@ -952,6 +963,7 @@ impl App {
             def,
             Go::Resume(snapshot, decision),
             cancel,
+            None,
             move |app, outcome| {
                 app.wf_jobs.remove(&wf.id);
                 let who = Counted {

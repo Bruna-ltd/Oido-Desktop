@@ -15,7 +15,7 @@ use crate::models::ModelRef;
 use crate::store::Counted;
 use crate::usage::Source;
 use crate::workflow::editor::{Editor, KINDS, Loc, Menu, Place, Target};
-use crate::workflow::engine::{self, Outcome};
+use crate::workflow::engine::{self, Outcome, StepLog};
 
 /// What a card raised by a test run of a workflow that is not saved yet is filed under.
 pub const TEST_CARD: &str = "workflow-test";
@@ -29,6 +29,8 @@ pub struct TestRun {
     pub running: Option<Arc<AtomicBool>>,
     pub result: Option<Outcome>,
     pub notice: Option<String>,
+    /// The log of the run as it stands while it goes, for the graph to show it so.
+    pub live: Vec<StepLog>,
 }
 
 impl TestRun {
@@ -163,25 +165,52 @@ impl App {
             .unwrap_or_default();
         let began = now();
         let flag = Arc::clone(&cancel);
-        self.spawn_flow(prep, def, Go::Fresh(inputs), cancel, move |app, outcome| {
-            let who = Counted {
-                model: &model,
-                agent_id: &agent_id,
-                agent_name: &agent_name,
-                source: Source::Workflow,
-            };
-            app.count_flow_usage(began, outcome.usage, &who);
-            // Only if it is still the test the editor shows: the editor may have closed.
-            if app
-                .wf_test
-                .running
-                .as_ref()
-                .is_some_and(|f| Arc::ptr_eq(f, &flag))
-            {
-                app.wf_test.running = None;
-                app.wf_test.result = Some(outcome);
-            }
+        self.wf_test.live.clear();
+        // Each step beginning or ending tells the graph, so it shows the run as it goes.
+        let watched = Arc::clone(&cancel);
+        let watch: crate::flows::Watch = Arc::new(move |lines: Vec<StepLog>| {
+            let flag = Arc::clone(&watched);
+            crate::app::on_ui_thread(move |app| app.test_progress(&flag, lines));
         });
+        self.spawn_flow(
+            prep,
+            def,
+            Go::Fresh(inputs),
+            cancel,
+            Some(watch),
+            move |app, outcome| {
+                let who = Counted {
+                    model: &model,
+                    agent_id: &agent_id,
+                    agent_name: &agent_name,
+                    source: Source::Workflow,
+                };
+                app.count_flow_usage(began, outcome.usage, &who);
+                // Only if it is still the test the editor shows: the editor may have closed.
+                if app
+                    .wf_test
+                    .running
+                    .as_ref()
+                    .is_some_and(|f| Arc::ptr_eq(f, &flag))
+                {
+                    app.wf_test.running = None;
+                    app.wf_test.live.clear();
+                    app.wf_test.result = Some(outcome);
+                }
+            },
+        );
+    }
+
+    /// The log of the test run as it stands, if it is still the test the editor shows.
+    pub fn test_progress(&mut self, flag: &Arc<AtomicBool>, lines: Vec<StepLog>) {
+        if self
+            .wf_test
+            .running
+            .as_ref()
+            .is_some_and(|f| Arc::ptr_eq(f, flag))
+        {
+            self.wf_test.live = lines;
+        }
     }
 
     /// Saves the workflow in the editor if it is good, and closes the editor; otherwise says what

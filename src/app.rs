@@ -221,6 +221,13 @@ pub struct App {
 /// headless runs, where [`App::spawn`] runs the work on the spot instead.
 static HANDLE: OnceLock<AppHandle<App>> = OnceLock::new();
 
+/// Runs `f` on the UI thread from any other. With no running app (tests, headless) it is not run.
+pub fn on_ui_thread(f: impl FnOnce(&mut App) + Send + 'static) {
+    if let Some(handle) = HANDLE.get() {
+        handle.update(move |app, _| f(app));
+    }
+}
+
 pub fn set_handle(handle: AppHandle<App>) {
     let _ = HANDLE.set(handle);
 }

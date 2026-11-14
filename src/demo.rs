@@ -1240,6 +1240,7 @@ pub static SCENES: &[Scene] = &[
             ms: 120,
             path: String::new(),
             rounds: Vec::new(),
+            running: false,
         };
         s.wf_runs = vec![
             RunRecord {
@@ -1290,6 +1291,7 @@ pub static SCENES: &[Scene] = &[
     }),
     ("workflow-nested", |s| nested_workflow(s)),
     ("workflow-editor", |s| {
+        s.wf_graph.shown = crate::flow_graph::View::Cards;
         use crate::workflow::editor::Editor;
         nested_workflow(s);
         if let Some(w) = s.workflows.first() {
@@ -1329,7 +1331,81 @@ pub static SCENES: &[Scene] = &[
             copy: false,
         });
     }),
+    ("workflow-new", |s| {
+        nested_workflow(s);
+        s.new_workflow();
+        // A snapshot draws one frame, so give the view the size the window leaves it.
+        s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+        s.fit_graph();
+    }),
+    ("workflow-run", |s| {
+        use crate::workflow::engine::{Ending, Outcome, StepLog, Usage};
+        graph_scene(s);
+        s.wf_graph.selected = Some(crate::workflow::editor::Loc {
+            place: vec![(1, 1), (1, 0), (0, 0)],
+            index: 0,
+        });
+        let line = |path: &str, id: &str, out: &str, err: Option<&str>, rounds: &[u32]| StepLog {
+            id: id.into(),
+            kind: "tool".into(),
+            what: String::new(),
+            output: out.into(),
+            error: err.map(Into::into),
+            ms: 40,
+            path: path.into(),
+            rounds: rounds.to_vec(),
+            running: false,
+        };
+        let steps = vec![
+            line("0", "ls", "a.pdf\nb.png\nc.txt", None, &[]),
+            line("1", "gather", "2 branches", None, &[]),
+            line("1.news.0", "n", "Headlines: …", None, &[]),
+            line(
+                "1.notes.0",
+                "r",
+                "# Today\n- ship the graph view",
+                None,
+                &[],
+            ),
+            line("1.notes.1", "each", "3 rounds", None, &[]),
+            line("1.notes.1.body.0", "kind", "case 1", None, &[1]),
+            line("1.notes.1.body.0.case0.0", "pdf", "", None, &[1]),
+            line("1.notes.1.body.0", "kind", "otherwise", None, &[2]),
+            line(
+                "1.notes.1.body.0.default.0",
+                "skip",
+                "skip b.png",
+                None,
+                &[2],
+            ),
+            line("1.notes.1.body.0", "kind", "case 1", None, &[3]),
+            line(
+                "1.notes.1.body.0.case0.0",
+                "pdf",
+                "",
+                Some("mv: cannot move 'c.pdf': no such file"),
+                &[3],
+            ),
+            line("2", "say", "Two stories and a note.", None, &[]),
+            line("3", "ok", "Send the summary?", None, &[]),
+        ];
+        s.wf_test.result = Some(Outcome {
+            ending: Ending::Waiting {
+                step: "ok".into(),
+                prompt: "Send the summary?".into(),
+                until: None,
+            },
+            output: String::new(),
+            steps,
+            usage: Usage::default(),
+            snapshot: None,
+        });
+        if let Some(ed) = s.wf_editor.as_mut() {
+            ed.problems = vec!["step 5.1 (\"send\"): a tool step needs a tool".into()];
+        }
+    }),
     ("workflow-parallel", |s| {
+        s.wf_graph.shown = crate::flow_graph::View::Cards;
         use crate::workflow::definition::Step;
         use crate::workflow::editor::Editor;
         nested_workflow(s);
@@ -1362,6 +1438,7 @@ pub static SCENES: &[Scene] = &[
         }
     }),
     ("workflow-test", |s| {
+        s.wf_graph.shown = crate::flow_graph::View::Cards;
         use crate::workflow::editor::Editor;
         use crate::workflow::engine::{Ending, Outcome, Usage};
         nested_workflow(s);
@@ -1822,6 +1899,7 @@ fn nested_workflow(s: &mut App) {
                 ms: 40,
                 path: "1".into(),
                 rounds: vec![],
+                running: false,
             },
             StepLog {
                 id: "kind".into(),
@@ -1832,6 +1910,7 @@ fn nested_workflow(s: &mut App) {
                 ms: 1,
                 path: "1.body.0".into(),
                 rounds: vec![1],
+                running: false,
             },
             StepLog {
                 id: "pdf".into(),
@@ -1842,6 +1921,7 @@ fn nested_workflow(s: &mut App) {
                 ms: 9,
                 path: "1.body.0.case0.0".into(),
                 rounds: vec![1],
+                running: false,
             },
         ],
         input_tokens: 0,

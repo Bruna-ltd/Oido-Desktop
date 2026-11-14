@@ -414,6 +414,7 @@ mod tests {
             ms: 3,
             path: "0.then.1".into(),
             rounds: vec![2],
+            running: false,
         }];
         db.finish_workflow_run(&done).unwrap();
         assert_eq!(db.list_workflow_runs("w1", 10).unwrap(), vec![done]);

@@ -202,6 +202,19 @@ fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
             move |s, label| s.editor_add_at(&target, index, label),
         ))
         .child(el().grow(1.0))
+        .children(s.has_last_run().then(|| {
+            let on = s.wf_graph.show_last;
+            small(
+                if on { "Hide last run" } else { "Show last run" },
+                ButtonVariant::Ghost,
+            )
+            .on_press(move |s: &mut App| {
+                s.hide_run();
+                s.wf_graph.show_last = !on;
+            })
+            .build(k)
+            .key("wfg-last-run")
+        }))
         .child(
             small("Fit", ButtonVariant::Ghost)
                 .on_press(|s: &mut App| s.fit_graph())
@@ -217,6 +230,7 @@ fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
         .padding(20.0)
         .gap(12.0)
         .child(header)
+        .children(workflow_graph::banner(s, ed, k))
         .child(
             row()
                 .grow(1.0)
@@ -253,7 +267,8 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                             .key("wfg-settings"),
                     ),
                 )
-                .child(card(s, ed, &at, node, len, false, k, layer));
+                .child(card(s, ed, &at, node, len, false, k, layer))
+                .children(workflow_graph::run_panel(s, ed, &at, k));
         }
         None => {
             out = out.child(basics(s, ed, k, layer)).child(tail(s, ed, k));

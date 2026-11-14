@@ -5,7 +5,9 @@ use rune::{Drag, Live, Phase, Tx};
 
 use crate::app::App;
 use crate::workflow::editor::{KINDS, Loc, Place};
+use crate::workflow::engine::{Ending, StepLog};
 use crate::workflow::layout::{self, Dir, Drop};
+use crate::workflow::{Pause, RunStatus};
 
 /// Zoom stays where text can still be read: the smallest type on a node is 11 pt.
 pub const ZOOM_MIN: f32 = 0.7;
@@ -16,9 +18,9 @@ pub const ZOOM_COMPACT: f32 = 0.85;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum View {
     /// Every step as a form, one under the other.
-    #[default]
     Cards,
     /// The steps as boxes and wires, with the selected one's form beside them.
+    #[default]
     Graph,
 }
 
@@ -40,6 +42,18 @@ pub struct GraphView {
     panning: Option<[f32; 2]>,
     /// The right-click menu: the step it is for, and where in the window it opened.
     pub menu: Option<(Loc, [f32; 2])>,
+    /// Show the workflow's last run on the steps, when no test run is.
+    pub show_last: bool,
+}
+
+/// A run drawn on the steps: its log, where it waits, and if it can be answered, how.
+pub struct Shown {
+    pub label: &'static str,
+    pub lines: Vec<StepLog>,
+    /// The id of the `wait` step it is stopped at.
+    pub waiting: Option<String>,
+    /// A run that waits for you: its workflow and its own id, and what it waits for.
+    pub answer: Option<(String, String, Pause)>,
 }
 
 /// A step being dragged: where it is from, where the pointer is in the drawing, and where it
@@ -74,6 +88,7 @@ impl Default for GraphView {
             drag: None,
             panning: None,
             menu: None,
+            show_last: false,
         }
     }
 }
@@ -129,6 +144,63 @@ impl App {
         if let Some(at) = next {
             self.wf_graph.selected = Some(at);
         }
+    }
+
+    /// The run drawn on the steps: the test run if there is one (as it goes, or as it ended), else
+    /// the workflow's last run if that is asked for and this is its workflow.
+    pub fn shown_run(&self) -> Option<Shown> {
+        let t = &self.wf_test;
+        if t.running.is_some() {
+            return Some(Shown {
+                label: "Test run, going",
+                lines: t.live.clone(),
+                waiting: None,
+                answer: None,
+            });
+        }
+        if let Some(r) = &t.result {
+            let waiting = match &r.ending {
+                Ending::Waiting { step, .. } => Some(step.clone()),
+                _ => None,
+            };
+            return Some(Shown {
+                label: "Test run",
+                lines: r.steps.clone(),
+                waiting,
+                answer: None,
+            });
+        }
+        let mine = self.wf_editor.as_ref()?.workflow.as_ref()?;
+        let last = self
+            .wf_runs
+            .first()
+            .filter(|_| self.wf_graph.show_last && self.wf_open.as_ref() == Some(mine))?;
+        Some(Shown {
+            label: if last.status == RunStatus::Running {
+                "Last run, going"
+            } else {
+                "Last run"
+            },
+            lines: last.steps.clone(),
+            waiting: last.pause.as_ref().map(|p| p.step.clone()),
+            answer: last
+                .pause
+                .clone()
+                .map(|p| (last.workflow_id.clone(), last.id.clone(), p)),
+        })
+    }
+
+    /// Whether there is a last run to show on the steps.
+    pub fn has_last_run(&self) -> bool {
+        let mine = self.wf_editor.as_ref().and_then(|ed| ed.workflow.as_ref());
+        mine.is_some() && self.wf_open.as_ref() == mine && !self.wf_runs.is_empty()
+    }
+
+    /// Takes the run off the steps.
+    pub fn hide_run(&mut self) {
+        self.wf_test.result = None;
+        self.wf_test.live.clear();
+        self.wf_graph.show_last = false;
     }
 
     /// The point in the drawing at the point `q` of the view, undoing the camera.
@@ -601,5 +673,104 @@ mod tests {
             (vec![(2, 0)], 1),
             "inside a frame, after the step there"
         );
+    }
+
+    fn log_line(path: &str, id: &str) -> StepLog {
+        StepLog {
+            id: id.into(),
+            kind: "tool".into(),
+            what: String::new(),
+            output: String::new(),
+            error: None,
+            ms: 1,
+            path: path.into(),
+            rounds: Vec::new(),
+            running: false,
+        }
+    }
+
+    #[test]
+    fn the_graph_shows_the_test_run_as_it_goes_then_as_it_ended_and_a_run_that_is_hidden_is_gone() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let mut app = app_with_editor();
+        assert!(app.shown_run().is_none());
+        // Going: what the worker last said, and only if it is the test the editor still shows.
+        let flag = Arc::new(AtomicBool::new(false));
+        app.wf_test.running = Some(Arc::clone(&flag));
+        app.test_progress(&flag, vec![log_line("0", "a")]);
+        let shown = app.shown_run().unwrap();
+        assert!(shown.lines.len() == 1 && shown.label == "Test run, going");
+        app.test_progress(&Arc::new(AtomicBool::new(false)), vec![]);
+        assert_eq!(
+            app.shown_run().unwrap().lines.len(),
+            1,
+            "another test's news is ignored"
+        );
+        // Ended: its own log, and nothing is waiting unless it ended at a wait.
+        app.wf_test.running = None;
+        app.wf_test.live.clear();
+        app.wf_test.result = Some(crate::workflow::engine::Outcome {
+            ending: Ending::Waiting {
+                step: "a".into(),
+                prompt: "ok?".into(),
+                until: None,
+            },
+            output: String::new(),
+            steps: vec![log_line("0", "a")],
+            usage: Default::default(),
+            snapshot: None,
+        });
+        let shown = app.shown_run().unwrap();
+        assert!(
+            shown.label == "Test run"
+                && shown.waiting.as_deref() == Some("a")
+                && shown.answer.is_none()
+        );
+        app.hide_run();
+        assert!(app.shown_run().is_none());
+    }
+
+    #[test]
+    fn the_last_run_shows_only_when_asked_for_and_only_for_the_workflow_in_the_editor() {
+        use crate::workflow::{Pause, RunRecord};
+        let mut app = app_with_editor();
+        let ed = app.wf_editor.as_mut().unwrap();
+        ed.workflow = Some("w1".into());
+        app.wf_runs = vec![RunRecord {
+            id: "r1".into(),
+            workflow_id: "w1".into(),
+            started_by: "you".into(),
+            status: RunStatus::Waiting,
+            inputs: "{}".into(),
+            output: String::new(),
+            failed_step: String::new(),
+            error: String::new(),
+            steps: vec![log_line("0", "a")],
+            input_tokens: 0,
+            output_tokens: 0,
+            started_at: 0,
+            finished_at: None,
+            pause: Some(Pause {
+                step: "a".into(),
+                prompt: "Go on?".into(),
+                until: None,
+            }),
+        }];
+        assert!(!app.has_last_run(), "the page is not on this workflow");
+        app.wf_open = Some("w1".into());
+        assert!(app.has_last_run());
+        assert!(app.shown_run().is_none(), "not until it is asked for");
+        app.wf_graph.show_last = true;
+        let shown = app.shown_run().unwrap();
+        let (wf, run, pause) = shown.answer.unwrap();
+        assert_eq!(
+            (wf.as_str(), run.as_str(), pause.prompt.as_str()),
+            ("w1", "r1", "Go on?")
+        );
+        assert_eq!(shown.waiting.as_deref(), Some("a"));
+        // Another workflow's runs are not drawn on this one.
+        app.wf_open = Some("other".into());
+        assert!(app.shown_run().is_none());
     }
 }

@@ -6,14 +6,17 @@ use rune::{
     Drag, El, Key, KeyEvent, LineCap, MagnifyEvent, Path, PointerEvent, PointerPress, Shape,
     WheelEvent, canvas, col, el, icon, row, text,
 };
-use rune_kit::{Kit, MenuItem, context_menu, glyphs};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, MenuItem, context_menu, glyphs};
 
 use super::workflow_editor::pick;
 use crate::app::App;
 use crate::workflow::editor::{Editor, KINDS, Loc, Menu};
+use crate::workflow::engine::StepLog;
 use crate::workflow::layout::{
     Dir, Form, Gap, Item, Label, Layout, NODE_H, NODE_W, Rect, Wire, layout,
 };
+use crate::workflow::pause::Decision;
+use crate::workflow::trace::{NodeRun, State, loc_of, problems_by_id, runs_by_step};
 
 /// The width of the form beside the drawing.
 pub const INSPECTOR_W: f32 = 380.0;
@@ -25,6 +28,16 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     let l = layout(ed);
     let selected = s.selected_step();
     let compact = g.compact();
+    // What a run did at each step, and what is wrong with each.
+    let shown = s.shown_run();
+    let runs = shown.as_ref().map_or_else(Vec::new, |r| {
+        runs_by_step(ed, &r.lines, r.waiting.as_deref())
+    });
+    let problems = problems_by_id(&ed.problems);
+    let look = |item: &Item| Look {
+        run: runs.iter().find(|(at, _)| *at == item.loc).map(|(_, r)| r),
+        problem: problems.get(&item.id).map(String::as_str),
+    };
     // The step being carried is dimmed where it was.
     let carried = g.drag.as_ref().filter(|d| d.moving).map(|d| d.from.clone());
 
@@ -38,7 +51,13 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     // frame and a step is never covered.
     for item in l.items.iter().filter(|i| i.form == Form::Frame) {
         let faded = carried.as_ref() == Some(&item.loc);
-        world = world.child(frame(item, selected.as_ref() == Some(&item.loc), faded, k));
+        world = world.child(frame(
+            item,
+            selected.as_ref() == Some(&item.loc),
+            faded,
+            &look(item),
+            k,
+        ));
     }
     world = world.child(wires(&l, selected.as_ref(), k));
     for item in &l.items {
@@ -51,6 +70,7 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                     selected.as_ref() == Some(&item.loc),
                     faded,
                     compact,
+                    &look(item),
                     k,
                 ))
             }
@@ -328,8 +348,79 @@ fn loc_key(at: &Loc) -> String {
     format!("{}-{}", place.join("-"), at.index)
 }
 
+/// What a run did at a step and what is wrong with it, to draw on its box.
+struct Look<'a> {
+    run: Option<&'a NodeRun>,
+    problem: Option<&'a str>,
+}
+
+impl Look<'_> {
+    fn state(&self) -> Option<State> {
+        self.run.map(|r| r.state)
+    }
+
+    /// The colour of the box's edge when it has something to say, else none.
+    fn edge(&self, k: &Kit) -> Option<rune::Color> {
+        if self.problem.is_some() || self.state() == Some(State::Failed) {
+            Some(k.c.warning.icon)
+        } else if matches!(self.state(), Some(State::Running | State::Waiting)) {
+            Some(k.c.bg_accent)
+        } else {
+            None
+        }
+    }
+
+    /// The small mark at the right of the box: a glyph and a word, never colour alone.
+    fn mark(&self, k: &Kit) -> Option<El> {
+        let c = &k.c;
+        if self.problem.is_some() {
+            return Some(
+                text("!")
+                    .font(k.ty.ui_medium)
+                    .color(c.warning.icon)
+                    .help("This step has a problem"),
+            );
+        }
+        let run = self.run?;
+        Some(match run.state {
+            State::Done => {
+                let mut r = row()
+                    .gap(3.0)
+                    .center_y()
+                    .child(icon(&glyphs::CHECK_SMALL, 14.0).color(c.text_muted));
+                if run.rounds > 1 {
+                    r = r.child(
+                        text(format!("×{}", run.rounds))
+                            .font(k.ty.small)
+                            .color(c.text_muted),
+                    );
+                }
+                r
+            }
+            State::Failed => row()
+                .gap(3.0)
+                .center_y()
+                .child(icon(&glyphs::CIRCLE_X, 14.0).color(c.warning.icon))
+                .child(text("failed").font(k.ty.small).color(c.warning.icon)),
+            State::Running => row().child(text("running").font(k.ty.small).color(c.bg_accent)),
+            State::Waiting => row().child(text("waiting").font(k.ty.small).color(c.bg_accent)),
+        })
+    }
+
+    /// The second line of the box: the problem, or why it failed, or its id.
+    fn second<'b>(&'b self, item: &'b Item) -> (&'b str, bool) {
+        match (self.problem, self.run) {
+            (Some(p), _) => (p, true),
+            (None, Some(r)) if r.state == State::Failed => {
+                (r.error.as_deref().unwrap_or("failed"), true)
+            }
+            _ => (item.detail.as_str(), false),
+        }
+    }
+}
+
 /// One step's box: what it does, and its id with what it keeps the result as.
-fn step(item: &Item, selected: bool, faded: bool, compact: bool, k: &Kit) -> El {
+fn step(item: &Item, selected: bool, faded: bool, compact: bool, look: &Look, k: &Kit) -> El {
     let c = &k.c;
     let at = item.loc.clone();
     let mut words = col().grow(1.0).min_w(0.0).gap(1.0).child(
@@ -339,13 +430,15 @@ fn step(item: &Item, selected: bool, faded: bool, compact: bool, k: &Kit) -> El 
             .truncate(),
     );
     if !compact {
+        let (line, bad) = look.second(item);
         words = words.child(
-            text(item.detail.clone())
+            text(line.to_owned())
                 .font(k.ty.small)
-                .color(c.text_muted)
+                .color(if bad { c.warning.icon } else { c.text_muted })
                 .truncate(),
         );
     }
+    let edge = look.edge(k);
     let mut e = pinned(row().key(format!("wfg-{}", loc_key(&item.loc))), &item.rect)
         .px(12.0)
         .gap(8.0)
@@ -353,12 +446,16 @@ fn step(item: &Item, selected: bool, faded: bool, compact: bool, k: &Kit) -> El 
         .radius(k.radius.md)
         .fill(if selected { c.layer_03 } else { c.layer_01 })
         .border(
-            if selected { 2.0 } else { 1.0 },
-            if selected { c.bg_accent } else { c.border_base },
+            if selected || edge.is_some() { 2.0 } else { 1.0 },
+            if selected {
+                c.bg_accent
+            } else {
+                edge.unwrap_or(c.border_base)
+            },
         )
         .role("button")
-        .label(accessible(item))
-        .help(item.title.clone())
+        .label(accessible(item, look))
+        .help(tip(item, look))
         .opacity(if faded { 0.4 } else { 1.0 })
         .on_press(move |s: &mut App| s.select_step(Some(at.clone())));
     if item.model {
@@ -367,14 +464,18 @@ fn step(item: &Item, selected: bool, faded: bool, compact: bool, k: &Kit) -> El 
             .border_dash(5.0, 3.0)
             .child(icon(&glyphs::SPARKLE, 14.0).color(c.text_muted));
     }
-    k.interactive(e.child(words))
+    e = e.child(words);
+    if let Some(mark) = look.mark(k) {
+        e = e.child(mark);
+    }
+    k.interactive(e)
 }
 
 /// The frame around a step that holds other steps, with its title bar.
-fn frame(item: &Item, selected: bool, faded: bool, k: &Kit) -> El {
+fn frame(item: &Item, selected: bool, faded: bool, look: &Look, k: &Kit) -> El {
     let c = &k.c;
     let at = item.loc.clone();
-    let bar = row()
+    let mut bar = row()
         .w_full()
         .h(crate::workflow::layout::HEAD)
         .px(12.0)
@@ -386,27 +487,31 @@ fn frame(item: &Item, selected: bool, faded: bool, k: &Kit) -> El {
                 .color(c.text_base)
                 .truncate(),
         )
-        .child(el().grow(1.0))
-        .child(
-            text(item.detail.clone())
-                .font(k.ty.small)
-                .color(c.text_muted)
-                .truncate(),
-        );
+        .child(el().grow(1.0));
+    if let Some(mark) = look.mark(k) {
+        bar = bar.child(mark);
+    }
+    let bar = bar.child(
+        text(item.detail.clone())
+            .font(k.ty.small)
+            .color(c.text_muted)
+            .truncate(),
+    );
+    let edge = look.edge(k);
     let e = pinned(col().key(format!("wfg-{}", loc_key(&item.loc))), &item.rect)
         .radius(k.radius.lg)
         .fill(c.layer_02)
         .border(
-            if selected { 2.0 } else { 1.0 },
+            if selected || edge.is_some() { 2.0 } else { 1.0 },
             if selected {
                 c.bg_accent
             } else {
-                c.border_muted
+                edge.unwrap_or(c.border_muted)
             },
         )
         .role("button")
-        .label(accessible(item))
-        .help(item.title.clone())
+        .label(accessible(item, look))
+        .help(tip(item, look))
         .opacity(if faded { 0.4 } else { 1.0 })
         .on_press(move |s: &mut App| s.select_step(Some(at.clone())))
         .child(bar);
@@ -465,14 +570,179 @@ fn start(r: &Rect, k: &Kit) -> El {
         .child(text("Start").font(k.ty.small).color(c.text_base))
 }
 
-/// What a screen reader says for a step.
-fn accessible(item: &Item) -> String {
+/// A line above the drawing while a run is on it: which run, how far it got, and, if it waits for
+/// you, what it asks, with the buttons that answer.
+pub fn banner(s: &App, ed: &Editor, k: &Kit) -> Option<El> {
+    let c = &k.c;
+    let shown = s.shown_run()?;
+    let runs = runs_by_step(ed, &shown.lines, shown.waiting.as_deref());
+    let total = layout(ed)
+        .items
+        .iter()
+        .filter(|i| i.form != Form::Empty)
+        .count();
+    let failed = runs
+        .iter()
+        .filter(|(_, r)| r.state == State::Failed)
+        .count();
+    let mut said = format!("{} · reached {} of {total} steps", shown.label, runs.len());
+    if failed > 0 {
+        said.push_str(&format!(", {failed} failed"));
+    }
+    let mut out = row()
+        .key("wfg-banner")
+        .w_full()
+        .center_y()
+        .gap(10.0)
+        .px(12.0)
+        .py(8.0)
+        .radius(k.radius.md)
+        .fill(c.layer_01)
+        .border(1.0, c.border_muted)
+        .child(text(said).font(k.ty.small).color(c.text_base));
+    if let Some((wf, run, pause)) = shown.answer {
+        let button = |label: &str, key: &str, variant: ButtonVariant| {
+            Button::new(label.to_owned())
+                .variant(variant)
+                .control_size(ControlSize::Small)
+                .build(k)
+                .key(key.to_owned())
+        };
+        let ask = if pause.until.is_none() {
+            pause.prompt.clone()
+        } else {
+            format!(
+                "{}. It goes on by itself when the wait is over.",
+                pause.prompt
+            )
+        };
+        let (w1, r1, w2, r2, w3, r3) = (wf.clone(), run.clone(), wf.clone(), run.clone(), wf, run);
+        out = out
+            .child(
+                text(format!("Waiting: {ask}"))
+                    .font(k.ty.small)
+                    .color(c.text_base)
+                    .truncate(),
+            )
+            .child(
+                button(
+                    if pause.until.is_none() {
+                        "Approve"
+                    } else {
+                        "Go on now"
+                    },
+                    "wfg-approve",
+                    ButtonVariant::Submit,
+                )
+                .on_press(move |s: &mut App| s.answer_wait(&w1, &r1, Decision::Go, true)),
+            );
+        if pause.until.is_none() {
+            out = out.child(
+                button("Decline", "wfg-decline", ButtonVariant::Outline)
+                    .on_press(move |s: &mut App| s.answer_wait(&w2, &r2, Decision::Declined, true)),
+            );
+        }
+        out = out.child(
+            button("Stop it", "wfg-stop-wait", ButtonVariant::Ghost)
+                .on_press(move |s: &mut App| s.stop_wait(&w3, &r3)),
+        );
+    }
+    Some(
+        out.child(el().grow(1.0)).child(
+            Button::new("Hide run")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.hide_run())
+                .build(k)
+                .key("wfg-hide-run"),
+        ),
+    )
+}
+
+/// What the shown run did at the selected step, round by round, under its form.
+pub fn run_panel(s: &App, ed: &Editor, at: &Loc, k: &Kit) -> Option<El> {
+    let c = &k.c;
+    let shown = s.shown_run()?;
+    let mine: Vec<&StepLog> = shown
+        .lines
+        .iter()
+        .filter(|l| loc_of(ed, &l.path).as_ref() == Some(at))
+        .collect();
+    if mine.is_empty() {
+        return None;
+    }
+    let mut out = col()
+        .key("wfg-run-panel")
+        .w_full()
+        .gap(6.0)
+        .padding(12.0)
+        .radius(k.radius.md)
+        .border(1.0, c.border_muted)
+        .child(
+            text(format!("{}: this step", shown.label))
+                .font(k.ty.ui_medium)
+                .color(c.text_base),
+        );
+    for line in mine {
+        let head = [line.round_note(), Some(format!("{} ms", line.ms))]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let (body, bad) = match (&line.error, line.running) {
+            (Some(e), _) => (e.clone(), true),
+            (None, true) => ("Still running.".to_owned(), false),
+            (None, false) if line.output.is_empty() => ("Nothing came back.".to_owned(), false),
+            (None, false) => (line.output.clone(), false),
+        };
+        let (cut, more) = crate::runs::clip(&body, 800);
+        out = out
+            .child(text(head).font(k.ty.small).color(c.text_muted))
+            .child(
+                text(if more { format!("{cut}…") } else { cut })
+                    .font(k.ty.mono)
+                    .color(if bad { c.warning.icon } else { c.text_base })
+                    .wrap()
+                    .selectable(true),
+            );
+    }
+    Some(out)
+}
+
+/// The hint on a step: its line, and under it what is wrong or why it failed, which a small
+/// drawing leaves off the box.
+fn tip(item: &Item, look: &Look) -> String {
+    match look.second(item) {
+        (said, true) => format!("{}\n{said}", item.title),
+        _ => item.title.clone(),
+    }
+}
+
+/// What a screen reader says for a step, with what a run did there and what is wrong with it.
+fn accessible(item: &Item, look: &Look) -> String {
     let what = match item.form {
         Form::Frame => "holds other steps",
         _ if item.model => "a model writes or chooses here",
         _ => "runs the same way every time",
     };
-    format!("{}, {what}. {}", item.title, item.detail)
+    let mut said = format!("{}, {what}. {}", item.title, item.detail);
+    if let Some(p) = look.problem {
+        said.push_str(&format!(" Problem: {p}."));
+    }
+    if let Some(r) = look.run {
+        let state = match r.state {
+            State::Done => "done",
+            State::Failed => "failed",
+            State::Running => "running",
+            State::Waiting => "waiting",
+        };
+        said.push_str(&format!(" In the run: {state}"));
+        if r.rounds > 1 {
+            said.push_str(&format!(", {} times", r.rounds));
+        }
+        said.push('.');
+    }
+    said
 }
 
 #[cfg(test)]

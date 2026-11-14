@@ -325,7 +325,7 @@ Each phase ships alone and leaves workflows that ran before running the same.
 
 ## Graph view
 
-Status: designed 2026-11-14. **G1 and G2 built**; G3 not. A second view of the same editor state, for people who think
+Status: designed 2026-11-14. **G1, G2 and G3 built.** A second view of the same editor state, for people who think
 in boxes and wires. The card editor stays: it is the keyboard and screen-reader route, and the place
 every box of a step is typed.
 
@@ -474,4 +474,32 @@ Left out on purpose: a minimap, colour per kind of step, a permanent palette col
   move and remove buttons instead of beside them.
 - Still to do: run state on nodes and problems on nodes (G3); a search box in the Add step list; the
   graph as the default view, which waits for G3 so the first thing shown is the one that shows a run.
+
+### As built in G3
+
+- **A run on the steps.** The log's paths are turned into editor positions by `workflow/trace.rs`
+  (`loc_of`: `then`, `else`, `body`, `caseN`, `default`, `catch` and a `parallel` branch's name; the
+  steps of another workflow run by a `flow` step are not drawn here, only the `flow` step itself).
+  Each step shows the worst of its rounds, as a glyph and a word, never colour alone: a check (with
+  `×3` for three rounds), a circled X and "failed", "running", "waiting". A failed or running step's
+  edge is drawn in the warning or accent colour as well, a frame's mark is in its title bar, and the
+  step's hint says why it failed.
+- **Live.** The engine tells an optional watcher the whole log each time a step begins or ends (a
+  `running` flag on each line, never written to a saved log), so a test run paints as it goes: the
+  run's worker passes it to the screen. A very long run tells it less often, and a branch of a
+  `parallel` step says nothing until it is joined.
+- **Which run.** The test run if there is one, else the workflow's last run when "Show last run" is on
+  (only for the workflow the page has open). A banner above the drawing says which, how many of the
+  steps it reached and how many failed, with Hide run.
+- **Approve and Decline.** A paused last run shows what it asks in the banner, with Approve, Decline
+  and Stop it (Go on now for a delay), rather than on the step's own box, where there is no room; the
+  step itself is marked "waiting". A test run that reaches a wait stops there and says so.
+- **One step's rounds.** Select a step and the form beside the drawing is followed by what the run did
+  there, round by round, with time, output or error.
+- **Problems.** A step with a problem shows `!` at the right of its box and the problem as its second
+  line (and in its hint when the drawing is small enough to drop that line). Problems are matched to
+  steps by the id they name, so a problem that names none (a missing name, an input) stays in the
+  workflow's own form. They are as fresh as the last check: structural edits, Save and Check.
+- **Graph is now the view the editor opens on**, as the plan said once it could show a run; Cards is
+  one press away and keeps working.
 
