@@ -28,6 +28,8 @@ pub enum Route {
     Usage,
     /// MCP servers: other programs that give agents tools.
     Mcp,
+    /// Tool sets built into the app (Gmail), and the Google account they share.
+    Extensions,
     /// Messaging apps (Telegram) through which paired people talk to agents.
     Channels,
     /// The checks made before anything reaches a model or an agent's action runs.
@@ -36,8 +38,6 @@ pub enum Route {
     Settings,
     /// The create, edit and team-member form (`Roster::editing` says which).
     AgentForm,
-    /// A Studio section not built natively yet.
-    Soon(&'static str),
 }
 
 /// How hard the agent thinks before answering (the composer's "Think" button).
@@ -173,6 +173,7 @@ pub struct App {
     pub skills_dir: Option<std::path::PathBuf>,
     /// MCP servers and the page that manages them.
     pub mcp: crate::mcp::Mcp,
+    pub ext: crate::extensions::Extensions,
     /// The chosen appearance and the Omarchy themes it can pick from.
     pub look: crate::theme::Look,
     /// The Settings page's theme list is open.
@@ -356,6 +357,7 @@ impl App {
                 .unwrap_or_default(),
             skills_dir,
             mcp: crate::mcp::Mcp::new(Vec::new()),
+            ext: crate::extensions::Extensions::new(),
             look,
             theme_open: false,
             updates: crate::update::Updates::new(persist::auto_update(store.as_ref())),
@@ -384,6 +386,7 @@ impl App {
         app.settle_interrupted_commands();
         app.load_workflows();
         app.load_mcp();
+        app.load_extensions();
         app.load_schedules();
         app.load_prices();
         app.load_chat_usage();

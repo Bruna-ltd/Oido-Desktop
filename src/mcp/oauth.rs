@@ -80,52 +80,166 @@ fn sign_in_with(
     open: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<Tokens, String> {
     let ep = discover(server_url)?;
+    let (listener, redirect) = bind()?;
+    let registration = ep.registration.as_deref().ok_or(
+        "this server does not let apps register themselves, which is the only way this app signs in. Use a key instead, if the server gives them out.",
+    )?;
+    let (client_id, client_secret) = register(registration, &redirect)?;
+    let granted = authorize(
+        &Consent {
+            authorization: &ep.authorization,
+            token: &ep.token,
+            client_id: &client_id,
+            client_secret: client_secret.as_deref(),
+            resource: Some(server_url),
+            extra: &[],
+        },
+        &listener,
+        &redirect,
+        cancel,
+        &colors,
+        open,
+    )?;
+    tokens_from(&granted, &client_id, client_secret, &ep.token, None)
+}
+
+/// A sign-in to Google with a client the person made there: its endpoints are fixed, and it is
+/// asked for `scopes`. Gives the tokens, and the scopes Google says it granted.
+pub fn sign_in_google(
+    client_id: &str,
+    client_secret: &str,
+    scopes: &[&str],
+    cancel: &AtomicBool,
+    colors: Colors,
+) -> Result<(Tokens, Vec<String>), String> {
+    sign_in_google_with(
+        client_id,
+        client_secret,
+        scopes,
+        cancel,
+        colors,
+        crate::browser::open,
+    )
+}
+
+fn sign_in_google_with(
+    client_id: &str,
+    client_secret: &str,
+    scopes: &[&str],
+    cancel: &AtomicBool,
+    colors: Colors,
+    open: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(Tokens, Vec<String>), String> {
+    let (listener, redirect) = bind()?;
+    let scope = scopes.join(" ");
+    let granted = authorize(
+        &Consent {
+            authorization: GOOGLE_AUTHORIZATION,
+            token: GOOGLE_TOKEN,
+            client_id,
+            client_secret: Some(client_secret),
+            resource: None,
+            // Offline access gives the refresh token; asking again for consent makes Google give
+            // one on a second sign-in too.
+            extra: &[
+                ("scope", &scope),
+                ("access_type", "offline"),
+                ("prompt", "consent"),
+            ],
+        },
+        &listener,
+        &redirect,
+        cancel,
+        &colors,
+        open,
+    )?;
+    let given = granted["scope"]
+        .as_str()
+        .map(|s| s.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default();
+    let tokens = tokens_from(
+        &granted,
+        client_id,
+        Some(client_secret.to_owned()),
+        GOOGLE_TOKEN,
+        None,
+    )?;
+    Ok((tokens, given))
+}
+
+const GOOGLE_AUTHORIZATION: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN: &str = "https://oauth2.googleapis.com/token";
+
+/// Where the browser's answer comes back to: a port of this computer, and the address for it.
+fn bind() -> Result<(TcpListener, String), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("could not listen for the sign-in to come back: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("could not listen for the sign-in to come back: {e}"))?
         .port();
-    let redirect = format!("http://127.0.0.1:{port}/callback");
-    let registration = ep.registration.as_deref().ok_or(
-        "this server does not let apps register themselves, which is the only way this app signs in. Use a key instead, if the server gives them out.",
-    )?;
-    let (client_id, client_secret) = register(registration, &redirect)?;
+    Ok((listener, format!("http://127.0.0.1:{port}/callback")))
+}
+
+/// What a consent page and the token endpoint behind it need to know.
+struct Consent<'a> {
+    authorization: &'a str,
+    token: &'a str,
+    client_id: &'a str,
+    client_secret: Option<&'a str>,
+    /// The protected resource, sent on both steps (MCP's `resource`).
+    resource: Option<&'a str>,
+    /// More for the consent page only.
+    extra: &'a [(&'a str, &'a str)],
+}
+
+/// Authorization with PKCE: the browser goes to the consent page, the code comes back to the
+/// loopback port with the `state` that was sent, and is traded for what the token endpoint grants.
+fn authorize(
+    consent: &Consent,
+    listener: &TcpListener,
+    redirect: &str,
+    cancel: &AtomicBool,
+    colors: &Colors,
+    open: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<Value, String> {
     let verifier = random_token()?;
     let state = random_token()?;
+    let challenge = challenge(&verifier);
+    let mut query = vec![
+        ("response_type", "code"),
+        ("client_id", consent.client_id),
+        ("redirect_uri", redirect),
+        ("code_challenge", challenge.as_str()),
+        ("code_challenge_method", "S256"),
+        ("state", state.as_str()),
+    ];
+    query.extend(consent.resource.map(|r| ("resource", r)));
+    query.extend_from_slice(consent.extra);
     let url = format!(
         "{}{}{}",
-        ep.authorization,
-        if ep.authorization.contains('?') {
+        consent.authorization,
+        if consent.authorization.contains('?') {
             '&'
         } else {
             '?'
         },
-        form(&[
-            ("response_type", "code"),
-            ("client_id", &client_id),
-            ("redirect_uri", &redirect),
-            ("code_challenge", &challenge(&verifier)),
-            ("code_challenge_method", "S256"),
-            ("state", &state),
-            ("resource", server_url),
-        ])
+        form(&query)
     );
     open(&url)?;
-    let code = loopback::wait_for_code(&listener, "/callback", &state, cancel, &colors)?;
+    let code = loopback::wait_for_code(listener, "/callback", &state, cancel, colors)?;
     let mut pairs = vec![
         ("grant_type", "authorization_code"),
         ("code", code.as_str()),
-        ("redirect_uri", redirect.as_str()),
-        ("client_id", client_id.as_str()),
+        ("redirect_uri", redirect),
+        ("client_id", consent.client_id),
         ("code_verifier", verifier.as_str()),
-        ("resource", server_url),
     ];
-    if let Some(secret) = &client_secret {
+    pairs.extend(consent.resource.map(|r| ("resource", r)));
+    if let Some(secret) = consent.client_secret {
         pairs.push(("client_secret", secret));
     }
-    let granted = post_form(&ep.token, &pairs)?;
-    tokens_from(&granted, &client_id, client_secret, &ep.token, None)
+    post_form(consent.token, &pairs)
 }
 
 /// Trades the refresh token for a new access token.

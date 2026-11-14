@@ -15,6 +15,7 @@ use crate::vault::{self, Vault};
 
 mod agents;
 mod channels;
+mod extensions;
 mod mcp;
 mod models;
 mod providers;
@@ -24,6 +25,7 @@ mod settings;
 mod usage;
 mod workflows;
 
+pub use extensions::Setting;
 pub use providers::Verified;
 pub use usage::Counted;
 
@@ -40,6 +42,8 @@ pub enum Error {
     BadCredential(String),
     /// A statement the code asks for is not in `db/queries`.
     MissingQuery(&'static str),
+    /// A built-in extension was handed to the MCP servers' table, which is only for the person's own.
+    NotStored(String),
     /// The file was made by a newer version of the app than this one.
     NewerSchema {
         found: i64,
@@ -65,6 +69,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::MissingQuery(n) => write!(f, "no query named {n} in db/queries"),
+            Self::NotStored(id) => write!(f, "{id} is built in and is not saved with the servers"),
             Self::NewerSchema { found, known } => {
                 write!(
                     f,
@@ -103,7 +108,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 23] = [
+const MIGRATIONS: [&str; 24] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -127,9 +132,10 @@ const MIGRATIONS: [&str; 23] = [
     include_str!("../../db/migrations/021_provider_auth.sql"),
     include_str!("../../db/migrations/022_agent_avatar.sql"),
     include_str!("../../db/migrations/023_workflow_waits.sql"),
+    include_str!("../../db/migrations/024_extensions.sql"),
 ];
 
-const QUERY_FILES: [&str; 10] = [
+const QUERY_FILES: [&str; 11] = [
     include_str!("../../db/queries/settings.sql"),
     include_str!("../../db/queries/providers.sql"),
     include_str!("../../db/queries/agents.sql"),
@@ -140,6 +146,7 @@ const QUERY_FILES: [&str; 10] = [
     include_str!("../../db/queries/schedules.sql"),
     include_str!("../../db/queries/usage.sql"),
     include_str!("../../db/queries/channels.sql"),
+    include_str!("../../db/queries/extensions.sql"),
 ];
 
 pub struct Store {

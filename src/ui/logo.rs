@@ -61,17 +61,31 @@ fn mark(color: &str, path: &str) -> String {
 /// The picture of the preset at `url`, as a tile; `None` for a server that is not one.
 pub fn tile(url: &str, k: &Kit) -> Option<El> {
     let (name, logo) = logo_for(url)?;
+    Some(of(name, logo, k))
+}
+
+/// A tile drawn from `logo`, which is known by `name` (an extension's, say).
+pub fn of(name: &'static str, logo: Logo, k: &Kit) -> El {
     LOGOS.with(|l| {
         let mut l = l.borrow_mut();
         let image = l.image(name, logo);
-        Some(
-            row()
-                .size(SIDE, SIDE)
-                .radius(10.0)
-                .border(1.0, k.c.border_muted)
-                .pixels(image.pixels()),
-        )
+        row()
+            .size(SIDE, SIDE)
+            .radius(10.0)
+            .border(1.0, k.c.border_muted)
+            .pixels(image.pixels())
     })
+}
+
+/// Waits for these logos' pixels, so a headless picture of the page has them.
+#[cfg(debug_assertions)]
+pub fn wait_for(logos: &[(&'static str, Logo)]) {
+    LOGOS.with(|l| {
+        let mut l = l.borrow_mut();
+        for (name, logo) in logos {
+            let _ = l.image(name, *logo).wait();
+        }
+    });
 }
 
 /// Waits for every logo's pixels, so a headless picture of the page has them.

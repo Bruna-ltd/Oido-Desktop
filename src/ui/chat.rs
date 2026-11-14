@@ -1017,6 +1017,7 @@ fn mcp_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
     let target = |x: &Server| {
         match &x.transport {
         Transport::Http { .. } => line(format!("Address: {}", x.target())),
+        Transport::Extension { .. } => line("Built in.".to_owned()),
         Transport::Stdio { .. } => col()
             .gap(4.0)
             .child(line("Runs this program on your computer, with your permissions, whenever an agent uses it:".to_owned()))
@@ -1051,7 +1052,7 @@ fn mcp_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
                     edit = true;
                     let approve = match server.transport {
                         Transport::Stdio { .. } => "Run it and add",
-                        Transport::Http { .. } => "Add",
+                        Transport::Http { .. } | Transport::Extension { .. } => "Add",
                     };
                     (format!("Add MCP server: {}", server.name), approve)
                 }

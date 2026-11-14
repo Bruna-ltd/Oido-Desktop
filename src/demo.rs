@@ -625,6 +625,19 @@ pub static SCENES: &[Scene] = &[
             ));
         }
     }),
+    ("extensions", |s| {
+        s.ext.account = crate::extensions::AccountView {
+            client_id: "1234-abcd.apps.googleusercontent.com".into(),
+            has_client: true,
+            email: Some("me@example.org".into()),
+            scopes: vec![],
+            signed_in: true,
+        };
+        s.ext.client_id = rune::TextEdit::new("1234-abcd.apps.googleusercontent.com");
+        s.ext.open = Some("google_calendar".into());
+        s.route = Route::Extensions;
+        crate::ui::wait_for_extension_logos();
+    }),
     ("mcp-search", |s| {
         s.mcp.search = rune::TextEdit::new("cloud work");
         s.route = Route::Mcp;

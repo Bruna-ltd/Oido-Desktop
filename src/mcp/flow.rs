@@ -207,6 +207,7 @@ impl App {
             Ok(servers) => self.mcp.servers = servers,
             Err(e) => eprintln!("oido: could not read the MCP servers: {e}"),
         }
+        self.rebuild_extension_servers();
     }
 
     /// Every tool that can be given to an agent: the built-in ones and those of MCP servers that
@@ -376,6 +377,7 @@ impl App {
         form.key = TextEdit::new(secrets.key.as_deref().unwrap_or_default());
         match &server.transport {
             Transport::Http { url } => form.url = TextEdit::new(url),
+            Transport::Extension { .. } => {}
             Transport::Stdio { command, args } => {
                 form.kind = Kind::Local;
                 form.command = TextEdit::new(command);
@@ -629,12 +631,18 @@ impl App {
             return refuse(
                 self,
                 format!(
-                    "{} is turned off. The person can turn it on on the MCP page.",
-                    server.name
+                    "{} is turned off. The person can turn it on on the {} page.",
+                    server.name,
+                    if server.is_extension() {
+                        "Extensions"
+                    } else {
+                        "MCP"
+                    }
                 ),
             );
         }
         let (server_id, tool_name) = (server.id.clone(), tool.name.clone());
+        let is_extension = server.is_extension();
         let arguments: Value = if args.trim().is_empty() {
             Value::Object(Default::default())
         } else {
@@ -643,6 +651,14 @@ impl App {
                 Err(_) => return refuse(self, "the arguments were not JSON.".to_owned()),
             }
         };
+        if is_extension {
+            if let Err(why) =
+                self.start_extension_call(sid, call_id, &server_id, &tool_name, arguments)
+            {
+                refuse(self, why);
+            }
+            return;
+        }
         let Some(target) = self.mcp_target(&server_id) else {
             return refuse(
                 self,

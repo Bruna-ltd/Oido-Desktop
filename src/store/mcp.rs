@@ -2,7 +2,7 @@
 
 use rusqlite::OptionalExtension;
 
-use super::{Result, Store};
+use super::{Error, Result, Store};
 use crate::mcp::{Auth, Secrets, Server, Status, Tool, Transport};
 
 impl Store {
@@ -154,6 +154,7 @@ fn columns(t: &Transport) -> Result<(&'static str, &str, &str, String)> {
         Transport::Stdio { command, args } => {
             ("stdio", "", command.as_str(), serde_json::to_string(args)?)
         }
+        Transport::Extension { id } => return Err(Error::NotStored(id.clone())),
     })
 }
 
