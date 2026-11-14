@@ -7,7 +7,8 @@
 //! `Otherwise`, a branch's name). Wires join neighbours only, so nothing can loop back: a loop is a
 //! frame, and a join under a frame is the frame's end.
 
-use super::definition::{DECIDE, GENERATE, describe};
+use super::definition::{DECIDE, GENERATE, plain};
+use super::editor::KINDS;
 use super::editor::{Editor, Loc, Node, Part, Place};
 
 pub const NODE_W: f32 = 240.0;
@@ -253,14 +254,14 @@ impl Layout {
     }
 }
 
-/// The text a step shows: its line, and its id with what it saves its result as.
+/// The text a step shows: what it does in a sentence, and under it what kind of step it is.
 fn words(n: &Node) -> (String, String) {
     let step = n.to_step("", &mut Vec::new());
-    let detail = match step.bind.as_deref().filter(|b| !b.is_empty()) {
-        Some(b) => format!("{} → {b}", step.id),
-        None => step.id.clone(),
-    };
-    (describe(&step), detail)
+    let kind = KINDS
+        .iter()
+        .find(|k| k.kind == n.kind)
+        .map_or("", |k| k.label);
+    (plain(&step), kind.to_owned())
 }
 
 fn is_model(n: &Node) -> bool {
@@ -716,7 +717,7 @@ mod tests {
             (l.width, l.items[0].kind.as_str()),
             (NODE_W + 2.0 * MARGIN, "tool")
         );
-        assert_eq!(l.items[0].detail, "a");
+        assert_eq!(l.items[0].detail, "Use a tool");
         assert!(l.height > boxes[2].bottom());
     }
 
@@ -797,7 +798,7 @@ mod tests {
         ])));
         let marks: Vec<_> = l.items.iter().map(|i| i.model).collect();
         assert_eq!(marks, [false, true, true, true, false]);
-        assert_eq!(l.items[2].detail, "d → r");
+        assert_eq!(l.items[2].detail, "Let the AI choose");
     }
 
     #[test]

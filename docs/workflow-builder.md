@@ -538,5 +538,10 @@ editor now hides that behind plain words, and the expert forms are one press awa
   as an expression, with no way to turn it into parts. `trimmed()` now accepts any value and only
   trims text, because the builder puts it on every left side (a command's output ends in a new line).
 
-Not done yet: nodes in the graph still read as code (``shell: `ls …` ``), the other tools' arguments
-and `switch`/`for each` boxes are still typed expressions, and a new workflow still starts blank.
+- **The graph says what a step does in a sentence** (`plain()` in `workflow/definition.rs`): "Run ls
+  ‹folder›", "If files output contains "pdf"", "Repeat for each name", "Ask me first: Send the
+  summary?". `{{inputs.x}}` reads as ‹x›, `.stdout` as "output". The second line of a box is the kind of
+  step, not its id. `describe()` keeps its older, more literal wording for run logs and the chat.
+
+Not done yet: the other tools' arguments and the `switch` / `for each` boxes are still typed
+expressions, and a new workflow still starts blank.

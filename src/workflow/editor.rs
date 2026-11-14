@@ -11,7 +11,7 @@ use super::Saved;
 use super::cond::{self, Op};
 use super::definition::{
     Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input,
-    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, WAIT, WHILE, describe, each_step, validate,
+    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, WAIT, WHILE, each_step, plain, validate,
 };
 
 /// How a text box is checked and what can be put into it.
@@ -1294,7 +1294,7 @@ impl Editor {
                     if node.kind == WAIT {
                         continue;
                     }
-                    let what = describe(&node.to_step("", &mut Vec::new()));
+                    let what = plain(&node.to_step("", &mut Vec::new()));
                     let shell = node.kind == TOOL && node.tool == crate::tools::SHELL;
                     let parts: &[(&str, &'static str)] = if shell {
                         &[("Output of", ".stdout"), ("Exit code of", ".exit_code")]
@@ -1930,12 +1930,13 @@ mod tests {
         let found = e.results(&here, None);
         let labels: Vec<&str> = found.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(labels[0], "Input: folder");
-        assert!(labels.contains(&"Output of: shell: `ls`"));
+        assert!(labels.contains(&"Output of: Run ls"));
+        assert!(labels.contains(&"Exit code of: Run ls (2)"), "{labels:?}");
         assert!(
-            labels.contains(&"Exit code of: shell: `ls` (2)"),
-            "{labels:?}"
+            labels
+                .iter()
+                .any(|l| l.starts_with("Result of: Ask the AI"))
         );
-        assert!(labels.iter().any(|l| l.starts_with("Result of: Write")));
         assert!(
             !labels.iter().any(|l| l.contains("Wait")),
             "a wait gives nothing"
@@ -1947,7 +1948,7 @@ mod tests {
         // The first has no name for its result: using it gives it one, and the same again is the same.
         let first = found
             .iter()
-            .find(|f| f.label == "Output of: shell: `ls`")
+            .find(|f| f.label == "Output of: Run ls")
             .unwrap();
         assert_eq!(e.named(&first.source), None);
         assert_eq!(e.resolve(&first.source).as_deref(), Some("command.stdout"));
@@ -1955,9 +1956,7 @@ mod tests {
         assert_eq!(e.resolve(&first.source).as_deref(), Some("command.stdout"));
         assert_eq!(e.named(&first.source).as_deref(), Some("command.stdout"));
         // The second keeps the name it has. A name already taken is not given again.
-        let named = found
-            .iter()
-            .find(|f| f.label == "Output of: shell: `ls` (2)");
+        let named = found.iter().find(|f| f.label == "Output of: Run ls (2)");
         assert_eq!(
             e.resolve(&named.unwrap().source).as_deref(),
             Some("files.stdout")
@@ -1965,7 +1964,7 @@ mod tests {
         let last = e.results(&at(&[], 4), None);
         let third = last
             .iter()
-            .find(|f| f.label.starts_with("Result of: Write"))
+            .find(|f| f.label.starts_with("Result of: Ask the AI"))
             .unwrap();
         assert_eq!(e.resolve(&third.source).as_deref(), Some("text"));
         // What a box could name is unchanged by any of this.

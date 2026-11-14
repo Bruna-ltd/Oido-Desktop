@@ -926,6 +926,133 @@ pub fn describe(s: &Step) -> String {
     }
 }
 
+/// What a `{{name}}` in a step's text stands for, as a person would say it: `‹folder›`, not
+/// `{{inputs.folder}}`.
+fn readable(t: &str) -> String {
+    let mut out = String::new();
+    let mut rest = t;
+    while let Some((before, after)) = rest.split_once("{{") {
+        out.push_str(before);
+        match after.split_once("}}") {
+            Some((name, tail)) => {
+                out.push('‹');
+                out.push_str(&words_for(name.trim().trim_start_matches('=').trim()));
+                out.push('›');
+                rest = tail;
+            }
+            None => {
+                out.push_str("{{");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A name of a result as words: `inputs.folder` is `folder`, `files.stdout` is `files output`.
+fn words_for(name: &str) -> String {
+    let name = name.strip_prefix("inputs.").unwrap_or(name);
+    if let Some(n) = name.strip_suffix(".stdout") {
+        format!("{n} output")
+    } else if let Some(n) = name.strip_suffix(".exit_code") {
+        format!("{n} exit code")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// A condition as it is said: "files output contains "pdf"".
+fn say_cond(src: &str) -> String {
+    match super::cond::parse(src) {
+        Some((left, op, right)) => {
+            let left = words_for(&left);
+            if op.takes_value() {
+                let value = if right.parse::<f64>().is_ok() || right == "true" || right == "false" {
+                    right
+                } else {
+                    format!("\"{}\"", short(&right))
+                };
+                format!("{left} {} {value}", op.label())
+            } else {
+                format!("{left} {}", op.label())
+            }
+        }
+        None => short(src),
+    }
+}
+
+/// A step as a short sentence, for the boxes of the graph and the lists of results: what it does,
+/// in words, with none of the plumbing.
+pub fn plain(s: &Step) -> String {
+    let text = |o: &Option<String>| readable(&short(o.as_deref().unwrap_or_default()));
+    match s.kind.as_str() {
+        TOOL => {
+            let tool = s.tool.as_deref().unwrap_or("?");
+            let arg = |k: &str| {
+                s.args
+                    .as_ref()
+                    .and_then(|a| a.get(k))
+                    .map(|v| readable(&short(&template::as_text(v))))
+            };
+            let with = |verb: &str, what: Option<String>| match what {
+                Some(w) => format!("{verb} {w}"),
+                None => verb.to_owned(),
+            };
+            match tool {
+                "shell" => with("Run", arg("command")),
+                crate::web::NAME => with("Fetch", arg("url")),
+                crate::files::READ => with("Read", arg("path")),
+                crate::files::WRITE => with("Write the file", arg("path")),
+                crate::files::EDIT => with("Edit the file", arg("path")),
+                crate::tools::DELEGATE => match (arg("agent"), arg("task")) {
+                    (Some(who), Some(task)) => format!("Hand to {who}: {task}"),
+                    (Some(who), None) => format!("Hand a task to {who}"),
+                    _ => "Hand a task to a teammate".to_owned(),
+                },
+                other => format!("Use {}", other.rsplit("__").next().unwrap_or(other)),
+            }
+        }
+        GENERATE => format!("Ask the AI: {}", text(&s.instruction)),
+        DECIDE => format!("Ask the AI to choose: {}", text(&s.question)),
+        IF => format!("If {}", say_cond(s.cond.as_deref().unwrap_or_default())),
+        SWITCH => format!("Choose by {}", words_for(s.on.as_deref().unwrap_or("?"))),
+        FOR_EACH => format!("Repeat for each {}", s.item_name()),
+        WHILE => format!(
+            "Repeat while {}",
+            say_cond(s.cond.as_deref().unwrap_or_default())
+        ),
+        TRY => match (s.retries.unwrap_or(0), s.catch.is_empty()) {
+            (0, true) => "Try".to_owned(),
+            (0, false) => "Try, and handle a failure".to_owned(),
+            (n, true) => format!("Retry up to {n} times if it fails"),
+            (n, false) => format!("Retry up to {n} times, then handle a failure"),
+        },
+        FLOW => format!("Run the workflow {}", text(&s.workflow)),
+        CODE => "Run a script".to_owned(),
+        PARALLEL => format!(
+            "At once: {}",
+            s.branches
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        WAIT => match s.seconds {
+            Some(n) => format!("Wait {}", super::pause::span(n)),
+            None => format!("Ask me first: {}", text(&s.approve)),
+        },
+        SET => format!(
+            "Remember {}",
+            s.values
+                .as_ref()
+                .map(|v| v.keys().cloned().collect::<Vec<_>>().join(", "))
+                .unwrap_or_default()
+        ),
+        other => other.to_owned(),
+    }
+}
+
 /// One line of a workflow laid out as it nests: how deep, where it is (the path a run's step
 /// log uses, or a branch's), and what to say.
 #[derive(Clone, PartialEq, Debug)]
@@ -1279,5 +1406,30 @@ mod tests {
         ] {
             assert!(why.contains(expected), "missing {expected:?} in {why}");
         }
+    }
+
+    #[test]
+    fn a_step_is_said_as_a_sentence_with_its_values_in_words() {
+        let d: Definition = serde_json::from_value(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls {{inputs.folder}}"}},
+            {"id": "b", "kind": "tool", "tool": "web_fetch", "args": {"url": "https://x.test"}},
+            {"id": "c", "kind": "if", "cond": "files.stdout.trimmed().contains(\"pdf\")",
+             "then": [{"id": "t", "kind": "tool", "tool": "shell", "args": {"command": "x"}}]},
+            {"id": "d", "kind": "if", "cond": "a > 1 && b", "then": [{"id": "u", "kind": "tool", "tool": "shell", "args": {"command": "x"}}]},
+            {"id": "e", "kind": "generate", "instruction": "Say {{files.stdout}} please"},
+            {"id": "f", "kind": "for_each", "over": "[1]", "as": "name", "steps": [{"id": "g", "kind": "tool", "tool": "shell", "args": {"command": "x"}}]},
+            {"id": "h", "kind": "wait", "approve": "Send it?"}
+        ]})).unwrap();
+        let said: Vec<String> = d.steps.iter().map(plain).collect();
+        assert_eq!(said[0], "Run ls ‹folder›");
+        assert_eq!(said[1], "Fetch https://x.test");
+        assert_eq!(said[2], "If files output contains \"pdf\"");
+        assert_eq!(
+            said[3], "If a > 1 && b",
+            "what is not of that shape is as written"
+        );
+        assert_eq!(said[4], "Ask the AI: Say ‹files output› please");
+        assert_eq!(said[5], "Repeat for each name");
+        assert_eq!(said[6], "Ask me first: Send it?");
     }
 }
