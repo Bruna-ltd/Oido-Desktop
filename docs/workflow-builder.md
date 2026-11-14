@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); P2 and P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try` built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -216,13 +216,21 @@ is the one non-deterministic tool step and is marked as such.
   every keystroke. Tool arguments are one JSON box. A chat draft is saved first, then edited.
 - A step run more than five rounds keeps 200 characters of output instead of 4000.
 
+## As built in P2
+
+- `try`: `steps` is what is tried, `retries` (0 to 10) runs them again after a failure, `backoff_ms`
+  (up to 60 000) waits between attempts and ends at once on Stop, `catch` runs when the last attempt
+  fails and sees `error` (the failure's text). The `try`'s own `bind` is the body's last value, or
+  the catch's. A stop is never caught. What the body or catch binds stays inside, as in other
+  containers. Without a `catch`, the run ends at the step that failed, as without a `try`.
+
 ## Phases
 
 **P1 — branching, loops, editor (built).** Rhai module and limits; `if`, `switch`, `set`, `for_each`,
 `while`; `{{= expr}}`; nested validation; nested step log and run view; the editor (create, edit,
 validate, delete, open a taught draft). No new tools.
 
-**P2 — recovery and reach.** `try` with retry and catch; `http`; MCP tools in `tool` steps;
+**P2 — recovery and reach (`try` built).** `try` with retry and catch; `http`; MCP tools in `tool` steps;
 `flow`; `delegate`.
 
 **P3 — concurrency and humans.** `parallel`; `code`; `wait` with approval and persisted runs

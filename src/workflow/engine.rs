@@ -6,14 +6,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::definition::{
     CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FOR_EACH, GENERATE, IF, MAX_ROUNDS, SET, SWITCH,
-    Step, TOOL, WHILE, branch, case_branch, child, describe,
+    Step, TOOL, TRY, WHILE, branch, case_branch, child, describe,
 };
 use super::expr::Evaluator;
 use super::template::{self, Scope};
@@ -283,6 +283,18 @@ impl Run<'_, '_> {
         }
     }
 
+    /// Waits `time`, looking up often enough that Stop is not kept waiting.
+    fn pause(&self, time: Duration) {
+        let until = Instant::now() + time;
+        while !self.stopped() {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(50)));
+        }
+    }
+
     /// The steps of a block in order, each seeing what the ones before bound. The value of the last.
     fn block(&mut self, steps: &[Step], at: &str, scope: &mut Scope) -> Result<Value, Halt> {
         let mut last = Value::Null;
@@ -305,7 +317,7 @@ impl Run<'_, '_> {
     fn step(&mut self, step: &Step, at: &str, scope: &mut Scope) -> Result<Value, Halt> {
         // A container's result is what its steps made; only a step that makes a value of its own
         // is the run's latest output.
-        let container = matches!(step.kind.as_str(), IF | SWITCH | FOR_EACH | WHILE);
+        let container = matches!(step.kind.as_str(), IF | SWITCH | FOR_EACH | WHILE | TRY);
         let slot = self.out.steps.len();
         self.out.steps.push(StepLog {
             id: step.id.clone(),
@@ -482,6 +494,40 @@ impl Run<'_, '_> {
                 }
                 said(self, format!("{round} rounds"));
                 Ok(Value::Array(results))
+            }
+            TRY => {
+                let retries = step.retries.unwrap_or(0);
+                let pause = Duration::from_millis(u64::from(step.backoff_ms.unwrap_or(0)));
+                let body = branch(at, "body");
+                let mut attempt = 0;
+                let failure = loop {
+                    attempt += 1;
+                    match self.inside(&step.steps, &body, scope) {
+                        Ok(v) => {
+                            said(
+                                self,
+                                if attempt == 1 {
+                                    "worked".to_owned()
+                                } else {
+                                    format!("worked on attempt {attempt}")
+                                },
+                            );
+                            return Ok(v);
+                        }
+                        Err(Halt::Failed { .. }) if attempt <= retries => self.pause(pause),
+                        Err(halt) => break halt,
+                    }
+                };
+                let Halt::Failed { error, .. } = &failure else {
+                    return Err(failure);
+                };
+                if step.catch.is_empty() {
+                    return Err(failure);
+                }
+                said(self, format!("failed after {attempt} attempts, handled"));
+                let mut inner = scope.clone();
+                inner.insert("error".to_owned(), Value::String(error.clone()));
+                self.block(&step.catch, &branch(at, "catch"), &mut inner)
             }
             SET => {
                 let mut made = Map::new();
@@ -1076,5 +1122,99 @@ mod tests {
             at("0.body.0.body.0", vec![2, 3]).round_note().as_deref(),
             Some("round 2.3")
         );
+    }
+
+    /// A shell that fails its first `fails` calls, then answers with its command.
+    fn flaky(d: &Definition, fails: usize) -> (Outcome, usize) {
+        let calls = std::cell::Cell::new(0usize);
+        let (out, _) = run_with(
+            d,
+            json!({}),
+            |_, a| {
+                calls.set(calls.get() + 1);
+                if calls.get() <= fails {
+                    ToolOutcome {
+                        value: Value::Null,
+                        error: Some("busy".to_owned()),
+                    }
+                } else {
+                    ok(json!({"exit_code": 0, "stdout": a["command"]}))
+                }
+            },
+            |_| "text".into(),
+        );
+        (out, calls.get())
+    }
+
+    #[test]
+    fn a_try_runs_its_steps_again_until_they_work_or_the_tries_run_out() {
+        let d = def(json!({"steps": [
+            {"id": "t", "kind": "try", "retries": 2, "bind": "got", "steps": [sh("a", "go")]},
+            sh("after", "saw {{got.stdout}}")
+        ]}));
+        let (out, calls) = flaky(&d, 2);
+        assert_eq!(out.ending, Ending::Succeeded);
+        assert_eq!(calls, 4, "two failures, the success, then the step after");
+        assert_eq!(out.steps[0].output, "worked on attempt 3");
+        assert!(out.output.contains("saw go"), "{}", out.output);
+        // One more failure than it has retries ends the run at the step that failed.
+        let (out, calls) = flaky(&d, 3);
+        assert_eq!(calls, 3);
+        assert!(
+            matches!(&out.ending, Ending::Failed { step, error } if step == "a" && error == "busy")
+        );
+    }
+
+    #[test]
+    fn a_catch_takes_over_when_the_tries_are_used_up_and_sees_the_error() {
+        let d = def(json!({"steps": [
+            {"id": "t", "kind": "try", "bind": "r", "steps": [sh("a", "go")],
+             "catch": [{"id": "c", "kind": "set", "bind": "why", "values": {"msg": "\"failed: \" + error"}}]},
+            sh("after", "ok {{r.msg}}")
+        ]}));
+        let (out, _) = flaky(&d, 1);
+        assert_eq!(out.ending, Ending::Succeeded);
+        assert!(out.output.contains("ok failed: busy"), "{}", out.output);
+        assert_eq!(out.steps[0].output, "failed after 1 attempts, handled");
+        let paths: Vec<_> = out.steps.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, ["0", "0.body.0", "0.catch.0", "1"]);
+        // A stop is not a failure to catch.
+        let cancel = Arc::new(AtomicBool::new(true));
+        let tool = |_: &str, _: &Value| ok(json!({}));
+        let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+        };
+        assert_eq!(execute(&d, &json!({}), &env).ending, Ending::Stopped);
+    }
+
+    #[test]
+    fn what_a_try_binds_inside_stays_inside_and_error_is_only_in_the_catch() {
+        let bad = |v: Value| {
+            let d: Definition = serde_json::from_value(v).unwrap();
+            super::super::definition::validate(&d)
+                .unwrap_err()
+                .join("; ")
+        };
+        let why = bad(json!({"steps": [
+            {"id": "t", "kind": "try", "steps": [{"id": "a", "kind": "set", "bind": "x", "values": {"k": "1"}}]},
+            sh("after", "{{x.k}}")
+        ]}));
+        assert!(why.contains("x"), "{why}");
+        let why = bad(json!({"steps": [
+            {"id": "t", "kind": "try", "steps": [sh("a", "{{error}}")]}
+        ]}));
+        assert!(why.contains("error"), "{why}");
+        let why = bad(json!({"steps": [
+            {"id": "t", "kind": "try", "retries": 11, "backoff_ms": 70000, "steps": [sh("a", "x")]}
+        ]}));
+        assert!(
+            why.contains("retries") && why.contains("milliseconds"),
+            "{why}"
+        );
+        let why = bad(json!({"steps": [{"id": "t", "kind": "try", "steps": []}]}));
+        assert!(why.contains("at least one step"), "{why}");
     }
 }

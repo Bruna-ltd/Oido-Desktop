@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::Saved;
 use super::definition::{
     CONTINUE, Case, DECIDE, Definition, FOR_EACH, GENERATE, IF, Input, SET, STEP_TOOLS, SWITCH,
-    Step, TOOL, WHILE, each_step, validate,
+    Step, TOOL, TRY, WHILE, each_step, validate,
 };
 
 /// How a text box is checked and what can be put into it.
@@ -106,6 +106,17 @@ static SET_BOXES: [Spec; 1] = [spec(
     Refs::Bare,
 )];
 
+static TRY_BOXES: [Spec; 2] = [
+    spec("retries", "Try again this many times", "0", 1, Refs::None),
+    spec(
+        "backoff_ms",
+        "Wait between tries (milliseconds)",
+        "0",
+        1,
+        Refs::None,
+    ),
+];
+
 /// The text boxes each kind of step has, in order.
 pub fn specs(kind: &str) -> &'static [Spec] {
     match kind {
@@ -117,12 +128,13 @@ pub fn specs(kind: &str) -> &'static [Spec] {
         FOR_EACH => &FOR_EACH_BOXES,
         WHILE => &WHILE_BOXES,
         SET => &SET_BOXES,
+        TRY => &TRY_BOXES,
         _ => &[],
     }
 }
 
 /// The kinds of step a person can add, in the order the menu lists them.
-pub const KINDS: [(&str, &str); 8] = [
+pub const KINDS: [(&str, &str); 9] = [
     (TOOL, "Run a tool"),
     (GENERATE, "Write with the model"),
     (DECIDE, "Let the model choose"),
@@ -131,6 +143,7 @@ pub const KINDS: [(&str, &str); 8] = [
     (FOR_EACH, "For each"),
     (WHILE, "Repeat while"),
     (SET, "Set values"),
+    (TRY, "Try, and recover"),
 ];
 
 /// What a list of steps inside a step is for.
@@ -141,6 +154,10 @@ pub enum Part {
     Case,
     Default,
     Body,
+    /// What a `try` tries.
+    Try,
+    /// What a `try` does when that still fails.
+    Catch,
 }
 
 /// A list of steps inside a step, and for a `switch` case the value it is for.
@@ -207,6 +224,7 @@ impl Node {
             IF => vec![Block::new(Part::Then), Block::new(Part::Else)],
             SWITCH => vec![Block::new(Part::Case), Block::new(Part::Default)],
             FOR_EACH | WHILE => vec![Block::new(Part::Body)],
+            TRY => vec![Block::new(Part::Try), Block::new(Part::Catch)],
             _ => Vec::new(),
         };
         Node {
@@ -300,6 +318,18 @@ impl Node {
                 n.set_field("max", s.max.map(|m| m.to_string()).unwrap_or_default());
                 n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
             }
+            TRY => {
+                n.set_field(
+                    "retries",
+                    s.retries.map(|r| r.to_string()).unwrap_or_default(),
+                );
+                n.set_field(
+                    "backoff_ms",
+                    s.backoff_ms.map(|r| r.to_string()).unwrap_or_default(),
+                );
+                n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
+                n.blocks[1].steps = s.catch.iter().map(Node::from_step).collect();
+            }
             SET => {
                 let lines: Vec<String> = s
                     .values
@@ -380,6 +410,19 @@ impl Node {
                     }
                 }
                 s.steps = steps(&self.blocks[0], bad, at);
+            }
+            TRY => {
+                let whole = |key: &str, what: &str, bad: &mut Vec<String>| {
+                    let text = get(key)?;
+                    text.trim()
+                        .parse::<u32>()
+                        .map_err(|_| bad.push(format!("step {at}: {what} is a whole number")))
+                        .ok()
+                };
+                s.retries = whole("retries", "how many times to try again", bad);
+                s.backoff_ms = whole("backoff_ms", "the wait between tries", bad);
+                s.steps = steps(&self.blocks[0], bad, at);
+                s.catch = steps(&self.blocks[1], bad, at);
             }
             SET => {
                 let mut values = BTreeMap::new();
@@ -710,6 +753,7 @@ impl Editor {
                     names.push("index".to_owned());
                 }
                 WHILE => names.push("index".to_owned()),
+                TRY if block == 1 => names.push("error".to_owned()),
                 _ => {}
             }
             let Some(b) = node.blocks.get(block) else {
@@ -786,7 +830,10 @@ mod tests {
                            {"when": "\"docs\"", "steps": [{"id": "b", "kind": "generate", "instruction": "b"}]}],
                  "default": [{"id": "d", "kind": "generate", "instruction": "d"}]},
                 {"id": "wait", "kind": "while", "cond": "poll.exit_code != 0", "max": 5,
-                 "steps": [{"id": "tick", "kind": "tool", "tool": "shell", "args": {"command": "check"}, "bind": "poll"}]}
+                 "steps": [{"id": "tick", "kind": "tool", "tool": "shell", "args": {"command": "check"}, "bind": "poll"}]},
+                {"id": "safe", "kind": "try", "retries": 2, "backoff_ms": 500, "bind": "pushed",
+                 "steps": [{"id": "push", "kind": "tool", "tool": "shell", "args": {"command": "git push"}}],
+                 "catch": [{"id": "note", "kind": "generate", "instruction": "Push failed: {{error}}"}]}
             ],
             "success": "All done."
         })
@@ -805,7 +852,7 @@ mod tests {
                     .definition()
                     .unwrap()
             ),
-            13
+            16
         );
     }
 
@@ -813,7 +860,7 @@ mod tests {
     fn a_problem_in_a_box_or_in_the_whole_is_said_in_words() {
         let mut e = Editor::from_saved(&saved(every_kind()));
         e.steps[0].fields[0] = TextEdit::new("{not json");
-        let wait = e.steps.len() - 1;
+        let wait = 5;
         e.steps[wait].fields[1] = TextEdit::new("lots");
         e.steps[4].blocks[0].steps[0].fields[0] = TextEdit::new("no equals sign");
         e.inputs[2].default = TextEdit::new("two");
@@ -943,5 +990,14 @@ mod tests {
             "{cond:?}"
         );
         assert!(!e.names(&at(&[], 5), None).contains(&"poll".to_owned()));
+        // Only what runs after a try fails can see its error.
+        assert!(
+            !e.names(&at(&[(6, 0)], 0), None)
+                .contains(&"error".to_owned())
+        );
+        assert!(
+            e.names(&at(&[(6, 1)], 0), None)
+                .contains(&"error".to_owned())
+        );
     }
 }

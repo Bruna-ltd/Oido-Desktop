@@ -593,6 +593,10 @@ fn inside(
         Part::Else => text("Otherwise").font(k.ty.small).color(c.text_muted),
         Part::Default => text("Otherwise").font(k.ty.small).color(c.text_muted),
         Part::Body => text("Each round").font(k.ty.small).color(c.text_muted),
+        Part::Try => text("Try").font(k.ty.small).color(c.text_muted),
+        Part::Catch => text("If it still fails")
+            .font(k.ty.small)
+            .color(c.text_muted),
         Part::Case => text("When").font(k.ty.small).color(c.text_muted),
     };
     let mut head = row().w_full().center_y().gap(8.0).child(heading);

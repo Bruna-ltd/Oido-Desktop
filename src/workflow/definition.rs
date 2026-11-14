@@ -19,8 +19,11 @@ pub const SWITCH: &str = "switch";
 pub const FOR_EACH: &str = "for_each";
 pub const WHILE: &str = "while";
 pub const SET: &str = "set";
+pub const TRY: &str = "try";
 
-const KINDS: [&str; 8] = [TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET];
+const KINDS: [&str; 9] = [
+    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY,
+];
 
 /// The tools a workflow step may call. A flow runs on its own, so it cannot stop to ask you.
 pub const STEP_TOOLS: [&str; 5] = [
@@ -39,6 +42,10 @@ const MAX_OPTIONS: usize = 20;
 /// A loop's most rounds when it names no limit, and the most it may name.
 pub const DEFAULT_ROUNDS: u32 = 100;
 pub const MAX_ROUNDS: u32 = 1000;
+/// Most times a `try` may run its steps again after they fail.
+pub const MAX_RETRIES: u32 = 10;
+/// Longest a `try` may wait between attempts, in milliseconds.
+pub const MAX_BACKOFF_MS: u32 = 60_000;
 
 /// Names a step may not bind: they mean something inside a body.
 const RESERVED: [&str; 4] = ["inputs", "item", "index", "error"];
@@ -130,6 +137,13 @@ pub struct Step {
     pub otherwise: Vec<Step>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    // try: steps is what is tried; catch runs when it still fails, and sees `error`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub catch: Vec<Step>,
 }
 
 impl Step {
@@ -143,7 +157,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 18] = [
+        let fields: [(&str, bool); 21] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -162,6 +176,9 @@ impl Step {
             ("then", !self.then.is_empty()),
             ("else", !self.otherwise.is_empty()),
             ("steps", !self.steps.is_empty()),
+            ("retries", self.retries.is_some()),
+            ("backoff_ms", self.backoff_ms.is_some()),
+            ("catch", !self.catch.is_empty()),
         ];
         fields
             .into_iter()
@@ -181,6 +198,7 @@ fn takes(kind: &str) -> &'static [&'static str] {
         FOR_EACH => &["over", "as", "on_error", "steps"],
         WHILE => &["cond", "max", "steps"],
         SET => &["values"],
+        TRY => &["retries", "backoff_ms", "steps", "catch"],
         _ => &[],
     }
 }
@@ -236,6 +254,7 @@ pub fn each_step<'a>(steps: &'a [Step], f: &mut impl FnMut(&'a Step)) {
         }
         each_step(&s.default, f);
         each_step(&s.steps, f);
+        each_step(&s.catch, f);
     }
 }
 
@@ -361,7 +380,7 @@ impl Check<'_> {
                 }
             }
         }
-        let container = matches!(s.kind.as_str(), IF | SWITCH | FOR_EACH | WHILE);
+        let container = matches!(s.kind.as_str(), IF | SWITCH | FOR_EACH | WHILE | TRY);
         if container && depth >= MAX_DEPTH {
             self.bad.push(format!(
                 "{at}: steps are inside each other more than {MAX_DEPTH} deep"
@@ -477,6 +496,26 @@ impl Check<'_> {
                 if s.max.is_some_and(|m| m == 0 || m > MAX_ROUNDS) {
                     self.bad
                         .push(format!("{at}: max is 1 to {MAX_ROUNDS} rounds"));
+                }
+            }
+            TRY => {
+                if s.retries.is_some_and(|r| r > MAX_RETRIES) {
+                    self.bad
+                        .push(format!("{at}: retries is 0 to {MAX_RETRIES}"));
+                }
+                if s.backoff_ms.is_some_and(|b| b > MAX_BACKOFF_MS) {
+                    self.bad.push(format!(
+                        "{at}: the wait between attempts is at most {MAX_BACKOFF_MS} milliseconds"
+                    ));
+                }
+                self.body(&at, &s.steps, label, vis, &[], below);
+                if !s.catch.is_empty() {
+                    self.block(
+                        &s.catch,
+                        label,
+                        [vis.as_slice(), &["error".to_owned()]].concat(),
+                        below,
+                    );
                 }
             }
             SET => {
@@ -621,6 +660,12 @@ pub fn describe(s: &Step) -> String {
             text(&s.cond),
             s.max.unwrap_or(DEFAULT_ROUNDS)
         ),
+        TRY => match (s.retries.unwrap_or(0), s.catch.is_empty()) {
+            (0, true) => "Try".to_owned(),
+            (0, false) => "Try, and handle a failure".to_owned(),
+            (n, true) => format!("Try, again up to {n} times"),
+            (n, false) => format!("Try, again up to {n} times, then handle a failure"),
+        },
         SET => format!(
             "Set {}",
             s.values
@@ -680,6 +725,12 @@ pub fn outline(steps: &[Step]) -> Vec<Row> {
                     }
                 }
                 FOR_EACH | WHILE => walk(&s.steps, &branch(&path, "body"), depth + 1, out),
+                TRY => {
+                    part("body", "try".to_owned(), &s.steps);
+                    if !s.catch.is_empty() {
+                        part("catch", "on failure".to_owned(), &s.catch);
+                    }
+                }
                 _ => {}
             }
         }
