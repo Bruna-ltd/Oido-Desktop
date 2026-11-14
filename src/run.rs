@@ -2225,6 +2225,54 @@ mod tests {
     }
 
     #[test]
+    fn a_rewritten_message_replaces_the_old_one_and_what_followed_and_survives_a_restart() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (200, "text/event-stream", STREAM),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        let base = app.current().unwrap().chat().messages.len();
+        app.composer.edit = TextEdit::new("first");
+        app.send();
+        let _ = seen.recv().unwrap();
+        app.composer.edit = TextEdit::new("second");
+        app.send();
+        let _ = seen.recv().unwrap();
+        assert_eq!(app.current().unwrap().chat().messages.len(), base + 4);
+
+        // A draft is set aside while the first message is rewritten, and back when it is dropped.
+        app.composer.edit = TextEdit::new("half a thought");
+        app.edit_message(base);
+        assert_eq!(app.composer.edit.text, "first");
+        assert_eq!(app.composer.editing(), Some(base));
+        app.cancel_edit();
+        assert_eq!(app.composer.edit.text, "half a thought");
+        assert_eq!(
+            app.current().unwrap().chat().messages.len(),
+            base + 4,
+            "nothing lost"
+        );
+
+        app.composer.edit = TextEdit::new("");
+        app.edit_message(base);
+        app.composer.edit = TextEdit::new("first, reworded");
+        app.composer.attachments.clear();
+        app.send();
+        let messages = &app.current().unwrap().chat().messages;
+        assert_eq!(messages.len(), base + 2, "the old turns after it are gone");
+        assert!(matches!(&messages[base], Message::User(p) if p.text == "first, reworded"));
+        assert_eq!(app.composer.editing(), None);
+        drop(app);
+        let app = db.open();
+        let saved = &app.current().unwrap().chat().messages;
+        assert!(matches!(&saved[base], Message::User(p) if p.text == "first, reworded"));
+        assert_eq!(saved.len(), base + 2, "the removed turns stay removed");
+    }
+
+    #[test]
     fn a_provider_with_no_saved_sign_in_says_so_without_asking() {
         let mut app = crate::testing::samples();
         crate::testing::ready(&mut app);

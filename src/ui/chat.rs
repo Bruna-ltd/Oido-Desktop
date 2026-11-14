@@ -19,6 +19,8 @@ const COLUMN: f32 = 760.0;
 const SCROLLED_UP: f32 = 200.0;
 /// A message's height before it has been seen, in points: about a short reply.
 const ROW_ESTIMATE: f32 = 140.0;
+/// How long a copied message's icon shows its check.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(agent) = s.current() else {
@@ -197,7 +199,7 @@ fn no_agents(k: &Kit) -> El {
 
 fn message(s: &App, m: &Message, i: usize, last: bool, k: &Kit) -> El {
     match m {
-        Message::User(p) => user(p, i, k),
+        Message::User(p) => user(s, p, i, k),
         Message::Divider(label) => divider(label, i, k),
         Message::Summary { text, .. } => summary(s, text, i, k),
         Message::Assistant {
@@ -228,7 +230,7 @@ fn message(s: &App, m: &Message, i: usize, last: bool, k: &Kit) -> El {
     }
 }
 
-fn user(p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
+fn user(s: &App, p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
     let mut bubble = col()
         .max_w(560.0)
         .px(14.0)
@@ -284,11 +286,61 @@ fn user(p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
                 .selectable(true),
         );
     }
-    row()
+    col()
         .key(format!("m{i}"))
         .w_full()
-        .justify_end()
+        .items_end()
+        .gap(2.0)
+        .hover_group()
         .child(bubble)
+        .child(user_actions(s, p, i, k))
+}
+
+/// A button that copies `body` of message `i`, its icon a check for a moment after. Shown while
+/// the pointer is over the message it sits in.
+fn copy_button(s: &App, body: &str, i: usize, k: &Kit) -> El {
+    let copied = s.copied.as_ref().is_some_and(|(sid, at, when)| {
+        *at == i && s.current().is_some_and(|a| a.chat().id == *sid) && when.elapsed() < COPIED_FOR
+    });
+    let body = body.to_owned();
+    IconButton::new(if copied {
+        &glyphs::CHECK
+    } else {
+        &glyphs::COPY
+    })
+    .variant(IconButtonVariant::GhostMuted)
+    .label("Copy message")
+    .help("Copy message")
+    .on_press_tx(move |s: &mut App, tx| {
+        tx.copy(body.clone());
+        let sid = s.current().map(|a| a.chat().id.clone()).unwrap_or_default();
+        s.copied = Some((sid, i, std::time::Instant::now()));
+        tx.wake_after(COPIED_FOR);
+    })
+    .build(k)
+    .key(format!("copy-{i}"))
+    .group_opacity(0.0, 1.0)
+}
+
+/// Copy and Edit under your message, shown while the pointer is over it.
+fn user_actions(s: &App, p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
+    let copy = copy_button(s, &p.text, i, k);
+    let edit = IconButton::new(&super::icons::PENCIL)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Edit message")
+        .help("Edit message and send it again from here")
+        .on_press(move |s: &mut App| s.edit_message(i))
+        .build(k)
+        .key(format!("edit-{i}"))
+        .group_opacity(0.0, 1.0);
+    let mut out = row().gap(2.0);
+    if !p.text.is_empty() {
+        out = out.child(copy);
+    }
+    if !s.awaiting_answer() {
+        out = out.child(edit);
+    }
+    out
 }
 
 /// An assistant message as the transcript shows it.
@@ -329,7 +381,7 @@ fn reply_style(k: &Kit) -> MarkdownStyle {
 
 /// Reply text as Markdown: math written out in Unicode, diagrams and charts drawn, links opened in
 /// the browser, pictures from the agent's folder, and web pictures once you let them load (see
-/// [`super::picture::markdown`]).
+/// [`super::picture::markdown`]). Selectable, so any of it can be copied.
 fn markdown(s: &App, body: &str, style: MarkdownStyle, k: &Kit) -> Markdown {
     let folder = s
         .current()
@@ -338,6 +390,7 @@ fn markdown(s: &App, body: &str, style: MarkdownStyle, k: &Kit) -> Markdown {
     let kit = k.clone();
     Markdown::new(super::math::unicode(body))
         .style(style)
+        .selectable(true)
         .on_link(|_: &mut App, url| crate::browser::open_link(url))
         .images(move |src| super::picture::markdown(src, &folder))
         .image_frame(move |shown, f| {
@@ -613,10 +666,14 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
                 .key(format!("run{i}")),
         );
     }
-    if r.stats.is_some() || (r.run.is_some() && *r.outcome != Outcome::Working) {
+    let finished = *r.outcome != Outcome::Working;
+    if !r.body.is_empty() && finished {
+        foot = foot.child(copy_button(s, r.body, i, k));
+    }
+    if r.stats.is_some() || (finished && (r.run.is_some() || !r.body.is_empty())) {
         out = out.child(foot);
     }
-    out
+    out.hover_group()
 }
 
 /// How a reply ended when it did not finish, with a way to ask again.

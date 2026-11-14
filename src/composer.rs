@@ -45,6 +45,8 @@ pub struct Composer {
     dismissed: Option<String>,
     /// Walking back through your messages, when you are.
     recall: Option<Recall>,
+    /// An earlier message of yours being rewritten, when one is.
+    editing: Option<Editing>,
     /// Why the last file could not be attached, or the message could not be sent.
     pub notice: Option<String>,
 }
@@ -54,6 +56,21 @@ pub struct Composer {
 struct Recall {
     back: usize,
     draft: TextEdit,
+}
+
+/// An earlier message of yours being rewritten: which one (its place in the chat), and the draft
+/// the box held before, which comes back when the rewrite is sent or dropped.
+#[derive(Debug)]
+struct Editing {
+    at: usize,
+    draft: Draft,
+}
+
+/// What the box held: its words and what was attached.
+#[derive(Debug)]
+struct Draft {
+    edit: TextEdit,
+    attachments: Vec<Attachment>,
 }
 
 impl Default for Composer {
@@ -70,8 +87,22 @@ impl Composer {
             active: (String::new(), 0),
             dismissed: None,
             recall: None,
+            editing: None,
             notice: None,
         }
+    }
+
+    /// The place in the chat of the message being rewritten, if one is.
+    pub fn editing(&self) -> Option<usize> {
+        self.editing.as_ref().map(|e| e.at)
+    }
+
+    /// The box as it was before a message was loaded into it.
+    fn restore(&mut self, draft: Draft) {
+        self.edit = draft.edit;
+        self.edit.focused = true;
+        self.attachments = draft.attachments;
+        self.notice = None;
     }
 
     /// An empty box with the caret in it.
@@ -542,6 +573,10 @@ impl App {
                 let history: Vec<&str> = history.iter().map(String::as_str).collect();
                 self.composer.recall_newer(&history)
             }
+            Key::Escape if self.composer.editing.is_some() => {
+                self.cancel_edit();
+                true
+            }
             Key::Escape if self.busy() => {
                 self.stop();
                 true
@@ -737,7 +772,15 @@ impl App {
         let Some(sid) = self.current().map(|a| a.chat().id.clone()) else {
             return;
         };
+        let editing = self.composer.editing.take();
         self.composer = Composer::focused();
+        // A rewritten message replaces the old one and all that followed it, now, busy or not.
+        if let Some(e) = editing {
+            self.composer.restore(e.draft);
+            self.rewind(&sid, e.at);
+            self.post(&sid, prompt);
+            return;
+        }
         if self.busy() {
             match self.queued.get_mut(&sid) {
                 Some(waiting) => waiting.append(prompt),
@@ -780,6 +823,59 @@ impl App {
         self.composer.show(&back.text);
         for a in waiting.attachments {
             prompt::add(&mut self.composer.attachments, a);
+        }
+    }
+
+    /// Loads your message number `at` of the open chat into the box to rewrite. Sending it puts it
+    /// in the old one's place and drops the replies after it; Esc or `cancel_edit` leaves all as
+    /// it was. The draft the box held is set aside meanwhile.
+    pub fn edit_message(&mut self, at: usize) {
+        let Some(Message::User(prompt)) = self
+            .current()
+            .and_then(|a| a.chat().messages.get(at))
+            .cloned()
+        else {
+            return;
+        };
+        self.unqueue();
+        let c = &mut self.composer;
+        if let Some(r) = c.recall.take() {
+            c.edit = r.draft;
+        }
+        let draft = match c.editing.take() {
+            Some(e) => e.draft,
+            None => Draft {
+                edit: std::mem::replace(&mut c.edit, TextEdit::new("")),
+                attachments: std::mem::take(&mut c.attachments),
+            },
+        };
+        c.show(&prompt.text);
+        c.attachments = prompt.attachments;
+        c.notice = None;
+        c.editing = Some(Editing { at, draft });
+    }
+
+    /// Leaves a rewrite unsent: the chat is untouched and the box has its old draft back.
+    pub fn cancel_edit(&mut self) {
+        if let Some(e) = self.composer.editing.take() {
+            self.composer.restore(e.draft);
+        }
+    }
+
+    /// Ends chat `sid`'s reply and removes its messages from number `at` on, saved too, when that
+    /// is a message of yours.
+    fn rewind(&mut self, sid: &str, at: usize) {
+        self.cancel_session(sid);
+        let Some(chat) = self
+            .roster
+            .owner_of_mut(sid)
+            .and_then(|a| a.sessions.iter_mut().find(|s| s.id == sid))
+        else {
+            return;
+        };
+        if matches!(chat.messages.get(at), Some(Message::User(_))) {
+            chat.messages.truncate(at);
+            self.save("the chat", |db| db.delete_messages_from(sid, at));
         }
     }
 
