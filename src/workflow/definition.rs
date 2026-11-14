@@ -20,9 +20,10 @@ pub const FOR_EACH: &str = "for_each";
 pub const WHILE: &str = "while";
 pub const SET: &str = "set";
 pub const TRY: &str = "try";
+pub const FLOW: &str = "flow";
 
-const KINDS: [&str; 9] = [
-    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY,
+const KINDS: [&str; 10] = [
+    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY, FLOW,
 ];
 
 /// The tools a workflow step may call. A flow runs on its own, so it cannot stop to ask you.
@@ -46,6 +47,8 @@ pub const MAX_ROUNDS: u32 = 1000;
 pub const MAX_RETRIES: u32 = 10;
 /// Longest a `try` may wait between attempts, in milliseconds.
 pub const MAX_BACKOFF_MS: u32 = 60_000;
+/// How deep workflows may call each other.
+pub const MAX_FLOW_DEPTH: usize = 5;
 
 /// Names a step may not bind: they mean something inside a body.
 const RESERVED: [&str; 4] = ["inputs", "item", "index", "error"];
@@ -144,6 +147,11 @@ pub struct Step {
     pub backoff_ms: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub catch: Vec<Step>,
+    // flow: another workflow of the same agent, by name, and what to give it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Map<String, Value>>,
 }
 
 impl Step {
@@ -157,7 +165,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 21] = [
+        let fields: [(&str, bool); 23] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -179,6 +187,8 @@ impl Step {
             ("retries", self.retries.is_some()),
             ("backoff_ms", self.backoff_ms.is_some()),
             ("catch", !self.catch.is_empty()),
+            ("workflow", self.workflow.is_some()),
+            ("inputs", self.inputs.is_some()),
         ];
         fields
             .into_iter()
@@ -199,6 +209,7 @@ fn takes(kind: &str) -> &'static [&'static str] {
         WHILE => &["cond", "max", "steps"],
         SET => &["values"],
         TRY => &["retries", "backoff_ms", "steps", "catch"],
+        FLOW => &["workflow", "inputs"],
         _ => &[],
     }
 }
@@ -520,6 +531,22 @@ impl Check<'_> {
                     );
                 }
             }
+            FLOW => {
+                match s.workflow.as_deref().map(str::trim) {
+                    None | Some("") => self
+                        .bad
+                        .push(format!("{at}: a flow step needs the name of a workflow")),
+                    Some(_) => {}
+                }
+                if let Some(given) = &s.inputs {
+                    template::refs_in(&Value::Object(given.clone()), &mut refs);
+                }
+                if s.bind.as_deref().is_none_or(str::is_empty) {
+                    self.bad.push(format!(
+                        "{at}: a flow step needs a bind: what the workflow gives is only useful when something reads it"
+                    ));
+                }
+            }
             SET => {
                 let names = Self::names(vis, &[]);
                 match &s.values {
@@ -628,8 +655,8 @@ fn words(src: &str, out: &mut BTreeSet<String>) {
 /// expression. Steps inside it are not looked into.
 pub fn reads(s: &Step) -> BTreeSet<String> {
     let mut refs = Vec::new();
-    if let Some(a) = &s.args {
-        template::refs_in(&Value::Object(a.clone()), &mut refs);
+    for given in [&s.args, &s.inputs].into_iter().flatten() {
+        template::refs_in(&Value::Object(given.clone()), &mut refs);
     }
     for t in [&s.instruction, &s.input].into_iter().flatten() {
         refs.extend(template::find_refs(t));
@@ -652,6 +679,24 @@ pub fn reads(s: &Step) -> BTreeSet<String> {
         words(e, &mut out);
     }
     out
+}
+
+/// The workflows a definition runs, by the name each step gives, without repeats.
+pub fn flows_used(def: &Definition) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    each_step(&def.steps, &mut |s| {
+        if s.kind == FLOW
+            && let Some(w) = s
+                .workflow
+                .as_deref()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+            && !seen.iter().any(|x| x.eq_ignore_ascii_case(w))
+        {
+            seen.push(w.to_owned());
+        }
+    });
+    seen
 }
 
 /// The tools a definition calls, without repeats.
@@ -714,6 +759,7 @@ pub fn describe(s: &Step) -> String {
             (n, true) => format!("Try, again up to {n} times"),
             (n, false) => format!("Try, again up to {n} times, then handle a failure"),
         },
+        FLOW => format!("Run the workflow {}", text(&s.workflow)),
         SET => format!(
             "Set {}",
             s.values
@@ -984,5 +1030,27 @@ mod tests {
         let d: Definition = serde_json::from_str(text).unwrap();
         assert_eq!(validate(&d), Ok(()));
         assert_eq!(serde_json::to_string(&d).unwrap(), text);
+    }
+
+    #[test]
+    fn a_flow_step_needs_a_workflow_and_a_bind_and_its_inputs_may_only_look_back() {
+        let ok = def(json!({"steps": [
+            {"id": "a", "kind": "set", "bind": "x", "values": {"v": "1"}},
+            {"id": "f", "kind": "flow", "workflow": "Other", "bind": "r", "inputs": {"n": "{{x.v}}"}}
+        ]}));
+        assert_eq!(validate(&ok), Ok(()));
+        assert_eq!(flows_used(&ok), ["Other"]);
+        assert_eq!(describe(&ok.steps[1]), "Run the workflow Other");
+        let why = problems(json!({"steps": [
+            {"id": "f", "kind": "flow", "inputs": {"n": "{{later}}"}},
+            {"id": "b", "kind": "set", "bind": "later", "values": {"v": "1"}}
+        ]}));
+        for expected in ["needs the name of a workflow", "needs a bind", "later"] {
+            assert!(why.contains(expected), "missing {expected:?} in {why}");
+        }
+        let why = problems(json!({"steps": [
+            {"id": "f", "kind": "flow", "workflow": "W", "bind": "r", "cond": "true"}
+        ]}));
+        assert!(why.contains("a flow step has no cond"), "{why}");
     }
 }

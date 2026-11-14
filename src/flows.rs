@@ -82,6 +82,8 @@ pub(crate) struct Prep {
     pub trust_folder: bool,
     /// The MCP tools the workflow calls, each with how to reach its server.
     pub mcp: Vec<McpTool>,
+    /// The workflows its `flow` steps run, those they run too, and so on.
+    pub flows: Vec<Saved>,
 }
 
 /// An MCP tool a workflow step calls.
@@ -232,6 +234,12 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> R
             tool: &tool,
             model: &model,
             cancel: stop,
+            flow: &|name: &str| {
+                p.flows
+                    .iter()
+                    .find(|w| w.name.eq_ignore_ascii_case(name))
+                    .map(|w| (w.id.clone(), w.definition.clone()))
+            },
         },
     );
     (outcome, renewed.into_inner().unwrap_or_default())
@@ -290,18 +298,32 @@ impl App {
             asker: crate::guard::ask::Asker::nobody(),
             trust_folder: agent.trust_workdir,
             mcp: Vec::new(),
+            flows: Vec::new(),
         })
     }
 
     /// Everything a run of `def` by `agent_id` needs, or why it cannot run. A step uses only
     /// built-in tools, which every agent has, so a workflow does not widen what an agent may do.
-    fn prepare_flow(&self, agent_id: &str, def: &Definition) -> Result<Prep, String> {
+    fn prepare_flow(
+        &self,
+        agent_id: &str,
+        own: Option<&str>,
+        def: &Definition,
+    ) -> Result<Prep, String> {
         let agent = self
             .roster
             .agent_ref(agent_id)
             .ok_or("That agent is gone.")?;
         let mut prep = self.prepare_model(agent_id)?;
-        let used = crate::workflow::definition::tools_used(def);
+        prep.flows = self.flow_closure(agent_id, own, def)?;
+        let mut used = crate::workflow::definition::tools_used(def);
+        for w in &prep.flows {
+            for t in crate::workflow::definition::tools_used(&w.definition) {
+                if !used.contains(&t) {
+                    used.push(t);
+                }
+            }
+        }
         for name in used.iter().filter(|t| crate::mcp::is_tool(t)) {
             let (server, tool) = crate::mcp::resolve(&self.mcp.servers, name).ok_or_else(|| {
                 format!("This workflow uses {name}, and no MCP server offers it now.")
@@ -326,6 +348,52 @@ impl App {
             ));
         }
         Ok(prep)
+    }
+
+    /// The workflows of `agent_id` that `def` runs, and those they run, each once. Errs, in
+    /// words, for one that is not there, or that would end up running itself, or that is nested
+    /// too deep. `own` is the workflow `def` belongs to, if it is saved.
+    pub(crate) fn flow_closure(
+        &self,
+        agent_id: &str,
+        own: Option<&str>,
+        def: &Definition,
+    ) -> Result<Vec<Saved>, String> {
+        fn visit(
+            app: &App,
+            agent_id: &str,
+            def: &Definition,
+            chain: &mut Vec<String>,
+            out: &mut Vec<Saved>,
+        ) -> Result<(), String> {
+            for name in crate::workflow::definition::flows_used(def) {
+                let wf = app
+                    .workflows
+                    .iter()
+                    .find(|w| w.agent_id == agent_id && w.name.eq_ignore_ascii_case(&name))
+                    .ok_or_else(|| format!("There is no workflow called {name:?} to run."))?;
+                if chain.contains(&wf.id) {
+                    return Err(format!("The workflow {name:?} would run itself."));
+                }
+                if chain.len() >= crate::workflow::definition::MAX_FLOW_DEPTH {
+                    return Err(format!(
+                        "Workflows may run inside each other {} deep at most.",
+                        crate::workflow::definition::MAX_FLOW_DEPTH
+                    ));
+                }
+                if !out.iter().any(|w| w.id == wf.id) {
+                    out.push(wf.clone());
+                }
+                chain.push(wf.id.clone());
+                visit(app, agent_id, &wf.definition, chain, out)?;
+                chain.pop();
+            }
+            Ok(())
+        }
+        let mut out = Vec::new();
+        let mut chain: Vec<String> = own.map(str::to_owned).into_iter().collect();
+        visit(self, agent_id, def, &mut chain, &mut out)?;
+        Ok(out)
     }
 
     // ---- learning
@@ -546,7 +614,7 @@ impl App {
         };
         let prep = Prep {
             asker: self.asker(at, &wf.name),
-            ..self.prepare_flow(agent_id, &wf.definition)?
+            ..self.prepare_flow(agent_id, Some(&wf.id), &wf.definition)?
         };
         let record = RunRecord {
             id: new_id(),
@@ -859,6 +927,18 @@ mod tests {
         }
     }
 
+    /// `w` under another name, saved.
+    fn rename(app: &mut App, w: Saved, name: &str) -> Saved {
+        let w = Saved {
+            name: name.into(),
+            ..w
+        };
+        app.save("w", |db| db.update_workflow(&w));
+        app.workflows.retain(|x| x.id != w.id);
+        app.workflows.push(w.clone());
+        w
+    }
+
     fn save_workflow(app: &mut App, steps: Vec<Step>, inputs: Value) -> Saved {
         let w = Saved {
             id: new_id(),
@@ -1051,12 +1131,95 @@ mod tests {
 
         // Turned off, or no longer offered, it is said before anything runs.
         app.mcp_toggle(&server.id);
-        let why = app.prepare_flow(&w.agent_id, &w.definition).err().unwrap();
+        let why = app
+            .prepare_flow(&w.agent_id, Some(&w.id), &w.definition)
+            .err()
+            .unwrap();
         assert!(why.contains("turned off"), "{why}");
         app.mcp_remove(&server.id);
-        let why = app.prepare_flow(&w.agent_id, &w.definition).err().unwrap();
+        let why = app
+            .prepare_flow(&w.agent_id, Some(&w.id), &w.definition)
+            .err()
+            .unwrap();
         assert!(why.contains("no MCP server offers"), "{why}");
         let _ = std::fs::remove_file(script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workflow_runs_another_of_the_same_agent_and_one_that_would_run_itself_is_refused() {
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(&db, vec![]);
+        app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        let inner = save_workflow(
+            &mut app,
+            vec![tool_step("say", "echo inner-{{inputs.n}}", "o")],
+            json!({"n": {"type": "string"}}),
+        );
+        let inner = rename(&mut app, inner, "Inner");
+        let outer_call = Step {
+            id: "call".into(),
+            kind: "flow".into(),
+            workflow: Some("inner".into()),
+            inputs: json!({"n": "7"}).as_object().cloned(),
+            bind: Some("r".into()),
+            ..Step::default()
+        };
+        let outer = save_workflow(&mut app, vec![outer_call], json!({}));
+        let outer = rename(&mut app, outer, "Outer");
+        app.go(Route::Workflows);
+        app.select_workflow(&outer.id);
+        app.run_open_workflow();
+        let run = &app.wf_runs[0];
+        assert_eq!(run.status, RunStatus::Succeeded, "{}", run.error);
+        assert!(run.output.contains("inner-7"), "{}", run.output);
+        assert_eq!(run.steps.len(), 2);
+        assert_eq!(run.steps[1].path, "0.flow.0");
+
+        // Inner now runs Outer: neither may be saved or run that way.
+        let calls_outer = Step {
+            id: "back".into(),
+            kind: "flow".into(),
+            workflow: Some("outer".into()),
+            bind: Some("b".into()),
+            ..Step::default()
+        };
+        app.workflows
+            .iter_mut()
+            .find(|w| w.id == inner.id)
+            .unwrap()
+            .definition
+            .steps
+            .push(calls_outer);
+        let why = app
+            .prepare_flow(&outer.agent_id, Some(&outer.id), &outer.definition)
+            .err()
+            .unwrap();
+        assert!(why.contains("would run itself"), "{why}");
+        let why = app
+            .flow_closure(&outer.agent_id, None, &outer.definition)
+            .err()
+            .unwrap();
+        assert!(
+            why.contains("would run itself") || why.contains("deep"),
+            "{why}"
+        );
+        // One that does not exist is said too.
+        let lost = Definition {
+            steps: vec![Step {
+                id: "x".into(),
+                kind: "flow".into(),
+                workflow: Some("Nothing".into()),
+                bind: Some("n".into()),
+                ..Step::default()
+            }],
+            ..Definition::default()
+        };
+        let why = app
+            .flow_closure(&outer.agent_id, None, &lost)
+            .err()
+            .unwrap();
+        assert!(why.contains("no workflow called \"Nothing\""), "{why}");
     }
 
     #[cfg(unix)]

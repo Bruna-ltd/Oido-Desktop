@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::definition::{
-    CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FOR_EACH, GENERATE, IF, MAX_ROUNDS, SET, SWITCH,
-    Step, TOOL, TRY, WHILE, branch, case_branch, child, describe, reads,
+    CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FLOW, FOR_EACH, GENERATE, IF, MAX_FLOW_DEPTH,
+    MAX_ROUNDS, SET, SWITCH, Step, TOOL, TRY, WHILE, branch, case_branch, child, describe, reads,
 };
 use super::expr::Evaluator;
 use super::template::{self, Scope};
@@ -73,6 +73,8 @@ pub struct Env<'a> {
     /// One model call: a system prompt and one message, answered in text.
     pub model: &'a dyn Fn(&str, &str) -> Answer,
     pub cancel: &'a Arc<AtomicBool>,
+    /// The workflow called this, of the agent running, as its id and steps.
+    pub flow: &'a dyn Fn(&str) -> Option<(String, Definition)>,
 }
 
 /// One step as it ran.
@@ -268,6 +270,8 @@ struct Run<'a, 'e> {
     touched: Option<&'static str>,
     /// Why the branch now running was chosen by outside text, if it was.
     steered: Option<&'static str>,
+    /// The ids of the workflows being run inside one another, outermost first.
+    flows: Vec<String>,
 }
 
 /// Whether two values are the same, a whole number and the same number written with a point
@@ -330,7 +334,10 @@ impl Run<'_, '_> {
     fn step(&mut self, step: &Step, at: &str, scope: &mut Scope) -> Result<Value, Halt> {
         // A container's result is what its steps made; only a step that makes a value of its own
         // is the run's latest output.
-        let container = matches!(step.kind.as_str(), IF | SWITCH | FOR_EACH | WHILE | TRY);
+        let container = matches!(
+            step.kind.as_str(),
+            IF | SWITCH | FOR_EACH | WHILE | TRY | FLOW
+        );
         let slot = self.out.steps.len();
         self.out.steps.push(StepLog {
             id: step.id.clone(),
@@ -573,6 +580,54 @@ impl Run<'_, '_> {
                 inner.insert("error".to_owned(), Value::String(error.clone()));
                 self.block(&step.catch, &branch(at, "catch"), &mut inner)
             }
+            FLOW => {
+                let name = step.workflow.as_deref().unwrap_or_default().trim();
+                let Some((id, sub)) = (self.env.flow)(name) else {
+                    return Err(wrong(
+                        self,
+                        format!("There is no workflow called {name:?}."),
+                    ));
+                };
+                if self.flows.contains(&id) {
+                    return Err(wrong(
+                        self,
+                        format!("The workflow {name:?} would run itself."),
+                    ));
+                }
+                if self.flows.len() >= MAX_FLOW_DEPTH {
+                    return Err(wrong(
+                        self,
+                        format!(
+                            "Workflows may run inside each other {MAX_FLOW_DEPTH} deep at most."
+                        ),
+                    ));
+                }
+                let given = template::resolve(
+                    scope,
+                    &Value::Object(step.inputs.clone().unwrap_or_default()),
+                    &self.eval,
+                )
+                .map_err(|e| wrong(self, e))?;
+                let given = given.as_object().cloned().unwrap_or_default();
+                let inputs = bind_inputs(&sub, &given).map_err(|e| wrong(self, e))?;
+                said(self, format!("ran {name}"));
+                // The workflow sees only what it is given, and is held for outside text only if
+                // what it was given is.
+                let outside = reads(step)
+                    .iter()
+                    .find_map(|n| self.tainted.get(n).copied());
+                let mine = std::mem::take(&mut self.tainted);
+                if let Some(why) = outside {
+                    self.tainted.insert("inputs".to_owned(), why);
+                }
+                self.flows.push(id);
+                let mut inner = Scope::new();
+                inner.insert("inputs".to_owned(), inputs);
+                let done = self.block(&sub.steps, &branch(at, "flow"), &mut inner);
+                self.flows.pop();
+                self.tainted = mine;
+                done
+            }
             SET => {
                 let mut made = Map::new();
                 for (name, src) in step.values.iter().flatten() {
@@ -664,6 +719,7 @@ pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
         tainted: BTreeMap::new(),
         touched: None,
         steered: None,
+        flows: Vec::new(),
     };
     run.out.ending = match run.block(&def.steps, "", &mut scope) {
         Ok(_) => Ending::Succeeded,
@@ -731,6 +787,7 @@ mod tests {
             tool: &tool_fn,
             model: &model_fn,
             cancel: &cancel,
+            flow: &|_: &str| None,
         };
         let out = execute(d, &inputs, &env);
         (out, fakes)
@@ -863,6 +920,7 @@ mod tests {
             tool: &tool,
             model: &model,
             cancel: &cancel,
+            flow: &|_: &str| None,
         };
         let out = execute(&d, &json!({}), &env);
         assert_eq!(out.ending, Ending::Stopped);
@@ -1104,6 +1162,7 @@ mod tests {
             tool: &tool,
             model: &model,
             cancel: &cancel,
+            flow: &|_: &str| None,
         };
         let out = execute(&d, &json!({}), &env);
         assert_eq!(out.ending, Ending::Stopped);
@@ -1248,6 +1307,7 @@ mod tests {
             tool: &tool,
             model: &model,
             cancel: &cancel,
+            flow: &|_: &str| None,
         };
         assert_eq!(execute(&d, &json!({}), &env).ending, Ending::Stopped);
     }
@@ -1301,6 +1361,7 @@ mod tests {
             tool: &tool,
             model: &model,
             cancel: &cancel,
+            flow: &|_: &str| None,
         };
         assert_eq!(execute(d, &json!({}), &env).ending, Ending::Succeeded);
         seen.into_inner()
@@ -1383,11 +1444,173 @@ mod tests {
             tool: &tool,
             model: &model,
             cancel: &cancel,
+            flow: &|_: &str| None,
         };
         assert_eq!(execute(&d, &json!({}), &env).ending, Ending::Succeeded);
         assert_eq!(
             seen.into_inner()[1],
             ("shell".to_owned(), Some("a web page".to_owned()))
         );
+    }
+
+    /// Runs `d` with `others` as the workflows it may call, by name; shell calls are recorded with
+    /// why they were held, and `web_fetch` gives outside text.
+    fn with_flows(
+        d: &Definition,
+        others: &[(&str, Value)],
+    ) -> (Outcome, Vec<(String, Option<String>)>) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = RefCell::new(Vec::new());
+        let tool = |name: &str, args: &Value, outside: Option<&str>| {
+            let said = args["command"].as_str().unwrap_or(name).to_owned();
+            seen.borrow_mut().push((said, outside.map(str::to_owned)));
+            ToolOutcome {
+                value: json!({"stdout": "page text"}),
+                outside: (name == "web_fetch").then_some("a web page"),
+                ..ToolOutcome::default()
+            }
+        };
+        let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+        let others: Vec<(String, Definition)> = others
+            .iter()
+            .map(|(n, v)| ((*n).to_owned(), serde_json::from_value(v.clone()).unwrap()))
+            .collect();
+        let flow = |name: &str| {
+            others
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(n, d)| (n.to_lowercase(), d.clone()))
+        };
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+            flow: &flow,
+        };
+        let inputs = bind_inputs(d, &Map::new()).unwrap();
+        let out = execute(d, &inputs, &env);
+        (out, seen.into_inner())
+    }
+
+    fn call(id: &str, workflow: &str, inputs: Value, bind: &str) -> Value {
+        json!({"id": id, "kind": "flow", "workflow": workflow, "inputs": inputs, "bind": bind})
+    }
+
+    #[test]
+    fn a_flow_step_runs_another_workflow_with_what_it_is_given_and_gets_its_last_value_back() {
+        let shout = json!({
+            "inputs": {"word": {"type": "string"}},
+            "steps": [
+                sh("say", "echo {{inputs.word}}"),
+                {"id": "wrap", "kind": "set", "bind": "r", "values": {"loud": "inputs.word + \"!\""}}
+            ]
+        });
+        let d = def(json!({
+            "inputs": {"word": {"type": "string", "default": "mine"}},
+            "steps": [
+                call("go", "Shout", json!({"word": "{{inputs.word}} hello"}), "got"),
+                sh("after", "echo {{got.loud}} {{inputs.word}}")
+            ]
+        }));
+        let (out, seen) = with_flows(&d, &[("shout", shout)]);
+        assert_eq!(out.ending, Ending::Succeeded, "{:?}", out.ending);
+        let said: Vec<_> = seen.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(said, ["echo mine hello", "echo mine hello! mine"]);
+        let paths: Vec<_> = out.steps.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, ["0", "0.flow.0", "0.flow.1", "1"]);
+        assert_eq!(out.steps[0].output, "ran Shout");
+        // Missing and wrongly given inputs fail that step with the reason.
+        let (out, _) = with_flows(&d, &[]);
+        assert!(
+            matches!(&out.ending, Ending::Failed { error, .. } if error.contains("no workflow called"))
+        );
+        let bad = def(json!({"steps": [call("go", "Shout", json!({}), "got")]}));
+        let (out, _) = with_flows(
+            &bad,
+            &[(
+                "shout",
+                json!({
+                    "inputs": {"word": {"type": "string"}}, "steps": [sh("a", "x")]
+                }),
+            )],
+        );
+        assert!(
+            matches!(&out.ending, Ending::Failed { error, .. } if error.contains("word")),
+            "{:?}",
+            out.ending
+        );
+    }
+
+    #[test]
+    fn workflows_may_not_run_themselves_or_nest_without_end() {
+        let d = def(json!({"steps": [call("go", "loop", json!({}), "x")]}));
+        let looping = json!({"steps": [call("again", "loop", json!({}), "y")]});
+        let (out, _) = with_flows(&d, &[("loop", looping)]);
+        assert!(
+            matches!(&out.ending, Ending::Failed { error, .. } if error.contains("run itself")),
+            "{:?}",
+            out.ending
+        );
+        // A chain that is too deep, with no repeat.
+        let names: Vec<String> = (0..8).map(|n| format!("w{n}")).collect();
+        let others: Vec<(&str, Value)> = names
+            .iter()
+            .enumerate()
+            .map(|(n, name)| {
+                let next = names
+                    .get(n + 1)
+                    .cloned()
+                    .unwrap_or_else(|| "w0x".to_owned());
+                let step = if n + 1 < names.len() {
+                    call("c", &next, json!({}), "r")
+                } else {
+                    sh("end", "echo end")
+                };
+                (name.as_str(), json!({"steps": [step]}))
+            })
+            .collect();
+        let d = def(json!({"steps": [call("go", "w0", json!({}), "x")]}));
+        let (out, _) = with_flows(&d, &others);
+        assert!(
+            matches!(&out.ending, Ending::Failed { error, .. } if error.contains("deep")),
+            "{:?}",
+            out.ending
+        );
+    }
+
+    #[test]
+    fn a_workflow_is_held_for_outside_text_only_if_what_it_was_given_is() {
+        let inner = json!({"inputs": {"v": {"type": "string"}},
+            "steps": [sh("use", "echo {{inputs.v}}"), sh("own", "echo own")]});
+        let d = def(json!({"steps": [
+            sh("clean", "echo clean"),
+            call("plain", "inner", json!({"v": "fine"}), "a"),
+            web_step(),
+            call("fed", "inner", json!({"v": "{{page.stdout}}"}), "b"),
+            sh("after", "echo after"),
+            sh("from-it", "echo {{b.stdout}}")
+        ]}));
+        let (_, seen) = with_flows(&d, &[("inner", inner)]);
+        let held: Vec<(&str, bool)> = seen
+            .iter()
+            .map(|(c, h)| (c.as_str(), h.is_some()))
+            .collect();
+        assert_eq!(
+            held,
+            [
+                ("echo clean", false),
+                ("echo fine", false),
+                ("echo own", false),
+                ("web_fetch", false),
+                ("echo page text", true),
+                ("echo own", false),
+                ("echo after", false),
+                ("echo page text", true),
+            ]
+        );
+    }
+
+    fn web_step() -> Value {
+        json!({"id": "get", "kind": "tool", "tool": "web_fetch", "args": {"url": "x"}, "bind": "page"})
     }
 }

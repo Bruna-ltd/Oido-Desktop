@@ -70,6 +70,12 @@ impl App {
             return;
         };
         let is_new = existing.is_none();
+        if let Err(why) = self.flow_closure(&saved.agent_id, Some(&id), &saved.definition) {
+            if let Some(ed) = &mut self.wf_editor {
+                ed.problems = vec![why];
+            }
+            return;
+        }
         self.save("the workflow", |db| {
             if is_new {
                 db.insert_workflow(&saved)

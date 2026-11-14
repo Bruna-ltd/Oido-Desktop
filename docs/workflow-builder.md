@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try`, MCP tools and taint tracking built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try`, MCP tools, taint tracking and `flow` built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -237,6 +237,15 @@ is the one non-deterministic tool step and is marked as such.
   schedule). So a flow that fetches a page and then writes a file from it now asks first, where
   before it did not. Over-holding is possible (a name used in two places stays held, and words
   inside quotes in an expression count); under-holding is not known.
+- `flow`: `workflow` is the name (any case) of another workflow of the same agent, `inputs` an
+  object of values (text in them may use `{{...}}`), `bind` is required and holds the other
+  workflow's last value. It runs inside the same run: same step count (10 000), same Stop, its steps
+  shown nested under the card (`2.flow.0`). It sees only what it is given as `inputs`. A workflow
+  may not run itself, even through others, and may be nested 5 deep. Saving refuses a missing or
+  circular one, and a run checks before it starts (including the tools and MCP servers the other
+  workflows use). Renaming or deleting a workflow another one runs is found when that one next
+  runs or is saved, not at the moment. Outside text: the other workflow is held only if what it
+  was given is outside text; what it fetches itself comes back as outside text as usual.
 
 ## Phases
 

@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use super::Saved;
 use super::definition::{
-    CONTINUE, Case, DECIDE, Definition, FOR_EACH, GENERATE, IF, Input, SET, STEP_TOOLS, SWITCH,
-    Step, TOOL, TRY, WHILE, each_step, validate,
+    CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input, SET, STEP_TOOLS,
+    SWITCH, Step, TOOL, TRY, WHILE, each_step, validate,
 };
 
 /// How a text box is checked and what can be put into it.
@@ -117,6 +117,23 @@ static TRY_BOXES: [Spec; 2] = [
     ),
 ];
 
+static FLOW_BOXES: [Spec; 2] = [
+    spec(
+        "workflow",
+        "Workflow to run (its name)",
+        "Weekly report",
+        1,
+        Refs::None,
+    ),
+    spec(
+        "inputs",
+        "What to give it (JSON)",
+        r#"{"folder": "{{inputs.folder}}"}"#,
+        3,
+        Refs::Braces,
+    ),
+];
+
 /// The text boxes each kind of step has, in order.
 pub fn specs(kind: &str) -> &'static [Spec] {
     match kind {
@@ -129,12 +146,13 @@ pub fn specs(kind: &str) -> &'static [Spec] {
         WHILE => &WHILE_BOXES,
         SET => &SET_BOXES,
         TRY => &TRY_BOXES,
+        FLOW => &FLOW_BOXES,
         _ => &[],
     }
 }
 
 /// The kinds of step a person can add, in the order the menu lists them.
-pub const KINDS: [(&str, &str); 9] = [
+pub const KINDS: [(&str, &str); 10] = [
     (TOOL, "Run a tool"),
     (GENERATE, "Write with the model"),
     (DECIDE, "Let the model choose"),
@@ -144,6 +162,7 @@ pub const KINDS: [(&str, &str); 9] = [
     (WHILE, "Repeat while"),
     (SET, "Set values"),
     (TRY, "Try, and recover"),
+    (FLOW, "Run another workflow"),
 ];
 
 /// What a list of steps inside a step is for.
@@ -330,6 +349,18 @@ impl Node {
                 n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
                 n.blocks[1].steps = s.catch.iter().map(Node::from_step).collect();
             }
+            FLOW => {
+                n.set_field("workflow", text(&s.workflow));
+                let given = s.inputs.clone().unwrap_or_default();
+                n.set_field(
+                    "inputs",
+                    if given.is_empty() {
+                        String::new()
+                    } else {
+                        serde_json::to_string_pretty(&given).unwrap_or_default()
+                    },
+                );
+            }
             SET => {
                 let lines: Vec<String> = s
                     .values
@@ -423,6 +454,16 @@ impl Node {
                 s.backoff_ms = whole("backoff_ms", "the wait between tries", bad);
                 s.steps = steps(&self.blocks[0], bad, at);
                 s.catch = steps(&self.blocks[1], bad, at);
+            }
+            FLOW => {
+                s.workflow = get("workflow").map(|w| w.trim().to_owned());
+                if let Some(text) = get("inputs") {
+                    match serde_json::from_str::<Value>(&text) {
+                        Ok(Value::Object(m)) => s.inputs = Some(m).filter(|m| !m.is_empty()),
+                        Ok(_) => bad.push(format!("step {at}: what to give is a JSON object, like {{\"folder\": \"notes\"}}")),
+                        Err(e) => bad.push(format!("step {at}: what to give is not JSON: {e}")),
+                    }
+                }
             }
             SET => {
                 let mut values = BTreeMap::new();
@@ -833,7 +874,9 @@ mod tests {
                  "steps": [{"id": "tick", "kind": "tool", "tool": "shell", "args": {"command": "check"}, "bind": "poll"}]},
                 {"id": "safe", "kind": "try", "retries": 2, "backoff_ms": 500, "bind": "pushed",
                  "steps": [{"id": "push", "kind": "tool", "tool": "shell", "args": {"command": "git push"}}],
-                 "catch": [{"id": "note", "kind": "generate", "instruction": "Push failed: {{error}}"}]}
+                 "catch": [{"id": "note", "kind": "generate", "instruction": "Push failed: {{error}}"}]},
+                {"id": "sub", "kind": "flow", "workflow": "Weekly report", "bind": "report",
+                 "inputs": {"folder": "{{inputs.folder}}"}}
             ],
             "success": "All done."
         })
@@ -852,7 +895,7 @@ mod tests {
                     .definition()
                     .unwrap()
             ),
-            16
+            17
         );
     }
 
@@ -864,6 +907,7 @@ mod tests {
         e.steps[wait].fields[1] = TextEdit::new("lots");
         e.steps[4].blocks[0].steps[0].fields[0] = TextEdit::new("no equals sign");
         e.inputs[2].default = TextEdit::new("two");
+        e.steps[7].fields[1] = TextEdit::new("[1, 2]");
         e.name = TextEdit::new("");
         e.check();
         let p = e.problems.join("\n");
@@ -873,6 +917,7 @@ mod tests {
             "step 6: the most rounds is a whole number",
             "step 5.1: write each value as name = expression",
             "the default is not a number",
+            "step 8: what to give is a JSON object",
         ] {
             assert!(p.contains(expected), "missing {expected:?} in:\n{p}");
         }
