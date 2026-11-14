@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use super::Saved;
 use super::definition::{
-    CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input, SET, STEP_TOOLS,
-    SWITCH, Step, TOOL, TRY, WAIT, WHILE, each_step, validate,
+    Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input,
+    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, WAIT, WHILE, each_step, validate,
 };
 
 /// How a text box is checked and what can be put into it.
@@ -179,7 +179,7 @@ pub fn specs(kind: &str) -> &'static [Spec] {
 }
 
 /// The kinds of step a person can add, in the order the menu lists them.
-pub const KINDS: [(&str, &str); 12] = [
+pub const KINDS: [(&str, &str); 13] = [
     (TOOL, "Run a tool"),
     (GENERATE, "Write with the model"),
     (DECIDE, "Let the model choose"),
@@ -192,6 +192,7 @@ pub const KINDS: [(&str, &str); 12] = [
     (FLOW, "Run another workflow"),
     (CODE, "Run a script"),
     (WAIT, "Wait or ask first"),
+    (PARALLEL, "Run branches at once"),
 ];
 
 /// What a list of steps inside a step is for.
@@ -206,6 +207,8 @@ pub enum Part {
     Try,
     /// What a `try` does when that still fails.
     Catch,
+    /// One branch of a `parallel` step; its name is the block's `when`.
+    Branch,
 }
 
 /// A list of steps inside a step, and for a `switch` case the value it is for.
@@ -273,6 +276,7 @@ impl Node {
             SWITCH => vec![Block::new(Part::Case), Block::new(Part::Default)],
             FOR_EACH | WHILE => vec![Block::new(Part::Body)],
             TRY => vec![Block::new(Part::Try), Block::new(Part::Catch)],
+            PARALLEL => vec![Block::new(Part::Branch), Block::new(Part::Branch)],
             _ => Vec::new(),
         };
         Node {
@@ -379,6 +383,18 @@ impl Node {
                 n.blocks[1].steps = s.catch.iter().map(Node::from_step).collect();
             }
             CODE => n.set_field("script", text(&s.script)),
+            PARALLEL => {
+                n.go_on = s.on_error.as_deref() == Some(CONTINUE);
+                n.blocks = s
+                    .branches
+                    .iter()
+                    .map(|b| Block {
+                        part: Part::Branch,
+                        when: TextEdit::new(b.name.clone()),
+                        steps: b.steps.iter().map(Node::from_step).collect(),
+                    })
+                    .collect();
+            }
             WAIT => {
                 n.set_field(
                     "seconds",
@@ -493,6 +509,15 @@ impl Node {
                 s.catch = steps(&self.blocks[1], bad, at);
             }
             CODE => s.script = get("script"),
+            PARALLEL => {
+                s.on_error = self.go_on.then(|| CONTINUE.to_owned());
+                for b in &self.blocks {
+                    s.branches.push(Branch {
+                        name: b.when.text.trim().to_owned(),
+                        steps: steps(b, bad, at),
+                    });
+                }
+            }
             WAIT => {
                 s.approve = get("approve");
                 if let Some(n) = get("seconds") {
@@ -784,6 +809,21 @@ impl Editor {
         }
     }
 
+    /// Adds a branch at the end of the `parallel` step at `at`.
+    pub fn add_branch(&mut self, at: &Loc) {
+        if let Some(n) = self.node_mut(at).filter(|n| n.kind == PARALLEL) {
+            n.blocks.push(Block::new(Part::Branch));
+        }
+    }
+
+    pub fn remove_branch(&mut self, at: &Loc, block: usize) {
+        if let Some(n) = self.node_mut(at).filter(|n| n.kind == PARALLEL)
+            && n.blocks.get(block).is_some_and(|b| b.part == Part::Branch)
+        {
+            n.blocks.remove(block);
+        }
+    }
+
     pub fn remove_case(&mut self, at: &Loc, block: usize) {
         if let Some(n) = self.node_mut(at).filter(|n| n.kind == SWITCH)
             && n.blocks.get(block).is_some_and(|b| b.part == Part::Case)
@@ -926,7 +966,11 @@ mod tests {
                  "inputs": {"folder": "{{inputs.folder}}"}},
                 {"id": "calc", "kind": "code", "bind": "sum", "script": "let t = 0;\nfor i in [1, 2] { t += i; }\nt"},
                 {"id": "ok", "kind": "wait", "approve": "Send {{sum}} on?"},
-                {"id": "nap", "kind": "wait", "seconds": 3600}
+                {"id": "nap", "kind": "wait", "seconds": 3600},
+                {"id": "both", "kind": "parallel", "on_error": "continue", "bind": "pair", "branches": [
+                    {"name": "left", "steps": [{"id": "l", "kind": "tool", "tool": "shell", "args": {"command": "echo l"}}]},
+                    {"name": "right", "steps": [{"id": "r", "kind": "generate", "instruction": "Say {{sum}}"}]}
+                ]}
             ],
             "success": "All done."
         })
@@ -945,7 +989,7 @@ mod tests {
                     .definition()
                     .unwrap()
             ),
-            20
+            23
         );
     }
 
@@ -1085,6 +1129,9 @@ mod tests {
             "{cond:?}"
         );
         assert!(!e.names(&at(&[], 5), None).contains(&"poll".to_owned()));
+        // A branch sees what comes before the step, not its sibling branches.
+        let left = e.names(&at(&[(11, 0)], 0), None);
+        assert!(left.contains(&"sum".to_owned()), "{left:?}");
         // Only what runs after a try fails can see its error.
         assert!(
             !e.names(&at(&[(6, 0)], 0), None)
@@ -1094,5 +1141,30 @@ mod tests {
             e.names(&at(&[(6, 1)], 0), None)
                 .contains(&"error".to_owned())
         );
+    }
+
+    #[test]
+    fn branches_are_added_and_removed_and_each_is_a_list_of_steps() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], PARALLEL);
+        assert_eq!(
+            e.steps[0].blocks.len(),
+            2,
+            "a new parallel step starts with two"
+        );
+        e.add_branch(&at(&[], 0));
+        e.add(&vec![(0, 2)], GENERATE);
+        assert_eq!(e.steps[0].blocks[2].steps.len(), 1);
+        e.remove_branch(&at(&[], 0), 0);
+        assert_eq!(e.steps[0].blocks.len(), 2);
+        assert_eq!(
+            e.steps[0].blocks[1].steps.len(),
+            1,
+            "what was the third is the second"
+        );
+        // Only a parallel step has branches.
+        e.add(&vec![], TOOL);
+        e.add_branch(&at(&[], 1));
+        assert!(e.steps[1].blocks.is_empty());
     }
 }

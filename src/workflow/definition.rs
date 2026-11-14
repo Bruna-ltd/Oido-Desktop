@@ -23,9 +23,10 @@ pub const TRY: &str = "try";
 pub const FLOW: &str = "flow";
 pub const CODE: &str = "code";
 pub const WAIT: &str = "wait";
+pub const PARALLEL: &str = "parallel";
 
-const KINDS: [&str; 12] = [
-    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY, FLOW, CODE, WAIT,
+const KINDS: [&str; 13] = [
+    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY, FLOW, CODE, WAIT, PARALLEL,
 ];
 
 /// The tools a workflow step may call. A flow runs on its own, so it cannot stop to ask you.
@@ -56,6 +57,8 @@ pub const MAX_FLOW_DEPTH: usize = 5;
 pub const INLINE_WAIT: u32 = 120;
 /// The longest a `wait` may be, in seconds: a week.
 pub const MAX_WAIT: u32 = 604_800;
+/// Most branches one `parallel` step may run at once.
+pub const MAX_BRANCHES: usize = 8;
 
 /// Names a step may not bind: they mean something inside a body.
 const RESERVED: [&str; 4] = ["inputs", "item", "index", "error"];
@@ -90,6 +93,14 @@ pub struct Input {
 pub struct Case {
     /// An expression; its value is compared with the `on` value.
     pub when: String,
+    #[serde(default)]
+    pub steps: Vec<Step>,
+}
+
+/// One branch of a `parallel` step: a name for its result, and the steps it runs.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Branch {
+    pub name: String,
     #[serde(default)]
     pub steps: Vec<Step>,
 }
@@ -167,6 +178,9 @@ pub struct Step {
     pub seconds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approve: Option<String>,
+    // parallel: each branch runs at once; the result is an object of branch name to its result
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<Branch>,
 }
 
 impl Step {
@@ -180,7 +194,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 26] = [
+        let fields: [(&str, bool); 27] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -207,6 +221,7 @@ impl Step {
             ("script", self.script.is_some()),
             ("seconds", self.seconds.is_some()),
             ("approve", self.approve.is_some()),
+            ("branches", !self.branches.is_empty()),
         ];
         fields
             .into_iter()
@@ -230,6 +245,7 @@ fn takes(kind: &str) -> &'static [&'static str] {
         FLOW => &["workflow", "inputs"],
         CODE => &["script"],
         WAIT => &["seconds", "approve"],
+        PARALLEL => &["branches", "on_error"],
         _ => &[],
     }
 }
@@ -286,6 +302,9 @@ pub fn each_step<'a>(steps: &'a [Step], f: &mut impl FnMut(&'a Step)) {
         each_step(&s.default, f);
         each_step(&s.steps, f);
         each_step(&s.catch, f);
+        for b in &s.branches {
+            each_step(&b.steps, f);
+        }
     }
 }
 
@@ -297,6 +316,8 @@ struct Check<'a> {
     ids: BTreeSet<String>,
     binds: BTreeSet<String>,
     count: usize,
+    /// How many `parallel` branches the step being checked is inside.
+    parallel: usize,
 }
 
 impl Check<'_> {
@@ -411,7 +432,10 @@ impl Check<'_> {
                 }
             }
         }
-        let container = matches!(s.kind.as_str(), IF | SWITCH | FOR_EACH | WHILE | TRY);
+        let container = matches!(
+            s.kind.as_str(),
+            IF | SWITCH | FOR_EACH | WHILE | TRY | FLOW | PARALLEL
+        );
         if container && depth >= MAX_DEPTH {
             self.bad.push(format!(
                 "{at}: steps are inside each other more than {MAX_DEPTH} deep"
@@ -579,6 +603,35 @@ impl Check<'_> {
                     );
                 }
             }
+            PARALLEL => {
+                if s.branches.is_empty() || s.branches.len() > MAX_BRANCHES {
+                    self.bad.push(format!(
+                        "{at}: a parallel step needs 1 to {MAX_BRANCHES} branches"
+                    ));
+                }
+                if let Some(v) = s.on_error.as_deref()
+                    && v != STOP
+                    && v != CONTINUE
+                {
+                    self.bad
+                        .push(format!("{at}: on_error is {STOP} or {CONTINUE}, not {v:?}"));
+                }
+                let mut named = BTreeSet::new();
+                for (n, b) in s.branches.iter().enumerate() {
+                    let at_branch = format!("{at}, branch {}", n + 1);
+                    if !name_ok(&b.name, false) {
+                        self.bad.push(format!(
+                            "{at_branch}: a name is letters, digits and underscores, starting with a letter or underscore"
+                        ));
+                    } else if !named.insert(b.name.as_str()) {
+                        self.bad
+                            .push(format!("{at_branch}: another branch has this name"));
+                    }
+                    self.parallel += 1;
+                    self.body(&at_branch, &b.steps, label, vis, &[], below);
+                    self.parallel -= 1;
+                }
+            }
             WAIT => match (s.seconds, s.approve.as_deref().map(str::trim)) {
                 (Some(_), Some(_)) => self
                     .bad
@@ -589,7 +642,13 @@ impl Check<'_> {
                 (Some(n), None) if n == 0 || n > MAX_WAIT => self
                     .bad
                     .push(format!("{at}: seconds is 1 to {MAX_WAIT}, a week")),
+                (Some(n), None) if n > INLINE_WAIT && self.parallel > 0 => self.bad.push(format!(
+                    "{at}: a wait longer than {INLINE_WAIT} seconds pauses the run, which a parallel branch cannot do"
+                )),
                 (Some(_), None) => {}
+                (None, Some(_)) if self.parallel > 0 => self.bad.push(format!(
+                    "{at}: asking you pauses the run, which a parallel branch cannot do"
+                )),
                 (None, Some(_)) => refs.extend(template::find_refs(
                     s.approve.as_deref().unwrap_or_default(),
                 )),
@@ -669,6 +728,7 @@ pub fn validate(def: &Definition) -> Result<(), Vec<String>> {
         ids: BTreeSet::new(),
         binds: BTreeSet::new(),
         count: 0,
+        parallel: 0,
     };
     for (name, input) in &def.inputs {
         if !name_ok(name, false) {
@@ -842,6 +902,14 @@ pub fn describe(s: &Step) -> String {
         },
         FLOW => format!("Run the workflow {}", text(&s.workflow)),
         CODE => format!("Script: {}", text(&s.script)),
+        PARALLEL => format!(
+            "At once: {}",
+            s.branches
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         WAIT => match s.seconds {
             Some(n) => format!("Wait {}", super::pause::span(n)),
             None => format!("Wait for your approval: {}", text(&s.approve)),
@@ -905,6 +973,11 @@ pub fn outline(steps: &[Step]) -> Vec<Row> {
                     }
                 }
                 FOR_EACH | WHILE => walk(&s.steps, &branch(&path, "body"), depth + 1, out),
+                PARALLEL => {
+                    for b in &s.branches {
+                        part(&b.name, format!("branch {}", b.name), &b.steps);
+                    }
+                }
                 TRY => {
                     part("body", "try".to_owned(), &s.steps);
                     if !s.catch.is_empty() {

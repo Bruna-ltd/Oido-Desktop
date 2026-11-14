@@ -286,6 +286,19 @@ impl App {
         }
     }
 
+    pub fn editor_add_branch(&mut self, at: &Loc) {
+        if let Some(ed) = &mut self.wf_editor {
+            ed.add_branch(at);
+        }
+    }
+
+    pub fn editor_remove_branch(&mut self, at: &Loc, block: usize) {
+        if let Some(ed) = &mut self.wf_editor {
+            ed.remove_branch(at, block);
+            ed.check();
+        }
+    }
+
     pub fn editor_remove_case(&mut self, at: &Loc, block: usize) {
         if let Some(ed) = &mut self.wf_editor {
             ed.remove_case(at, block);

@@ -6,7 +6,7 @@ use rune::{El, ScrollSpec, TextEdit, col, el, row, text, text_input};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Select, SelectAppearance, Switch};
 
 use crate::app::App;
-use crate::workflow::definition::{FOR_EACH, STEP_TOOLS, SWITCH};
+use crate::workflow::definition::{FOR_EACH, PARALLEL, STEP_TOOLS, SWITCH};
 use crate::workflow::editor::{
     Block, Editor, INPUT_KINDS, KINDS, Loc, Menu, Node, Part, Place, Refs, Target, specs,
 };
@@ -606,29 +606,41 @@ fn card(s: &App, ed: &Editor, at: &Loc, n: &Node, len: usize, k: &Kit, layer: &m
             move |s: &mut App| s.editor_text(&Target::Field(f_at.clone(), i)),
         ));
     }
-    if n.kind == FOR_EACH {
+    if n.kind == FOR_EACH || n.kind == PARALLEL {
         let on = n.go_on;
         let go = at.clone();
+        let label = if n.kind == FOR_EACH {
+            "Carry on when a round fails"
+        } else {
+            "Carry on when a branch fails"
+        };
         out = out.child(
             row()
                 .center_y()
                 .gap(8.0)
                 .child(
                     Switch::new(on)
-                        .label("Carry on when a round fails")
+                        .label(label)
                         .hide_label()
                         .on_toggle(move |s: &mut App| s.editor_toggle_go_on(&go))
                         .build(k),
                 )
-                .child(
-                    text("Carry on when a round fails")
-                        .font(k.ty.small)
-                        .color(c.text_muted),
-                ),
+                .child(text(label).font(k.ty.small).color(c.text_muted)),
         );
     }
     for (b, block) in n.blocks.iter().enumerate() {
         out = out.child(inside(s, ed, at, b, block, k, layer));
+    }
+    if n.kind == PARALLEL {
+        let branch_at = at.clone();
+        out = out.child(
+            row().child(
+                small("Add a branch", ButtonVariant::Outline)
+                    .on_press(move |s: &mut App| s.editor_add_branch(&branch_at))
+                    .build(k)
+                    .key(format!("wfe-add-branch-{key}")),
+            ),
+        );
     }
     if n.kind == SWITCH {
         let case_at = at.clone();
@@ -705,6 +717,7 @@ fn inside(
             .font(k.ty.small)
             .color(c.text_muted),
         Part::Case => text("When").font(k.ty.small).color(c.text_muted),
+        Part::Branch => text("Branch").font(k.ty.small).color(c.text_muted),
     };
     let mut head = row().w_full().center_y().gap(8.0).child(heading);
     if block.part == Part::Case {
@@ -726,6 +739,27 @@ fn inside(
                     .on_press(move |s: &mut App| s.editor_remove_case(&rm, b))
                     .build(k)
                     .key(format!("wfe-remove-case-{key}-{b}")),
+            );
+    }
+    if block.part == Part::Branch {
+        let name_at = at.clone();
+        let rm = at.clone();
+        head = head
+            .child(col().grow(1.0).child(field(
+                "Name",
+                &block.when,
+                &format!("wfe-branch-{key}-{b}"),
+                "fetch",
+                1,
+                None,
+                k,
+                move |s: &mut App| s.editor_text(&Target::When(name_at.clone(), b)),
+            )))
+            .child(
+                small("Remove branch", ButtonVariant::Ghost)
+                    .on_press(move |s: &mut App| s.editor_remove_branch(&rm, b))
+                    .build(k)
+                    .key(format!("wfe-remove-branch-{key}-{b}")),
             );
     }
     col()

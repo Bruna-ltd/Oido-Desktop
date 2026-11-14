@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 done** (`try`, MCP tools, taint tracking, `flow`, `delegate`; `http` was left out and is not planned); **P3 started** (`code`, the editor's test run, and `wait` built; `parallel` not). Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 done** (`try`, MCP tools, taint tracking, `flow`, `delegate`; `http` was left out and is not planned); **P3 started** (`code`, the editor's test run, and `wait` and `parallel` built). Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -293,6 +293,21 @@ is the one non-deterministic tool step and is marked as such.
   A run an agent or a schedule started tells them it paused and that what it makes later does not
   come back to them. A wait in the editor's test run stops the test there and says so. Model calls
   are counted for each stretch of a run, so a resumed run is not counted twice.
+- `parallel`: `branches` is a list of up to 8, each a `name` (letters, digits, underscore, unique) and
+  steps; `on_error` is `stop` (default) or `continue`. The branches run at once on their own threads
+  and the step ends when all have. Its result is an object of branch name to that branch's last value
+  (`null` for a branch that failed under `continue`, or that was stopped). Each branch starts from
+  what is bound before the step, binds inside itself only, and cannot see its siblings. Under `stop`,
+  the first failure ends the others before they start another step (a tool already running is not
+  interrupted) and the run fails at that step. Stop ends all of them. The log lists the `parallel`
+  line and then each branch's steps in the order the branches are written, with the branch's name in
+  their path (`0.news.0`), so lines do not interleave by timing. Step counts, model use and held
+  names from all branches are added to the run's. Outside text from any branch holds the whole
+  result object, so a step reading even a clean branch's result is held. A wait that would pause the
+  run (an approval, or more than 120 seconds) cannot be inside a branch: saving refuses it, and a
+  workflow run through `flow` that does so fails at run time, since a pause needs one position to
+  save. Short waits are fine. The engine's tools, model and workflow lookup now have to be safe to
+  share between threads.
 
 ## Phases
 
@@ -303,7 +318,7 @@ validate, delete, open a taught draft). No new tools.
 **P2 — recovery and reach (built, except `http`, which was left out: a tool step can already fetch pages, and an MCP server covers other APIs).** `try` with retry and catch; `http`; MCP tools in `tool` steps;
 `flow`; `delegate`.
 
-**P3 — concurrency and humans (`code`, `wait`, test run built; `parallel` not).** `parallel`; `code`; `wait` with approval and persisted runs
+**P3 — concurrency and humans (built).** `parallel`; `code`; `wait` with approval and persisted runs
 (migration, pending list, resume); test-run from the editor with inputs and per-step output.
 
 Each phase ships alone and leaves workflows that ran before running the same.

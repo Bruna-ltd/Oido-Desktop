@@ -1296,6 +1296,25 @@ pub static SCENES: &[Scene] = &[
             s.wf_editor = Some(Editor::from_saved(w));
         }
     }),
+    ("workflow-parallel", |s| {
+        use crate::workflow::definition::Step;
+        use crate::workflow::editor::Editor;
+        nested_workflow(s);
+        let step: Step = serde_json::from_value(serde_json::json!({
+            "id": "gather", "kind": "parallel", "on_error": "continue", "bind": "got",
+            "branches": [
+                {"name": "news", "steps": [{"id": "n", "kind": "tool", "tool": "web_fetch",
+                    "args": {"url": "https://example.com/news"}}]},
+                {"name": "notes", "steps": [{"id": "r", "kind": "tool", "tool": "read_file",
+                    "args": {"path": "notes/today.md"}}]}
+            ]
+        }))
+        .unwrap_or_default();
+        if let Some(w) = s.workflows.first_mut() {
+            w.definition.steps = vec![step];
+            s.wf_editor = Some(Editor::from_saved(w));
+        }
+    }),
     ("workflow-waiting", |s| {
         use crate::workflow::{Pause, RunStatus};
         nested_workflow(s);

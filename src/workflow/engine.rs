@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 
 use super::definition::{
     CODE, CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FLOW, FOR_EACH, GENERATE, IF, INLINE_WAIT,
-    MAX_FLOW_DEPTH, MAX_ROUNDS, SET, SWITCH, Step, TOOL, TRY, WAIT, WHILE, branch, case_branch,
-    child, describe, reads,
+    MAX_FLOW_DEPTH, MAX_ROUNDS, PARALLEL, SET, SWITCH, Step, TOOL, TRY, WAIT, WHILE, branch,
+    case_branch, child, describe, reads,
 };
 use super::expr::Evaluator;
 use super::pause::{Decision, Frame, Snapshot, intern, span, unix_now};
@@ -82,12 +82,12 @@ pub type Answer = Result<(String, Usage), String>;
 /// a shell.
 pub struct Env<'a> {
     /// Runs a tool: its name, its arguments, and why they depend on outside text, if they do.
-    pub tool: &'a dyn Fn(&str, &Value, Option<&str>) -> ToolOutcome,
+    pub tool: &'a (dyn Fn(&str, &Value, Option<&str>) -> ToolOutcome + Sync),
     /// One model call: a system prompt and one message, answered in text.
-    pub model: &'a dyn Fn(&str, &str) -> Answer,
+    pub model: &'a (dyn Fn(&str, &str) -> Answer + Sync),
     pub cancel: &'a Arc<AtomicBool>,
     /// The workflow called this, of the agent running, as its id and steps.
-    pub flow: &'a dyn Fn(&str) -> Option<(String, Definition)>,
+    pub flow: &'a (dyn Fn(&str) -> Option<(String, Definition)> + Sync),
 }
 
 /// One step as it ran.
@@ -309,6 +309,22 @@ struct Run<'a, 'e> {
     resume: VecDeque<Frame>,
     /// What was answered to the step the resume ends at.
     decision: Option<Decision>,
+    /// Set to end the other branches of a `parallel` step when this one is a branch of it.
+    group: Option<Arc<AtomicBool>>,
+}
+
+impl<'a, 'e> Run<'a, 'e> {
+    /// A run for one branch of a `parallel` step: what this one knows, a log of its own that is
+    /// joined to this one afterwards, and `group` to be ended by if a sibling fails.
+    fn fork(&self, group: &Arc<AtomicBool>) -> Run<'a, 'e> {
+        let mut branch = start(self.env);
+        branch.rounds = self.rounds.clone();
+        branch.tainted = self.tainted.clone();
+        branch.steered = self.steered;
+        branch.flows = self.flows.clone();
+        branch.group = Some(Arc::clone(group));
+        branch
+    }
 }
 
 /// Whether two values are the same, a whole number and the same number written with a point
@@ -323,6 +339,10 @@ fn same(a: &Value, b: &Value) -> bool {
 impl Run<'_, '_> {
     fn stopped(&self) -> bool {
         self.env.cancel.load(Ordering::Relaxed)
+            || self
+                .group
+                .as_ref()
+                .is_some_and(|g| g.load(Ordering::Relaxed))
     }
 
     /// A step's failure; a stop shows as a failed step otherwise, so say it was you.
@@ -415,7 +435,7 @@ impl Run<'_, '_> {
         // is the run's latest output.
         let container = matches!(
             step.kind.as_str(),
-            IF | SWITCH | FOR_EACH | WHILE | TRY | FLOW
+            IF | SWITCH | FOR_EACH | WHILE | TRY | FLOW | PARALLEL
         );
         let slot = if again {
             match self.resume.pop_front() {
@@ -885,6 +905,92 @@ impl Run<'_, '_> {
                 }
                 done
             }
+            PARALLEL => {
+                if back.is_some() {
+                    return Err(self.changed());
+                }
+                let go_on = step.on_error.as_deref() == Some(CONTINUE);
+                let group = Arc::new(AtomicBool::new(false));
+                let done = std::thread::scope(|threads| {
+                    let started: Vec<_> = step
+                        .branches
+                        .iter()
+                        .map(|b| {
+                            let mut run = self.fork(&group);
+                            let mut inner = scope.clone();
+                            let (path, group) = (branch(at, &b.name), &group);
+                            threads.spawn(move || {
+                                let result = run.block(&b.steps, &path, &mut inner);
+                                if result.is_err() && !go_on {
+                                    group.store(true, Ordering::Relaxed);
+                                }
+                                (result, run)
+                            })
+                        })
+                        .collect();
+                    started.into_iter().map(|t| t.join()).collect::<Vec<_>>()
+                });
+                let mut made = Map::new();
+                let mut failure: Option<Halt> = None;
+                let mut failed = 0;
+                for (b, joined) in step.branches.iter().zip(done) {
+                    let Ok((result, run)) = joined else {
+                        failed += 1;
+                        failure.get_or_insert(Halt::Failed {
+                            step: step.id.clone(),
+                            error: format!("The branch {} stopped unexpectedly.", b.name),
+                        });
+                        made.insert(b.name.clone(), Value::Null);
+                        continue;
+                    };
+                    // What it did joins this run, in the order the branches are written.
+                    self.out.steps.extend(run.out.steps);
+                    self.out.usage.add(run.out.usage);
+                    if !run.out.output.is_empty() {
+                        self.out.output = run.out.output;
+                    }
+                    self.taken += run.taken;
+                    self.tainted.extend(run.tainted);
+                    self.touched = self.touched.or(run.touched);
+                    match result {
+                        Ok(v) => {
+                            made.insert(b.name.clone(), v);
+                        }
+                        Err(halt) => {
+                            made.insert(b.name.clone(), Value::Null);
+                            match halt {
+                                Halt::Stopped => {}
+                                Halt::Waiting { step: id, .. } => {
+                                    failed += 1;
+                                    failure.get_or_insert(Halt::Failed {
+                                        step: id,
+                                        error: "A wait that pauses the run cannot be inside a parallel branch."
+                                            .to_owned(),
+                                    });
+                                }
+                                halt => {
+                                    failed += 1;
+                                    failure.get_or_insert(halt);
+                                }
+                            }
+                        }
+                    }
+                }
+                if self.stopped() {
+                    return Err(Halt::Stopped);
+                }
+                if let (false, Some(halt)) = (go_on, failure) {
+                    return Err(halt);
+                }
+                said(
+                    self,
+                    match failed {
+                        0 => format!("{} branches", step.branches.len()),
+                        n => format!("{} branches, {n} failed", step.branches.len()),
+                    },
+                );
+                Ok(Value::Object(made))
+            }
             SET => {
                 let mut made = Map::new();
                 for (name, src) in step.values.iter().flatten() {
@@ -982,6 +1088,7 @@ fn start<'a, 'e>(env: &'a Env<'e>) -> Run<'a, 'e> {
         frames: Vec::new(),
         resume: VecDeque::new(),
         decision: None,
+        group: None,
     }
 }
 
@@ -1051,7 +1158,41 @@ pub fn resume(def: &Definition, snapshot: Snapshot, decision: Decision, env: &En
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// What the tests' fake tools write in: a `RefCell` that may be shared between the threads of
+    /// a `parallel` step.
+    struct RefCell<T>(Mutex<T>);
+
+    impl<T> RefCell<T> {
+        fn new(v: T) -> Self {
+            Self(Mutex::new(v))
+        }
+        fn borrow(&self) -> MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+        fn borrow_mut(&self) -> MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+        fn into_inner(self) -> T {
+            self.0.into_inner().unwrap()
+        }
+    }
+
+    /// Likewise for a `Cell`.
+    struct Cell<T>(Mutex<T>);
+
+    impl<T: Copy> Cell<T> {
+        fn new(v: T) -> Self {
+            Self(Mutex::new(v))
+        }
+        fn get(&self) -> T {
+            *self.0.lock().unwrap()
+        }
+        fn set(&self, v: T) {
+            *self.0.lock().unwrap() = v;
+        }
+    }
 
     use super::*;
 
@@ -1072,8 +1213,8 @@ mod tests {
     fn run_with(
         d: &Definition,
         inputs: Value,
-        tool: impl Fn(&str, &Value) -> ToolOutcome,
-        model: impl Fn(&str) -> String,
+        tool: impl Fn(&str, &Value) -> ToolOutcome + Sync,
+        model: impl Fn(&str) -> String + Sync,
     ) -> (Outcome, Fakes) {
         let fakes = Fakes {
             tools: RefCell::new(Vec::new()),
@@ -1468,7 +1609,7 @@ mod tests {
             {"id": "l", "kind": "for_each", "over": "[1, 2, 3, 4]", "steps": [sh("t", "x")]}
         ]}));
         let cancel = Arc::new(AtomicBool::new(false));
-        let calls = std::cell::Cell::new(0);
+        let calls = Cell::new(0);
         let tool = |_: &str, _: &Value, _: Option<&str>| {
             calls.set(calls.get() + 1);
             if calls.get() == 2 {
@@ -1565,7 +1706,7 @@ mod tests {
 
     /// A shell that fails its first `fails` calls, then answers with its command.
     fn flaky(d: &Definition, fails: usize) -> (Outcome, usize) {
-        let calls = std::cell::Cell::new(0usize);
+        let calls = Cell::new(0usize);
         let (out, _) = run_with(
             d,
             json!({}),
@@ -2230,6 +2371,220 @@ mod tests {
             matches!(&done.ending, Ending::Failed { error, .. } if error.contains("changed")),
             "{:?}",
             done.ending
+        );
+    }
+
+    fn branch(name: &str, steps: Value) -> Value {
+        json!({"name": name, "steps": steps})
+    }
+
+    /// Runs `d` with a shell that takes `ms` milliseconds and fails for any command containing
+    /// `fail`, and says the most calls ever in flight at once and every command that started.
+    fn slow(d: &Definition, ms: u64) -> (Outcome, usize, Vec<String>) {
+        use std::sync::atomic::AtomicUsize;
+        let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let started = RefCell::new(Vec::new());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tool = |name: &str, args: &Value, outside: Option<&str>| {
+            let said = args["command"].as_str().unwrap_or(name).to_owned();
+            started.borrow_mut().push(said.clone());
+            let here = now.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(here, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(ms));
+            now.fetch_sub(1, Ordering::SeqCst);
+            let _ = outside;
+            ToolOutcome {
+                value: json!({"stdout": said}),
+                error: said.contains("fail").then(|| "it failed".to_owned()),
+                outside: (name == "web_fetch").then_some("a web page"),
+            }
+        };
+        let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+            flow: &|_: &str| None,
+        };
+        let inputs = bind_inputs(d, &Map::new()).unwrap();
+        let out = execute(d, &inputs, &env);
+        (out, most.load(Ordering::SeqCst), started.into_inner())
+    }
+
+    #[test]
+    fn branches_run_at_once_and_their_results_come_back_by_name_with_their_steps_in_the_log() {
+        let d = def(json!({"steps": [
+            {"id": "all", "kind": "parallel", "bind": "got", "branches": [
+                branch("a", json!([sh("a1", "echo a1"), sh("a2", "echo a2")])),
+                branch("b", json!([sh("b1", "echo b1")])),
+                branch("c", json!([sh("c1", "echo c1")]))
+            ]},
+            sh("after", "echo {{got.a.stdout}}+{{got.b.stdout}}+{{got.c.stdout}}")
+        ]}));
+        let began = Instant::now();
+        let (out, most, said) = slow(&d, 120);
+        assert_eq!(out.ending, Ending::Succeeded, "{:?}", out.ending);
+        assert_eq!(most, 3, "all three branches were going together");
+        assert!(
+            began.elapsed() < Duration::from_millis(120 * 5),
+            "one after another it would take {:?} or more",
+            Duration::from_millis(120 * 5)
+        );
+        assert_eq!(said.last().unwrap(), "echo echo a2+echo b1+echo c1");
+        // The log: the step, then each branch's steps in the order the branches are written.
+        let paths: Vec<_> = out.steps.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, ["0", "0.a.0", "0.a.1", "0.b.0", "0.c.0", "1"]);
+        assert_eq!(out.steps[0].output, "3 branches");
+    }
+
+    #[test]
+    fn a_failing_branch_stops_the_others_from_starting_more_unless_it_is_told_to_go_on() {
+        let steps = |on_error: Option<&str>| {
+            let mut p = json!({"id": "all", "kind": "parallel", "bind": "got", "branches": [
+                branch("bad", json!([sh("x", "fail now")])),
+                branch("slow", json!([sh("y1", "echo y1"), sh("y2", "echo y2")]))
+            ]});
+            if let Some(v) = on_error {
+                p["on_error"] = json!(v);
+            }
+            def(json!({"steps": [p, sh("after", "echo after")]}))
+        };
+        // Stop: the run fails at the branch that failed; the slow one does not go on to y2.
+        let (out, _, said) = slow(&steps(None), 100);
+        assert!(
+            matches!(&out.ending, Ending::Failed { step, error } if step == "x" && error == "it failed"),
+            "{:?}",
+            out.ending
+        );
+        assert!(
+            !said.contains(&"echo y2".to_owned()) && !said.contains(&"echo after".to_owned()),
+            "{said:?}"
+        );
+        // Continue: both finish, the failed one is null, and the run goes on.
+        let (out, _, said) = slow(&steps(Some("continue")), 30);
+        assert_eq!(out.ending, Ending::Succeeded, "{:?}", out.ending);
+        assert!(said.contains(&"echo y2".to_owned()) && said.last().unwrap() == "echo after");
+        assert_eq!(out.steps[0].output, "2 branches, 1 failed");
+    }
+
+    #[test]
+    fn what_a_branch_binds_stays_in_it_and_outside_text_from_any_branch_holds_what_reads_it() {
+        let bad = |v: Value| {
+            let d: Definition = serde_json::from_value(v).unwrap();
+            super::super::definition::validate(&d)
+                .unwrap_err()
+                .join("; ")
+        };
+        let why = bad(json!({"steps": [
+            {"id": "p", "kind": "parallel", "branches": [
+                branch("a", json!([{"id": "a1", "kind": "set", "bind": "x", "values": {"v": "1"}}])),
+                branch("b", json!([sh("b1", "echo {{x.v}}")]))
+            ]}
+        ]}));
+        assert!(why.contains('x'), "{why}");
+        let why = bad(json!({"steps": [
+            {"id": "p", "kind": "parallel", "on_error": "maybe", "branches": [
+                branch("a", json!([sh("a1", "x")])), branch("a", json!([sh("a2", "x")])),
+                branch("bad name", json!([sh("a3", "x")])), branch("e", json!([]))
+            ]},
+            {"id": "q", "kind": "parallel", "branches": []}
+        ]}));
+        for expected in [
+            "on_error",
+            "another branch has this name",
+            "a name is letters",
+            "at least one step",
+            "1 to 8 branches",
+        ] {
+            assert!(why.contains(expected), "missing {expected:?} in {why}");
+        }
+    }
+
+    #[test]
+    fn outside_text_from_one_branch_holds_the_steps_that_read_the_result() {
+        let d = def(json!({"steps": [
+            {"id": "p", "kind": "parallel", "bind": "got", "branches": [
+                branch("web", json!([web_step_unbound()])),
+                branch("own", json!([sh("o", "echo mine")]))
+            ]},
+            sh("from-web", "echo {{got.web.stdout}}"),
+            sh("from-own", "echo {{got.own.stdout}}"),
+            sh("clean", "echo fine")
+        ]}));
+        let bench = Bench::new(&[]);
+        let out = bench.run(&d);
+        assert_eq!(out.ending, Ending::Succeeded, "{:?}", out.ending);
+        let held = |c: &str| {
+            bench
+                .seen
+                .borrow()
+                .iter()
+                .find(|(said, _)| said == c)
+                .and_then(|(_, h)| h.clone())
+        };
+        assert_eq!(held("echo page text").as_deref(), Some("a web page"));
+        assert_eq!(held("echo fine"), None);
+    }
+
+    fn web_step_unbound() -> Value {
+        json!({"id": "get", "kind": "tool", "tool": "web_fetch", "args": {"url": "x"}})
+    }
+
+    #[test]
+    fn a_wait_that_pauses_the_run_may_not_be_inside_a_branch_but_a_short_one_may() {
+        let bad = |v: Value| {
+            let d: Definition = serde_json::from_value(v).unwrap();
+            super::super::definition::validate(&d)
+                .unwrap_err()
+                .join("; ")
+        };
+        let why = bad(json!({"steps": [
+            {"id": "p", "kind": "parallel", "branches": [
+                branch("a", json!([{"id": "w1", "kind": "wait", "approve": "ok?"}])),
+                branch("b", json!([{"id": "w2", "kind": "wait", "seconds": 600}]))
+            ]}
+        ]}));
+        assert!(
+            why.contains("asking you pauses") && why.contains("longer than 120"),
+            "{why}"
+        );
+        let ok = def(json!({"steps": [
+            {"id": "p", "kind": "parallel", "branches": [
+                branch("a", json!([{"id": "w", "kind": "wait", "seconds": 1}, sh("a", "echo a")]))
+            ]}
+        ]}));
+        assert_eq!(slow(&ok, 1).0.ending, Ending::Succeeded);
+    }
+
+    #[test]
+    fn stopping_ends_every_branch() {
+        let d = def(json!({"steps": [
+            {"id": "p", "kind": "parallel", "branches": [
+                branch("a", json!([sh("a1", "echo a1"), sh("a2", "echo a2")])),
+                branch("b", json!([sh("b1", "echo b1"), sh("b2", "echo b2")]))
+            ]}
+        ]}));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let said = RefCell::new(Vec::new());
+        let tool = |_: &str, args: &Value, _: Option<&str>| {
+            said.borrow_mut()
+                .push(args["command"].as_str().unwrap().to_owned());
+            cancel.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(50));
+            ToolOutcome::default()
+        };
+        let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+            flow: &|_: &str| None,
+        };
+        let out = execute(&d, &json!({}), &env);
+        assert_eq!(out.ending, Ending::Stopped);
+        assert!(
+            said.into_inner().len() <= 2,
+            "no branch started a second step"
         );
     }
 }
