@@ -322,3 +322,98 @@ validate, delete, open a taught draft). No new tools.
 (migration, pending list, resume); test-run from the editor with inputs and per-step output.
 
 Each phase ships alone and leaves workflows that ran before running the same.
+
+## Graph view
+
+Status: designed 2026-11-14, not built. A second view of the same editor state, for people who think
+in boxes and wires. The card editor stays: it is the keyboard and screen-reader route, and the place
+every box of a step is typed.
+
+### What it is for, and what it is remembered by
+
+One job: read a flow at a glance and rearrange it by hand without it turning into spaghetti. It is
+not n8n's free graph (ADR-2 stands: a tree, so it always ends and a join is implicit). What makes it
+ours, in order:
+
+1. **Containers are frames.** `if`, `switch`, `for_each`, `while`, `try`, `parallel` and `flow` draw
+   as a labelled frame holding their steps, so nesting is seen and not followed along wires.
+2. **A model step looks different.** `generate`, `decide` and `delegate` have a dashed outline and a
+   model glyph; everything else is solid. The deterministic/model line is the design's main promise,
+   and it is drawn in shape, not only colour.
+3. **A run paints onto the graph.** The step log is keyed by the same paths the graph uses, so a test
+   run or a real run shows each node waiting, running, done or failed, with its output one click
+   away, and a paused run shows where it waits.
+
+### Layout (pure, in `workflow/layout.rs`, tested without a screen)
+
+Steps flow top to bottom down one spine. A branching step puts its lists side by side as columns
+(`then`/`else`, each `switch` case and `default`, each `parallel` branch), each column a spine of its
+own, labelled on its first wire. A loop frame carries a return-arc glyph on its left edge, not a
+wire. Wires are drawn between neighbours only, vertical, with a quad curve into a column; they are
+never drawn by the person, so a loop back is not possible, and a join below a frame is implied by the
+frame's end. Node 240 wide and 56 tall; 32 between steps; frame padding 16 and a 28 header; 24
+between columns. A wide `switch` or `parallel` scrolls sideways; pan covers it.
+
+### Interaction
+
+- Select by click; the selected node's card form opens in an inspector on the right (the same form
+  the card editor draws), so typing never happens on the canvas.
+- Move by drag (once the pointer has gone about 3 pt a translucent copy follows it). Wires show an
+  insertion line and a dot where it would land; frames that can take the step light up; the pointer
+  says not allowed over the step's own frame. Dropping in the same view moves, Option copies. A drop
+  that cannot land animates back. Every drag is undoable.
+- Add: a `+` on each wire and on an empty frame, and the Add step button, open one searchable list of
+  kinds, anchored where the step will go; its entries can also be dragged onto the canvas. There is
+  no permanent palette column, so the canvas keeps its width.
+- Keyboard, with no pointer: Tab enters the canvas; arrows move focus along the tree (up and down
+  among siblings, right into a frame, left out); Enter opens the inspector; Option-up and Option-down
+  move the step; `/` adds after the focused step; Delete removes. Ctrl-Z and Shift-Ctrl-Z undo and
+  redo, with no limit on depth, naming what they reverse. A context menu on a node or wire repeats
+  Add, Duplicate, Move up, Move down and Delete.
+- Pan by dragging the background or the wheel; zoom with Ctrl-wheel or pinch, 70% to 140%. Below 85%
+  a node drops its second line instead of shrinking text under 10 pt.
+- Motion: the drag copy, a 120 ms settle on drop, and nothing else. With reduced motion it settles at
+  once.
+
+### Look (uses the kit's tokens, so light and dark both follow the desktop)
+
+| Part | Token |
+|---|---|
+| Node fill, frame fill | `layer_01`, `layer_02` inside a frame |
+| Node title, subtitle | `ui_medium` in `text_base`, `small` in `text_muted` (kit-tested at least 4.5:1; `text_faint` is only 3:1, so never for a node's own words) |
+| Wire | 1.5 pt `border_strong`; 2 pt `bg_accent` when it touches the selection |
+| Selected node | `layer_03` fill and a 2 pt `bg_accent` border |
+| Keyboard focus | a separate 2 pt ring offset 2 pt, so focus and selection are not confused |
+| Model step | dashed `border_strong` and a glyph |
+| Problem | a warning glyph and the first problem as text under the title (`warning.icon` colour is not alone) |
+| Run state | glyph and word: waiting, running, done, failed |
+| Port, wire hit area | 8 pt drawn, 24 pt hit |
+
+Controls are at least 28 by 28 pt, as on desktop. Each node reads to a screen reader as "Step 3 of 5:
+For each name in files, holds 2 steps, problem: …"; wires are decorative.
+
+### ADR-8: Draw the tree, own the layout
+
+Status: accepted (design). Context: the ask was an n8n-style builder. Decision: draw the existing
+tree as frames and spines, laid out by our own pure function, in Rune's canvas for wires and plain
+elements for nodes; edit through the editor model's existing add, move and remove. Alternatives:
+(a) a free node graph with new storage, engine and migration, rejected under ADR-2; (b) the kit's
+mermaid renderer, which is static, has no hit testing and cannot nest live editing; (c) a graph view
+only, rejected because a canvas alone is not reachable by keyboard or screen reader. Consequences: a
+layout function and undo stack to write and test; wires cannot be drawn by hand; patterns that would
+need a goto stay `while`.
+
+### Phases
+
+**G1 — see it.** `layout.rs` with tests; the graph view (nodes, frames, wires, pan, zoom); a
+Cards/Graph switch; click to select with the inspector; keyboard focus and arrows. No editing on the
+canvas yet beyond what the inspector does.
+
+**G2 — move it.** Move, copy and insert by drag; the Add step list and `+` on wires; undo and redo;
+context menu; Option-arrows and Delete.
+
+**G3 — watch it.** Run state on nodes from the step log, live during a test run; problems shown on the
+nodes; a paused run's wait highlighted with Approve and Decline on the node.
+
+Left out on purpose: a minimap, colour per kind of step, a permanent palette column, drawn wires.
+
