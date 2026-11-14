@@ -1746,7 +1746,7 @@ mod tests {
         later.load_workflows();
         assert_eq!(later.workflows.len(), total);
 
-        let mut run = |app: &mut App, name: &str| {
+        let run = |app: &mut App, name: &str| {
             let id = app
                 .workflows
                 .iter()
