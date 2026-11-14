@@ -131,6 +131,8 @@ pub struct App {
     pub wf_confirm: bool,
     /// The workflow being made or changed, and which of its pop-up lists is open.
     pub wf_editor: Option<crate::workflow::editor::Editor>,
+    /// The editor's test run: what is given, and how the last one went.
+    pub wf_test: crate::flow_editor::TestRun,
     pub wf_menu: Option<crate::workflow::editor::Menu>,
     /// Stands in for a box that is no longer there when something is typed into it.
     pub wf_stray: TextEdit,
@@ -310,6 +312,7 @@ impl App {
             wf_notice: None,
             wf_confirm: false,
             wf_editor: None,
+            wf_test: crate::flow_editor::TestRun::default(),
             wf_menu: None,
             wf_stray: TextEdit::new(""),
             composer: crate::composer::Composer::new(),

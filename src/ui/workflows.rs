@@ -348,24 +348,36 @@ fn run_row(s: &App, i: usize, r: &RunRecord, k: &Kit) -> El {
 }
 
 fn run_detail(r: &RunRecord, k: &Kit) -> El {
+    let failure =
+        (!r.error.is_empty()).then(|| format!("Failed at {}: {}", r.failed_step, r.error));
+    step_log(&r.steps, failure, "wf-run-detail", k)
+}
+
+/// The steps of a run as they ran, nested the way the workflow is, with each one's output.
+pub(super) fn step_log(
+    steps: &[crate::workflow::engine::StepLog],
+    failure: Option<String>,
+    key: &str,
+    k: &Kit,
+) -> El {
     let c = &k.c;
     let mut out = col()
-        .key("wf-run-detail")
+        .key(key.to_owned())
         .w_full()
         .gap(8.0)
         .padding(12.0)
         .radius(k.radius.md)
         .fill(c.layer_01);
-    if !r.error.is_empty() {
+    if let Some(failure) = failure {
         out = out.child(
-            text(format!("Failed at {}: {}", r.failed_step, r.error))
+            text(failure)
                 .font(k.ty.small)
                 .color(k.c.warning.icon)
                 .wrap()
                 .selectable(true),
         );
     }
-    for (i, st) in r.steps.iter().enumerate() {
+    for (i, st) in steps.iter().enumerate() {
         let note = st
             .round_note()
             .map_or(String::new(), |n| format!("  ({n})"));

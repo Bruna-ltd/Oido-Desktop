@@ -82,6 +82,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             }),
         ));
     }
+    out = out.child(test_run(s, ed, k));
     out.child(
         row()
             .gap(8.0)
@@ -110,6 +111,89 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                     .key("wfe-cancel"),
             ),
     )
+}
+
+/// Runs the workflow as it stands, for real, and shows each step as it went.
+fn test_run(s: &App, ed: &Editor, k: &Kit) -> El {
+    let c = &k.c;
+    let t = &s.wf_test;
+    let running = t.running.is_some();
+    let mut out = col()
+        .key("wfe-test")
+        .w_full()
+        .gap(8.0)
+        .padding(12.0)
+        .radius(k.radius.md)
+        .border(1.0, c.border_muted)
+        .child(text("Test run").font(k.ty.ui_medium).color(c.text_base))
+        .child(
+            text("A test runs the steps for real: commands run, files change, messages go out. Nothing is saved.")
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .wrap(),
+        );
+    if ed.inputs.iter().any(|r| !r.name.text.trim().is_empty()) {
+        out = out.child(field(
+            "What to give it, one per line: name = value",
+            &t.inputs,
+            "wfe-test-inputs",
+            "folder = notes",
+            2,
+            None,
+            k,
+            |s: &mut App| &mut s.wf_test.inputs,
+        ));
+    }
+    let button = if running {
+        Button::new("Stop")
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.stop_test())
+            .build(k)
+            .key("wfe-test-stop")
+    } else {
+        Button::new("Run the test")
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.test_editor())
+            .build(k)
+            .key("wfe-test-run")
+    };
+    out = out.child(row().child(button));
+    let at = crate::guard::ask::Where::Workflow(
+        ed.workflow
+            .clone()
+            .unwrap_or_else(|| crate::flow_editor::TEST_CARD.to_owned()),
+    );
+    out = out.children(super::guard::waiting(s, &at, k));
+    if let Some(why) = &t.notice {
+        out = out.child(
+            text(why.clone())
+                .font(k.ty.small)
+                .color(c.warning.icon)
+                .wrap(),
+        );
+    }
+    if let Some(r) = &t.result {
+        use crate::workflow::engine::Ending;
+        let (words, failure) = match &r.ending {
+            Ending::Succeeded => ("It worked.".to_owned(), None),
+            Ending::Stopped => ("You stopped it.".to_owned(), None),
+            Ending::Failed { step, error } => (
+                "It failed.".to_owned(),
+                Some(format!("Failed at {step}: {error}")),
+            ),
+        };
+        out = out
+            .child(text(words).font(k.ty.small).color(c.text_base))
+            .child(super::workflows::step_log(
+                &r.steps,
+                failure,
+                "wfe-test-log",
+                k,
+            ));
+    }
+    out
 }
 
 fn small(label: &str, variant: ButtonVariant) -> Button {

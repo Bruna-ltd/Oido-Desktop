@@ -679,13 +679,7 @@ impl App {
             Some(sid) => crate::guard::ask::Where::Chat(sid.to_owned()),
             None => crate::guard::ask::Where::Workflow(wf.id.clone()),
         };
-        let mut prep = Prep {
-            asker: self.asker(at, &wf.name),
-            ..self.prepare_flow(agent_id, Some(&wf.id), &wf.definition)?
-        };
-        for member in &mut prep.crew {
-            member.ask_through(&prep.asker);
-        }
+        let prep = self.prep_run(&wf.definition, Some(&wf.id), agent_id, at, &wf.name)?;
         let record = RunRecord {
             id: new_id(),
             workflow_id: wf.id.clone(),
@@ -702,7 +696,7 @@ impl App {
             finished_at: None,
         };
         self.save("the workflow run", |db| db.start_workflow_run(&record));
-        let (def, name) = (wf.definition.clone(), wf.name.clone());
+        let name = wf.name.clone();
         let model = ModelRef::new(&prep.provider, &prep.model);
         let agent_name = self
             .roster
@@ -710,15 +704,12 @@ impl App {
             .map(|a| a.name.clone())
             .unwrap_or_default();
         let agent_id = agent_id.to_owned();
-        self.spawn(
-            move || work(&def, &inputs, &prep, &cancel),
-            move |app, (outcome, renewed, handed)| {
-                for (server, tokens) in renewed {
-                    app.mcp_keep_tokens(&server, tokens, false);
-                }
-                for taken in handed {
-                    app.record_taken(taken);
-                }
+        self.spawn_flow(
+            prep,
+            wf.definition.clone(),
+            inputs,
+            cancel,
+            move |app, outcome| {
                 let mut record = record;
                 let who = Counted {
                     model: &model,
@@ -731,6 +722,69 @@ impl App {
             },
         );
         Ok(())
+    }
+
+    /// Everything a run of `def` by `agent_id` needs, with a rule's questions put to the person
+    /// through a card at `at`, or why it cannot run. `own` is the workflow's id if it is saved;
+    /// `name` is what the card calls it.
+    pub(crate) fn prep_run(
+        &self,
+        def: &Definition,
+        own: Option<&str>,
+        agent_id: &str,
+        at: crate::guard::ask::Where,
+        name: &str,
+    ) -> Result<Prep, String> {
+        let mut prep = Prep {
+            asker: self.asker(at, name),
+            ..self.prepare_flow(agent_id, own, def)?
+        };
+        for member in &mut prep.crew {
+            member.ask_through(&prep.asker);
+        }
+        Ok(prep)
+    }
+
+    /// Runs `def` on a worker. `done` hears the outcome on the UI thread, after the sign-ins MCP
+    /// servers renewed are kept and the tasks handed to team members are filed.
+    pub(crate) fn spawn_flow<D>(
+        &mut self,
+        prep: Prep,
+        def: Definition,
+        inputs: Value,
+        cancel: Arc<AtomicBool>,
+        done: D,
+    ) where
+        D: FnOnce(&mut App, Outcome) + Send + 'static,
+    {
+        self.spawn(
+            move || work(&def, &inputs, &prep, &cancel),
+            move |app, (outcome, renewed, handed)| {
+                for (server, tokens) in renewed {
+                    app.mcp_keep_tokens(&server, tokens, false);
+                }
+                for taken in handed {
+                    app.record_taken(taken);
+                }
+                done(app, outcome);
+            },
+        );
+    }
+
+    /// Counts a run's model calls as `who`'s.
+    pub(crate) fn count_flow_usage(&mut self, at: i64, u: Usage, who: &Counted) {
+        if u.calls == 0 {
+            return;
+        }
+        let t = Totals {
+            calls: u.calls.into(),
+            input: u.input.into(),
+            output: u.output.into(),
+            cache_read: u.cache_read.into(),
+            cache_write: u.cache_write.into(),
+            ..Totals::default()
+        };
+        self.save("the usage", |db| db.add_usage(at, who, &t));
     }
 
     /// Records how a run ended, counts its model calls as `who`'s, and says it in words for an
@@ -769,18 +823,7 @@ impl App {
             }
         };
         self.save("the workflow run", |db| db.finish_workflow_run(record));
-        let u = o.usage;
-        if u.calls > 0 {
-            let t = Totals {
-                calls: u.calls.into(),
-                input: u.input.into(),
-                output: u.output.into(),
-                cache_read: u.cache_read.into(),
-                cache_write: u.cache_write.into(),
-                ..Totals::default()
-            };
-            self.save("the usage", |db| db.add_usage(record.started_at, who, &t));
-        }
+        self.count_flow_usage(record.started_at, o.usage, who);
         if self.route == Route::Workflows {
             self.reload_wf_runs();
         }

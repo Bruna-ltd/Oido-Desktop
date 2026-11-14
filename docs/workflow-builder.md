@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 done** (`try`, MCP tools, taint tracking, `flow`, `delegate`; `http` was left out and is not planned); **P3 started** (`code` built). Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 done** (`try`, MCP tools, taint tracking, `flow`, `delegate`; `http` was left out and is not planned); **P3 started** (`code` and the editor's test run built). Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -265,6 +265,12 @@ is the one non-deterministic tool step and is marked as such.
   programs. Saving compiles it and names the first problem; an undefined name is caught there.
   What it reads counts as the step's inputs for taint, so it cannot launder outside text. There is
   no `input` field: the script reads the values it needs by name.
+- Test run: at the foot of the editor, with one box of `name = value` lines for the inputs (missing
+  ones take their defaults). It runs the workflow as it stands in the editor, saved or not, after
+  the same check as Save, and shows each step nested, as the run page does. It runs for real: the
+  steps use the tools, MCP servers and team members, and the guard asks for a go-ahead on a card in
+  the editor as it would anywhere. Nothing is saved, not the workflow and not the run; its model
+  calls are counted in usage. Stop works; closing or saving the editor stops it and forgets it.
 
 ## Phases
 

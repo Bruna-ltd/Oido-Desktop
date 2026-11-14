@@ -2,9 +2,50 @@
 //! new one, changing what is in it, and saving. The state is [`crate::workflow::editor`]; the
 //! screen is `ui/workflow_editor.rs`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use rune::TextEdit;
+use serde_json::{Map, Value};
+
 use crate::app::{App, now};
 use crate::model::new_id;
+use crate::models::ModelRef;
+use crate::store::Counted;
+use crate::usage::Source;
 use crate::workflow::editor::{Editor, KINDS, Loc, Menu, Place, Target};
+use crate::workflow::engine::{self, Outcome};
+
+/// What a card raised by a test run of a workflow that is not saved yet is filed under.
+pub const TEST_CARD: &str = "workflow-test";
+
+/// The editor's test run of the workflow as it stands, saved or not.
+#[derive(Default)]
+pub struct TestRun {
+    /// What to give it, one per line: `name = value`.
+    pub inputs: TextEdit,
+    /// Stops it, while it runs.
+    pub running: Option<Arc<AtomicBool>>,
+    pub result: Option<Outcome>,
+    pub notice: Option<String>,
+}
+
+impl TestRun {
+    /// The inputs as the workflow takes them, or the line that is not one.
+    fn given(&self) -> Result<Map<String, Value>, String> {
+        let mut given = Map::new();
+        for line in self.inputs.text.lines().filter(|l| !l.trim().is_empty()) {
+            let (name, value) = line.split_once('=').ok_or_else(|| {
+                format!("Write each input as name = value, not {:?}.", line.trim())
+            })?;
+            given.insert(
+                name.trim().to_owned(),
+                Value::String(value.trim().to_owned()),
+            );
+        }
+        Ok(given)
+    }
+}
 
 impl App {
     /// Every agent and team member, by name, with its id.
@@ -26,6 +67,7 @@ impl App {
             .map(|a| a.id.clone())
             .unwrap_or_default();
         self.wf_menu = None;
+        self.reset_test();
         self.wf_editor = Some(Editor::blank(&agent));
     }
 
@@ -41,13 +83,101 @@ impl App {
         if self.wf_jobs.contains_key(&wf.id) {
             return;
         }
+        let ed = Editor::from_saved(wf);
         self.wf_menu = None;
-        self.wf_editor = Some(Editor::from_saved(wf));
+        self.reset_test();
+        self.wf_editor = Some(ed);
     }
 
     pub fn cancel_editor(&mut self) {
         self.wf_editor = None;
         self.wf_menu = None;
+        self.reset_test();
+    }
+
+    /// Ends a test run still going and forgets the last one.
+    fn reset_test(&mut self) {
+        self.stop_test();
+        self.wf_test = TestRun::default();
+    }
+
+    pub fn stop_test(&mut self) {
+        if let Some(flag) = &self.wf_test.running {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Runs the workflow as it stands in the editor, for real, with the inputs given. Nothing is
+    /// saved: not the workflow, and not the run.
+    pub fn test_editor(&mut self) {
+        if self.wf_test.running.is_some() {
+            return;
+        }
+        let Some(ed) = &mut self.wf_editor else {
+            return;
+        };
+        self.wf_test.result = None;
+        self.wf_test.notice = None;
+        ed.check();
+        if !ed.problems.is_empty() {
+            self.wf_test.notice = Some("Fix what is listed above first.".to_owned());
+            return;
+        }
+        let Ok(def) = ed.definition() else {
+            return;
+        };
+        let (agent_id, own) = (ed.agent_id.clone(), ed.workflow.clone());
+        let name = match ed.name.text.trim() {
+            "" => "this workflow".to_owned(),
+            n => n.to_owned(),
+        };
+        let started = self
+            .wf_test
+            .given()
+            .and_then(|given| engine::bind_inputs(&def, &given))
+            .and_then(|inputs| {
+                let at = crate::guard::ask::Where::Workflow(
+                    own.clone().unwrap_or_else(|| TEST_CARD.to_owned()),
+                );
+                let prep = self.prep_run(&def, own.as_deref(), &agent_id, at, &name)?;
+                Ok((inputs, prep))
+            });
+        let (inputs, prep) = match started {
+            Ok(ok) => ok,
+            Err(why) => {
+                self.wf_test.notice = Some(why);
+                return;
+            }
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.wf_test.running = Some(Arc::clone(&cancel));
+        let model = ModelRef::new(&prep.provider, &prep.model);
+        let agent_name = self
+            .roster
+            .agent_ref(&agent_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        let began = now();
+        let flag = Arc::clone(&cancel);
+        self.spawn_flow(prep, def, inputs, cancel, move |app, outcome| {
+            let who = Counted {
+                model: &model,
+                agent_id: &agent_id,
+                agent_name: &agent_name,
+                source: Source::Workflow,
+            };
+            app.count_flow_usage(began, outcome.usage, &who);
+            // Only if it is still the test the editor shows: the editor may have closed.
+            if app
+                .wf_test
+                .running
+                .as_ref()
+                .is_some_and(|f| Arc::ptr_eq(f, &flag))
+            {
+                app.wf_test.running = None;
+                app.wf_test.result = Some(outcome);
+            }
+        });
     }
 
     /// Saves the workflow in the editor if it is good, and closes the editor; otherwise says what
@@ -85,6 +215,7 @@ impl App {
         });
         self.wf_editor = None;
         self.wf_menu = None;
+        self.reset_test();
         self.reload_workflows();
         self.select_workflow(&id);
     }
@@ -396,5 +527,83 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_test_run_runs_the_workflow_as_it_stands_without_saving_it_or_the_run() {
+        let db = TempDb::new();
+        let mut app = on_the_page(&db);
+        app.new_workflow();
+        set(&mut app, &Target::Name, "Echo");
+        app.editor_add_input();
+        set(&mut app, &Target::InputName(0), "word");
+        app.editor_add(&Vec::new(), "Run a tool");
+        set(
+            &mut app,
+            &Target::Field(top(0), 0),
+            r#"{"command": "echo got-{{inputs.word}}"}"#,
+        );
+
+        // Not ready: the box that is not a line, then an input that is missing.
+        app.wf_test.inputs = TextEdit::new("word");
+        app.test_editor();
+        assert!(app.wf_test.running.is_none());
+        assert!(
+            app.wf_test
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("name = value")),
+            "{:?}",
+            app.wf_test.notice
+        );
+        app.wf_test.inputs = TextEdit::new("");
+        app.test_editor();
+        assert!(
+            app.wf_test
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("word"))
+        );
+
+        // A step with a problem is not run.
+        app.wf_test.inputs = TextEdit::new("word = hi");
+        set(&mut app, &Target::Field(top(0), 0), "{not json");
+        app.test_editor();
+        assert!(
+            app.wf_test
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Fix"))
+        );
+        assert!(app.wf_test.result.is_none());
+
+        // Good: it runs for real and shows each step.
+        set(
+            &mut app,
+            &Target::Field(top(0), 0),
+            r#"{"command": "echo got-{{inputs.word}}"}"#,
+        );
+        app.test_editor();
+        assert!(
+            app.wf_test.running.is_none(),
+            "the test worker has finished"
+        );
+        let out = app.wf_test.result.as_ref().unwrap();
+        assert_eq!(out.ending, crate::workflow::engine::Ending::Succeeded);
+        assert!(out.output.contains("got-hi"), "{}", out.output);
+        assert!(app.workflows.is_empty(), "nothing was saved");
+        assert!(
+            app.store
+                .as_ref()
+                .unwrap()
+                .list_workflows()
+                .unwrap()
+                .is_empty()
+        );
+
+        // Closing the editor forgets it.
+        app.cancel_editor();
+        assert!(app.wf_test.result.is_none() && app.wf_test.inputs.text.is_empty());
     }
 }

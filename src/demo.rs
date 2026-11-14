@@ -1294,6 +1294,22 @@ pub static SCENES: &[Scene] = &[
             s.wf_editor = Some(Editor::from_saved(w));
         }
     }),
+    ("workflow-test", |s| {
+        use crate::workflow::editor::Editor;
+        use crate::workflow::engine::{Ending, Outcome, Usage};
+        nested_workflow(s);
+        if let Some(w) = s.workflows.first() {
+            s.wf_editor = Some(Editor::from_saved(w));
+        }
+        let steps = s.wf_runs.first().map(|r| r.steps.clone()).unwrap_or_default();
+        s.wf_test.inputs = rune::TextEdit::new("folder = notes");
+        s.wf_test.result = Some(Outcome {
+            ending: Ending::Succeeded,
+            output: String::new(),
+            steps,
+            usage: Usage::default(),
+        });
+    }),
     ("draft", |s| {
         use crate::workflow::Draft;
         use crate::workflow::definition::{Definition, Step};
