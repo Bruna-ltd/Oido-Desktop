@@ -1267,6 +1267,7 @@ pub static SCENES: &[Scene] = &[
                 output_tokens: 60,
                 started_at: app::now() - 300,
                 finished_at: None,
+                pause: None,
             },
             RunRecord {
                 id: "r2".into(),
@@ -1282,6 +1283,7 @@ pub static SCENES: &[Scene] = &[
                 output_tokens: 0,
                 started_at: app::now() - 90000,
                 finished_at: None,
+                pause: None,
             },
         ];
         s.route = Route::Workflows;
@@ -1294,6 +1296,19 @@ pub static SCENES: &[Scene] = &[
             s.wf_editor = Some(Editor::from_saved(w));
         }
     }),
+    ("workflow-waiting", |s| {
+        use crate::workflow::{Pause, RunStatus};
+        nested_workflow(s);
+        if let Some(r) = s.wf_runs.first_mut() {
+            r.status = RunStatus::Waiting;
+            r.finished_at = None;
+            r.pause = Some(Pause {
+                step: "ok".into(),
+                prompt: "Move 3 files into docs/ and pictures/?".into(),
+                until: None,
+            });
+        }
+    }),
     ("workflow-test", |s| {
         use crate::workflow::editor::Editor;
         use crate::workflow::engine::{Ending, Outcome, Usage};
@@ -1301,13 +1316,18 @@ pub static SCENES: &[Scene] = &[
         if let Some(w) = s.workflows.first() {
             s.wf_editor = Some(Editor::from_saved(w));
         }
-        let steps = s.wf_runs.first().map(|r| r.steps.clone()).unwrap_or_default();
+        let steps = s
+            .wf_runs
+            .first()
+            .map(|r| r.steps.clone())
+            .unwrap_or_default();
         s.wf_test.inputs = rune::TextEdit::new("folder = notes");
         s.wf_test.result = Some(Outcome {
             ending: Ending::Succeeded,
             output: String::new(),
             steps,
             usage: Usage::default(),
+            snapshot: None,
         });
     }),
     ("draft", |s| {
@@ -1729,6 +1749,7 @@ fn nested_workflow(s: &mut App) {
         output_tokens: 0,
         started_at: app::now() - 300,
         finished_at: Some(app::now() - 290),
+        pause: None,
     }];
     s.workflows = vec![w.clone()];
     s.wf_open = Some("w1".into());

@@ -9,6 +9,7 @@ use rune::TextEdit;
 use serde_json::{Map, Value};
 
 use crate::app::{App, now};
+use crate::flows::Go;
 use crate::model::new_id;
 use crate::models::ModelRef;
 use crate::store::Counted;
@@ -159,7 +160,7 @@ impl App {
             .unwrap_or_default();
         let began = now();
         let flag = Arc::clone(&cancel);
-        self.spawn_flow(prep, def, inputs, cancel, move |app, outcome| {
+        self.spawn_flow(prep, def, Go::Fresh(inputs), cancel, move |app, outcome| {
             let who = Counted {
                 model: &model,
                 agent_id: &agent_id,

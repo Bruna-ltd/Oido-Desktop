@@ -179,6 +179,12 @@ fn test_run(s: &App, ed: &Editor, k: &Kit) -> El {
         let (words, failure) = match &r.ending {
             Ending::Succeeded => ("It worked.".to_owned(), None),
             Ending::Stopped => ("You stopped it.".to_owned(), None),
+            Ending::Waiting { prompt, .. } => (
+                format!(
+                    "It reached a wait ({prompt}). A test does not wait for an answer, so it stops here."
+                ),
+                None,
+            ),
             Ending::Failed { step, error } => (
                 "It failed.".to_owned(),
                 Some(format!("Failed at {step}: {error}")),

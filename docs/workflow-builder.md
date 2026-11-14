@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 done** (`try`, MCP tools, taint tracking, `flow`, `delegate`; `http` was left out and is not planned); **P3 started** (`code` and the editor's test run built). Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 done** (`try`, MCP tools, taint tracking, `flow`, `delegate`; `http` was left out and is not planned); **P3 started** (`code`, the editor's test run, and `wait` built; `parallel` not). Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -271,6 +271,28 @@ is the one non-deterministic tool step and is marked as such.
   steps use the tools, MCP servers and team members, and the guard asks for a go-ahead on a card in
   the editor as it would anywhere. Nothing is saved, not the workflow and not the run; its model
   calls are counted in usage. Stop works; closing or saving the editor stops it and forgets it.
+- `wait`: `seconds` (1 to 604 800, a week) or `approve` (text, `{{...}}` allowed), not both. Up to
+  120 seconds is waited out where the run is, and Stop ends it. A longer delay, or any approval,
+  pauses the run: it unwinds, each level leaving a frame (`workflow/pause.rs`: which step of which
+  list, the loop's items and round and results so far, the `try`'s attempt, the branch taken, the
+  `flow` it was in, and what was bound there), and the frames with the step log, usage and the names
+  held as outside text make a snapshot. Resuming walks the frames back down, so steps before the wait
+  never run again and the log keeps one line per step. Approved (or the delay over), the wait's
+  value is `{approved: true}` or `{waited: n}`; declined, the step fails with "You declined this
+  step.", which a `try` around it can catch. A wait inside a catch, loop, branch or another workflow
+  works the same.
+- Where a pause is kept: not in the run's status. SQLite cannot change a `CHECK` without rebuilding
+  the table, and rebuilding `workflow_runs` would clear the links schedules keep to it. So a paused
+  run stays `running` and has a row in `workflow_waits` (migration 023): the snapshot, what it
+  asks, when a delay ends, and the steps it was running, so editing the workflow meanwhile does not
+  change it. Start-up does not mark such a run as cut off, and the 30-day clean-up keeps it. Workflows
+  it runs through `flow` are looked up as they are now; if one changed so that the saved position no
+  longer fits, the run fails saying the workflow was changed.
+- Answering: on the Workflows page a waiting run shows what it asks with Approve, Decline and Stop
+  it (Go on now, for a delay). The half-minute tick goes on by itself with delays that are over.
+  A run an agent or a schedule started tells them it paused and that what it makes later does not
+  come back to them. A wait in the editor's test run stops the test there and says so. Model calls
+  are counted for each stretch of a run, so a resumed run is not counted twice.
 
 ## Phases
 
@@ -281,7 +303,7 @@ validate, delete, open a taught draft). No new tools.
 **P2 — recovery and reach (built, except `http`, which was left out: a tool step can already fetch pages, and an MCP server covers other APIs).** `try` with retry and catch; `http`; MCP tools in `tool` steps;
 `flow`; `delegate`.
 
-**P3 — concurrency and humans.** `parallel`; `code`; `wait` with approval and persisted runs
+**P3 — concurrency and humans (`code`, `wait`, test run built; `parallel` not).** `parallel`; `code`; `wait` with approval and persisted runs
 (migration, pending list, resume); test-run from the editor with inputs and per-step output.
 
 Each phase ships alone and leaves workflows that ran before running the same.

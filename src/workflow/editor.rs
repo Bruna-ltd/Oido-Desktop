@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::Saved;
 use super::definition::{
     CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input, SET, STEP_TOOLS,
-    SWITCH, Step, TOOL, TRY, WHILE, each_step, validate,
+    SWITCH, Step, TOOL, TRY, WAIT, WHILE, each_step, validate,
 };
 
 /// How a text box is checked and what can be put into it.
@@ -142,6 +142,23 @@ static CODE_BOXES: [Spec; 1] = [spec(
     Refs::Bare,
 )];
 
+static WAIT_BOXES: [Spec; 2] = [
+    spec(
+        "seconds",
+        "Wait this many seconds (a long wait is saved, and the run goes on when it is over)",
+        "3600",
+        1,
+        Refs::None,
+    ),
+    spec(
+        "approve",
+        "Or ask you first (shown with Approve and Decline)",
+        "Send the report to {{inputs.who}}?",
+        2,
+        Refs::Braces,
+    ),
+];
+
 /// The text boxes each kind of step has, in order.
 pub fn specs(kind: &str) -> &'static [Spec] {
     match kind {
@@ -156,12 +173,13 @@ pub fn specs(kind: &str) -> &'static [Spec] {
         TRY => &TRY_BOXES,
         FLOW => &FLOW_BOXES,
         CODE => &CODE_BOXES,
+        WAIT => &WAIT_BOXES,
         _ => &[],
     }
 }
 
 /// The kinds of step a person can add, in the order the menu lists them.
-pub const KINDS: [(&str, &str); 11] = [
+pub const KINDS: [(&str, &str); 12] = [
     (TOOL, "Run a tool"),
     (GENERATE, "Write with the model"),
     (DECIDE, "Let the model choose"),
@@ -173,6 +191,7 @@ pub const KINDS: [(&str, &str); 11] = [
     (TRY, "Try, and recover"),
     (FLOW, "Run another workflow"),
     (CODE, "Run a script"),
+    (WAIT, "Wait or ask first"),
 ];
 
 /// What a list of steps inside a step is for.
@@ -360,6 +379,13 @@ impl Node {
                 n.blocks[1].steps = s.catch.iter().map(Node::from_step).collect();
             }
             CODE => n.set_field("script", text(&s.script)),
+            WAIT => {
+                n.set_field(
+                    "seconds",
+                    s.seconds.map(|n| n.to_string()).unwrap_or_default(),
+                );
+                n.set_field("approve", text(&s.approve));
+            }
             FLOW => {
                 n.set_field("workflow", text(&s.workflow));
                 let given = s.inputs.clone().unwrap_or_default();
@@ -467,6 +493,15 @@ impl Node {
                 s.catch = steps(&self.blocks[1], bad, at);
             }
             CODE => s.script = get("script"),
+            WAIT => {
+                s.approve = get("approve");
+                if let Some(n) = get("seconds") {
+                    match n.trim().parse::<u32>() {
+                        Ok(n) => s.seconds = Some(n),
+                        Err(_) => bad.push(format!("step {at}: the seconds are a whole number")),
+                    }
+                }
+            }
             FLOW => {
                 s.workflow = get("workflow").map(|w| w.trim().to_owned());
                 if let Some(text) = get("inputs") {
@@ -889,7 +924,9 @@ mod tests {
                  "catch": [{"id": "note", "kind": "generate", "instruction": "Push failed: {{error}}"}]},
                 {"id": "sub", "kind": "flow", "workflow": "Weekly report", "bind": "report",
                  "inputs": {"folder": "{{inputs.folder}}"}},
-                {"id": "calc", "kind": "code", "bind": "sum", "script": "let t = 0;\nfor i in [1, 2] { t += i; }\nt"}
+                {"id": "calc", "kind": "code", "bind": "sum", "script": "let t = 0;\nfor i in [1, 2] { t += i; }\nt"},
+                {"id": "ok", "kind": "wait", "approve": "Send {{sum}} on?"},
+                {"id": "nap", "kind": "wait", "seconds": 3600}
             ],
             "success": "All done."
         })
@@ -908,7 +945,7 @@ mod tests {
                     .definition()
                     .unwrap()
             ),
-            18
+            20
         );
     }
 

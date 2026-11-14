@@ -22,9 +22,10 @@ pub const SET: &str = "set";
 pub const TRY: &str = "try";
 pub const FLOW: &str = "flow";
 pub const CODE: &str = "code";
+pub const WAIT: &str = "wait";
 
-const KINDS: [&str; 11] = [
-    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY, FLOW, CODE,
+const KINDS: [&str; 12] = [
+    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY, FLOW, CODE, WAIT,
 ];
 
 /// The tools a workflow step may call. A flow runs on its own, so it cannot stop to ask you.
@@ -50,6 +51,11 @@ pub const MAX_RETRIES: u32 = 10;
 pub const MAX_BACKOFF_MS: u32 = 60_000;
 /// How deep workflows may call each other.
 pub const MAX_FLOW_DEPTH: usize = 5;
+/// A delay up to this long is waited out where the run is; a longer one is saved and the run goes
+/// on when it is over, even after the app has been closed.
+pub const INLINE_WAIT: u32 = 120;
+/// The longest a `wait` may be, in seconds: a week.
+pub const MAX_WAIT: u32 = 604_800;
 
 /// Names a step may not bind: they mean something inside a body.
 const RESERVED: [&str; 4] = ["inputs", "item", "index", "error"];
@@ -156,6 +162,11 @@ pub struct Step {
     // code: a script over what is in scope; its last value is the result
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
+    // wait: a delay in seconds, or a question to answer before going on
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approve: Option<String>,
 }
 
 impl Step {
@@ -169,7 +180,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 24] = [
+        let fields: [(&str, bool); 26] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -194,6 +205,8 @@ impl Step {
             ("workflow", self.workflow.is_some()),
             ("inputs", self.inputs.is_some()),
             ("script", self.script.is_some()),
+            ("seconds", self.seconds.is_some()),
+            ("approve", self.approve.is_some()),
         ];
         fields
             .into_iter()
@@ -216,6 +229,7 @@ fn takes(kind: &str) -> &'static [&'static str] {
         TRY => &["retries", "backoff_ms", "steps", "catch"],
         FLOW => &["workflow", "inputs"],
         CODE => &["script"],
+        WAIT => &["seconds", "approve"],
         _ => &[],
     }
 }
@@ -565,6 +579,21 @@ impl Check<'_> {
                     );
                 }
             }
+            WAIT => match (s.seconds, s.approve.as_deref().map(str::trim)) {
+                (Some(_), Some(_)) => self
+                    .bad
+                    .push(format!("{at}: a wait is a delay or an approval, not both")),
+                (None, None | Some("")) => self.bad.push(format!(
+                    "{at}: a wait needs seconds to wait, or text to ask you before going on"
+                )),
+                (Some(n), None) if n == 0 || n > MAX_WAIT => self
+                    .bad
+                    .push(format!("{at}: seconds is 1 to {MAX_WAIT}, a week")),
+                (Some(_), None) => {}
+                (None, Some(_)) => refs.extend(template::find_refs(
+                    s.approve.as_deref().unwrap_or_default(),
+                )),
+            },
             CODE => {
                 let names = Self::names(vis, &[]);
                 match s.script.as_deref() {
@@ -703,7 +732,7 @@ pub fn reads(s: &Step) -> BTreeSet<String> {
     for given in [&s.args, &s.inputs].into_iter().flatten() {
         template::refs_in(&Value::Object(given.clone()), &mut refs);
     }
-    for t in [&s.instruction, &s.input].into_iter().flatten() {
+    for t in [&s.instruction, &s.input, &s.approve].into_iter().flatten() {
         refs.extend(template::find_refs(t));
     }
     let mut out = BTreeSet::new();
@@ -813,6 +842,10 @@ pub fn describe(s: &Step) -> String {
         },
         FLOW => format!("Run the workflow {}", text(&s.workflow)),
         CODE => format!("Script: {}", text(&s.script)),
+        WAIT => match s.seconds {
+            Some(n) => format!("Wait {}", super::pause::span(n)),
+            None => format!("Wait for your approval: {}", text(&s.approve)),
+        },
         SET => format!(
             "Set {}",
             s.values
@@ -1139,6 +1172,37 @@ mod tests {
             {"id": "b", "kind": "set", "bind": "later", "values": {"v": "1"}}
         ]}));
         for expected in ["later", "script:", "needs a script"] {
+            assert!(why.contains(expected), "missing {expected:?} in {why}");
+        }
+    }
+
+    #[test]
+    fn a_wait_is_a_delay_or_an_approval_with_text_that_may_only_look_back() {
+        let ok = def(json!({"steps": [
+            {"id": "a", "kind": "set", "bind": "x", "values": {"v": "1"}},
+            {"id": "ask", "kind": "wait", "approve": "Go on with {{x.v}}?"},
+            {"id": "nap", "kind": "wait", "seconds": 90}
+        ]}));
+        assert_eq!(validate(&ok), Ok(()));
+        assert_eq!(
+            describe(&ok.steps[1]),
+            "Wait for your approval: Go on with {{x.v}}?"
+        );
+        assert_eq!(describe(&ok.steps[2]), "Wait 90 seconds");
+        let why = problems(json!({"steps": [
+            {"id": "a", "kind": "wait"},
+            {"id": "b", "kind": "wait", "seconds": 5, "approve": "ok?"},
+            {"id": "c", "kind": "wait", "seconds": 0},
+            {"id": "d", "kind": "wait", "seconds": 700000},
+            {"id": "e", "kind": "wait", "approve": "{{later}}?"},
+            {"id": "f", "kind": "set", "bind": "later", "values": {"v": "1"}}
+        ]}));
+        for expected in [
+            "a delay or an approval",
+            "needs seconds",
+            "1 to 604800",
+            "later",
+        ] {
             assert!(why.contains(expected), "missing {expected:?} in {why}");
         }
     }

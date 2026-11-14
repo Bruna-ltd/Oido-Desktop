@@ -4,7 +4,7 @@
 //! expression. A step that fails ends the run, and the run says which and why: the engine never
 //! improvises.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,11 +13,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::definition::{
-    CODE, CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FLOW, FOR_EACH, GENERATE, IF,
-    MAX_FLOW_DEPTH, MAX_ROUNDS, SET, SWITCH, Step, TOOL, TRY, WHILE, branch, case_branch, child,
-    describe, reads,
+    CODE, CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FLOW, FOR_EACH, GENERATE, IF, INLINE_WAIT,
+    MAX_FLOW_DEPTH, MAX_ROUNDS, SET, SWITCH, Step, TOOL, TRY, WAIT, WHILE, branch, case_branch,
+    child, describe, reads,
 };
 use super::expr::Evaluator;
+use super::pause::{Decision, Frame, Snapshot, intern, span, unix_now};
 use super::template::{self, Scope};
 use crate::runs::clip;
 
@@ -44,6 +45,17 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// What was used since `earlier`, which is a count taken from the same run before.
+    pub fn since(self, earlier: Usage) -> Usage {
+        Usage {
+            calls: self.calls.saturating_sub(earlier.calls),
+            input: self.input.saturating_sub(earlier.input),
+            output: self.output.saturating_sub(earlier.output),
+            cache_read: self.cache_read.saturating_sub(earlier.cache_read),
+            cache_write: self.cache_write.saturating_sub(earlier.cache_write),
+        }
+    }
+
     pub fn add(&mut self, more: Usage) {
         self.calls += more.calls;
         self.input += more.input;
@@ -134,6 +146,13 @@ pub enum Ending {
     },
     /// You stopped it.
     Stopped,
+    /// It is waiting at `step`: for you to answer `prompt`, or until `until` (seconds since the
+    /// epoch) for a long delay. See [`Outcome::snapshot`].
+    Waiting {
+        step: String,
+        prompt: String,
+        until: Option<i64>,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -143,6 +162,8 @@ pub struct Outcome {
     pub output: String,
     pub steps: Vec<StepLog>,
     pub usage: Usage,
+    /// Where a waiting run stands, to go on from with [`resume`].
+    pub snapshot: Option<Snapshot>,
 }
 
 /// The values a run starts with: what was given, else each input's default. A required input that
@@ -252,8 +273,17 @@ fn pick(options: &[String], answer: &str) -> Option<String> {
 
 /// Why a block stopped before its end.
 enum Halt {
-    Failed { step: String, error: String },
+    Failed {
+        step: String,
+        error: String,
+    },
     Stopped,
+    /// The run is pausing at `step`; each level it unwinds through leaves a frame.
+    Waiting {
+        step: String,
+        prompt: String,
+        until: Option<i64>,
+    },
 }
 
 /// The state of one run.
@@ -273,6 +303,12 @@ struct Run<'a, 'e> {
     steered: Option<&'static str>,
     /// The ids of the workflows being run inside one another, outermost first.
     flows: Vec<String>,
+    /// Frames left by a pause as it unwinds, innermost first.
+    frames: Vec<Frame>,
+    /// Frames of a run being resumed, outermost first, taken as the walk goes back down them.
+    resume: VecDeque<Frame>,
+    /// What was answered to the step the resume ends at.
+    decision: Option<Decision>,
 }
 
 /// Whether two values are the same, a whole number and the same number written with a point
@@ -313,10 +349,34 @@ impl Run<'_, '_> {
         }
     }
 
+    /// What a resume finds when the workflow is not what it paused in.
+    fn changed(&self) -> Halt {
+        Halt::Failed {
+            step: String::new(),
+            error: "The workflow was changed while this waited, so it cannot go on.".to_owned(),
+        }
+    }
+
     /// The steps of a block in order, each seeing what the ones before bound. The value of the last.
+    /// A resumed run enters at the step it paused in, with what was bound by then.
     fn block(&mut self, steps: &[Step], at: &str, scope: &mut Scope) -> Result<Value, Halt> {
         let mut last = Value::Null;
-        for (i, step) in steps.iter().enumerate() {
+        let mut start = 0;
+        let mut resumed = false;
+        if matches!(self.resume.front(), Some(Frame::Block { .. })) {
+            let Some(Frame::Block {
+                at: index,
+                scope: saved,
+            }) = self.resume.pop_front()
+            else {
+                return Err(self.changed());
+            };
+            if index >= steps.len() {
+                return Err(self.changed());
+            }
+            (start, *scope, resumed) = (index, saved, true);
+        }
+        for (i, step) in steps.iter().enumerate().skip(start) {
             if self.stopped() {
                 return Err(Halt::Stopped);
             }
@@ -327,29 +387,54 @@ impl Run<'_, '_> {
                     format!("A run may take at most {MAX_EXECUTIONS} steps, those in loops counted each time."),
                 ));
             }
-            last = self.step(step, &child(at, i), scope)?;
+            match self.step(step, &child(at, i), scope, resumed && i == start) {
+                Ok(v) => last = v,
+                Err(halt @ Halt::Waiting { .. }) => {
+                    self.frames.push(Frame::Block {
+                        at: i,
+                        scope: scope.clone(),
+                    });
+                    return Err(halt);
+                }
+                Err(halt) => return Err(halt),
+            }
         }
         Ok(last)
     }
 
-    fn step(&mut self, step: &Step, at: &str, scope: &mut Scope) -> Result<Value, Halt> {
+    /// One step. `again` is set for the step a resumed run paused in: its line in the log is
+    /// already there.
+    fn step(
+        &mut self,
+        step: &Step,
+        at: &str,
+        scope: &mut Scope,
+        again: bool,
+    ) -> Result<Value, Halt> {
         // A container's result is what its steps made; only a step that makes a value of its own
         // is the run's latest output.
         let container = matches!(
             step.kind.as_str(),
             IF | SWITCH | FOR_EACH | WHILE | TRY | FLOW
         );
-        let slot = self.out.steps.len();
-        self.out.steps.push(StepLog {
-            id: step.id.clone(),
-            kind: step.kind.clone(),
-            what: describe(step),
-            output: String::new(),
-            error: None,
-            ms: 0,
-            path: at.to_owned(),
-            rounds: self.rounds.clone(),
-        });
+        let slot = if again {
+            match self.resume.pop_front() {
+                Some(Frame::Step { slot }) if slot < self.out.steps.len() => slot,
+                _ => return Err(self.changed()),
+            }
+        } else {
+            self.out.steps.push(StepLog {
+                id: step.id.clone(),
+                kind: step.kind.clone(),
+                what: describe(step),
+                output: String::new(),
+                error: None,
+                ms: 0,
+                path: at.to_owned(),
+                rounds: self.rounds.clone(),
+            });
+            self.out.steps.len() - 1
+        };
         let began = Instant::now();
         // What this step reads that is outside text, and so what it makes is.
         let from_input = reads(step)
@@ -359,7 +444,9 @@ impl Run<'_, '_> {
         if matches!(step.kind.as_str(), IF | SWITCH) {
             self.steered = self.steered.or(from_input);
         }
-        let result = if container || step.kind == SET {
+        let result = if step.kind == WAIT {
+            self.wait(step, scope, again)
+        } else if container || step.kind == SET {
             self.container(step, at, scope, slot)
         } else {
             self.leaf(step, scope, from_input)
@@ -391,19 +478,126 @@ impl Run<'_, '_> {
                 Ok(value)
             }
             Err(halt) => {
-                if let Halt::Failed { step: id, error } = &halt
-                    && *id == step.id
-                {
-                    log.error = Some(error.clone());
+                match &halt {
+                    Halt::Failed { step: id, error } if *id == step.id => {
+                        log.error = Some(error.clone());
+                    }
+                    Halt::Waiting {
+                        step: id, prompt, ..
+                    } if *id == step.id => {
+                        log.output = prompt.clone();
+                    }
+                    _ => {}
+                }
+                if matches!(halt, Halt::Waiting { .. }) {
+                    self.frames.push(Frame::Step { slot });
                 }
                 Err(halt)
             }
         }
     }
 
+    /// A `wait`: a short delay is waited out here; a long one, or an approval, pauses the run. A
+    /// resumed run comes back to it with the answer.
+    fn wait(&mut self, step: &Step, scope: &Scope, again: bool) -> Result<Value, Halt> {
+        if again {
+            let said = self.decision.take();
+            if said == Some(Decision::Declined) {
+                return Err(self.fail(step, "You declined this step.".to_owned()));
+            }
+            return Ok(match step.seconds {
+                Some(n) => json!({"waited": n}),
+                None => json!({"approved": true}),
+            });
+        }
+        let pausing = |prompt: String, until| Halt::Waiting {
+            step: step.id.clone(),
+            prompt,
+            until,
+        };
+        match (step.seconds, step.approve.as_deref()) {
+            (Some(n), _) if n <= INLINE_WAIT => {
+                self.pause(Duration::from_secs(u64::from(n)));
+                if self.stopped() {
+                    return Err(Halt::Stopped);
+                }
+                Ok(json!({"waited": n}))
+            }
+            (Some(n), _) => Err(pausing(
+                format!("Wait {}", span(n)),
+                Some(unix_now() + i64::from(n)),
+            )),
+            (None, Some(text)) => {
+                let prompt =
+                    template::render(scope, text, &self.eval).map_err(|e| self.fail(step, e))?;
+                Err(pausing(prompt, None))
+            }
+            (None, None) => Err(self.fail(step, "A wait needs seconds or text to ask.".to_owned())),
+        }
+    }
+
     /// A body run in a scope of its own: what it binds does not outlast it.
     fn inside(&mut self, steps: &[Step], at: &str, scope: &Scope) -> Result<Value, Halt> {
         self.block(steps, at, &mut scope.clone())
+    }
+
+    /// The catch steps of a `try` that has failed `attempt` times, seeing `error` (when it is
+    /// resumed in them, the scope it paused with already has it).
+    fn catch(
+        &mut self,
+        step: &Step,
+        at: &str,
+        scope: &Scope,
+        attempt: u32,
+        error: Option<String>,
+    ) -> Result<Value, Halt> {
+        let mut inner = scope.clone();
+        if let Some(error) = error {
+            inner.insert("error".to_owned(), Value::String(error));
+        }
+        let done = self.block(&step.catch, &branch(at, "catch"), &mut inner);
+        if matches!(done, Err(Halt::Waiting { .. })) {
+            self.frames.push(Frame::Attempt {
+                attempt,
+                catching: true,
+            });
+        }
+        done
+    }
+
+    /// Which list of an `if` or `switch` runs: `then`, `else`, `caseN` or `default`.
+    fn choose(
+        &mut self,
+        step: &Step,
+        scope: &Scope,
+        said: &impl Fn(&mut Self, String),
+    ) -> Result<String, Halt> {
+        let wrong = |run: &Self, why: String| run.fail(step, why);
+        if step.kind == IF {
+            let cond = step.cond.as_deref().unwrap_or_default();
+            let yes = self
+                .eval
+                .eval_bool(scope, cond)
+                .map_err(|e| wrong(self, e))?;
+            said(self, if yes { "then" } else { "otherwise" }.to_owned());
+            return Ok(if yes { "then" } else { "else" }.to_owned());
+        }
+        let on = self
+            .eval
+            .eval(scope, step.on.as_deref().unwrap_or_default())
+            .map_err(|e| wrong(self, e))?;
+        for (n, case) in step.cases.iter().enumerate() {
+            let when = self
+                .eval
+                .eval(scope, &case.when)
+                .map_err(|e| wrong(self, e))?;
+            if same(&on, &when) {
+                said(self, format!("case {}", n + 1));
+                return Ok(case_branch(n));
+            }
+        }
+        said(self, "otherwise".to_owned());
+        Ok("default".to_owned())
     }
 
     fn container(
@@ -415,75 +609,79 @@ impl Run<'_, '_> {
     ) -> Result<Value, Halt> {
         let said = |run: &mut Self, text: String| run.out.steps[slot].output = text;
         let wrong = |run: &Self, why: String| run.fail(step, why);
+        // A resumed run arrives with the frame this step left when it paused.
+        let back = self.resume.pop_front();
         match step.kind.as_str() {
-            IF => {
-                let cond = step.cond.as_deref().unwrap_or_default();
-                let yes = self
-                    .eval
-                    .eval_bool(scope, cond)
-                    .map_err(|e| wrong(self, e))?;
-                said(self, if yes { "then" } else { "otherwise" }.to_owned());
-                let (body, name) = if yes {
-                    (&step.then, "then")
-                } else {
-                    (&step.otherwise, "else")
+            IF | SWITCH => {
+                let name = match back {
+                    Some(Frame::Branch { name }) => name,
+                    Some(_) => return Err(self.changed()),
+                    None => self.choose(step, scope, &said)?,
                 };
-                self.inside(body, &branch(at, name), scope)
-            }
-            SWITCH => {
-                let on = self
-                    .eval
-                    .eval(scope, step.on.as_deref().unwrap_or_default())
-                    .map_err(|e| wrong(self, e))?;
-                for (n, case) in step.cases.iter().enumerate() {
-                    let when = self
-                        .eval
-                        .eval(scope, &case.when)
-                        .map_err(|e| wrong(self, e))?;
-                    if same(&on, &when) {
-                        said(self, format!("case {}", n + 1));
-                        return self.inside(&case.steps, &branch(at, &case_branch(n)), scope);
-                    }
+                let body = match (step.kind.as_str(), name.as_str()) {
+                    (IF, "then") => &step.then,
+                    (IF, "else") => &step.otherwise,
+                    (SWITCH, "default") => &step.default,
+                    (SWITCH, case) => case
+                        .strip_prefix("case")
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .and_then(|n| step.cases.get(n))
+                        .map(|c| &c.steps)
+                        .ok_or_else(|| self.changed())?,
+                    _ => return Err(self.changed()),
+                };
+                let done = self.inside(body, &branch(at, &name), scope);
+                if matches!(done, Err(Halt::Waiting { .. })) {
+                    self.frames.push(Frame::Branch { name });
                 }
-                said(self, "otherwise".to_owned());
-                self.inside(&step.default, &branch(at, "default"), scope)
+                done
             }
             FOR_EACH => {
-                let over = self
-                    .eval
-                    .eval(scope, step.over.as_deref().unwrap_or_default())
-                    .map_err(|e| wrong(self, e))?;
-                let Value::Array(items) = over else {
-                    return Err(wrong(
-                        self,
-                        format!(
-                            "for_each goes over a list, not {}",
-                            template::as_text(&over)
-                        ),
-                    ));
+                let (items, first, mut results, mut failed) = match back {
+                    Some(Frame::Each {
+                        items,
+                        n,
+                        results,
+                        failed,
+                    }) => (items, n, results, failed),
+                    Some(_) => return Err(self.changed()),
+                    None => {
+                        let over = self
+                            .eval
+                            .eval(scope, step.over.as_deref().unwrap_or_default())
+                            .map_err(|e| wrong(self, e))?;
+                        let Value::Array(items) = over else {
+                            return Err(wrong(
+                                self,
+                                format!(
+                                    "for_each goes over a list, not {}",
+                                    template::as_text(&over)
+                                ),
+                            ));
+                        };
+                        if items.len() > MAX_ROUNDS as usize {
+                            return Err(wrong(
+                                self,
+                                format!(
+                                    "{} items is more than the {MAX_ROUNDS} a loop may go over",
+                                    items.len()
+                                ),
+                            ));
+                        }
+                        // A list made from outside text, and so every round of it.
+                        if let Some(why) = reads(step)
+                            .iter()
+                            .find_map(|name| self.tainted.get(name).copied())
+                        {
+                            self.steered = self.steered.or(Some(why));
+                            self.tainted.insert(step.item_name().to_owned(), why);
+                        }
+                        (items, 0, Vec::new(), 0)
+                    }
                 };
-                if items.len() > MAX_ROUNDS as usize {
-                    return Err(wrong(
-                        self,
-                        format!(
-                            "{} items is more than the {MAX_ROUNDS} a loop may go over",
-                            items.len()
-                        ),
-                    ));
-                }
-                // A list made from outside text, and so every round of it.
-                if let Some(why) = reads(step)
-                    .iter()
-                    .find_map(|name| self.tainted.get(name).copied())
-                {
-                    self.steered = self.steered.or(Some(why));
-                    self.tainted.insert(step.item_name().to_owned(), why);
-                }
                 let go_on = step.on_error.as_deref() == Some(CONTINUE);
                 let body = branch(at, "body");
-                let mut results = Vec::with_capacity(items.len());
-                let mut failed = 0;
-                for (n, item) in items.iter().enumerate() {
+                for (n, item) in items.iter().enumerate().skip(first) {
                     self.rounds.push(n as u32 + 1);
                     let mut inner = scope.clone();
                     inner.insert(step.item_name().to_owned(), item.clone());
@@ -495,6 +693,15 @@ impl Run<'_, '_> {
                         Err(Halt::Failed { .. }) if go_on => {
                             failed += 1;
                             results.push(Value::Null);
+                        }
+                        Err(halt @ Halt::Waiting { .. }) => {
+                            self.frames.push(Frame::Each {
+                                items: items.clone(),
+                                n,
+                                results,
+                                failed,
+                            });
+                            return Err(halt);
                         }
                         Err(halt) => return Err(halt),
                     }
@@ -513,14 +720,24 @@ impl Run<'_, '_> {
                 let max = step.max.unwrap_or(DEFAULT_ROUNDS);
                 let body = branch(at, "body");
                 let mut inner = scope.clone();
-                let mut results = Vec::new();
-                let mut round = 0u32;
+                let (mut round, mut results) = match back {
+                    Some(Frame::Loop { round, results }) => (round, results),
+                    Some(_) => return Err(self.changed()),
+                    None => (0u32, Vec::new()),
+                };
                 loop {
                     inner.insert("index".to_owned(), json!(round));
                     self.rounds.push(round + 1);
                     let done = self.block(&step.steps, &body, &mut inner);
                     self.rounds.pop();
-                    results.push(done?);
+                    match done {
+                        Ok(v) => results.push(v),
+                        Err(halt @ Halt::Waiting { .. }) => {
+                            self.frames.push(Frame::Loop { round, results });
+                            return Err(halt);
+                        }
+                        Err(halt) => return Err(halt),
+                    }
                     round += 1;
                     let again = self
                         .eval
@@ -548,7 +765,17 @@ impl Run<'_, '_> {
                 let retries = step.retries.unwrap_or(0);
                 let pause = Duration::from_millis(u64::from(step.backoff_ms.unwrap_or(0)));
                 let body = branch(at, "body");
-                let mut attempt = 0;
+                let (mut attempt, catching) = match back {
+                    Some(Frame::Attempt { attempt, catching }) => (attempt, catching),
+                    Some(_) => return Err(self.changed()),
+                    None => (1, false),
+                };
+                // The attempt numbers itself at the top of the loop, so a resume steps back one.
+                attempt -= 1;
+                if catching {
+                    attempt += 1;
+                    return self.catch(step, at, scope, attempt, None);
+                }
                 let failure = loop {
                     attempt += 1;
                     match self.inside(&step.steps, &body, scope) {
@@ -564,6 +791,13 @@ impl Run<'_, '_> {
                             return Ok(v);
                         }
                         Err(Halt::Failed { .. }) if attempt <= retries => self.pause(pause),
+                        Err(halt @ Halt::Waiting { .. }) => {
+                            self.frames.push(Frame::Attempt {
+                                attempt,
+                                catching: false,
+                            });
+                            return Err(halt);
+                        }
                         Err(halt) => break halt,
                     }
                 };
@@ -577,9 +811,8 @@ impl Run<'_, '_> {
                 if let Some(why) = self.touched {
                     self.tainted.insert("error".to_owned(), why);
                 }
-                let mut inner = scope.clone();
-                inner.insert("error".to_owned(), Value::String(error.clone()));
-                self.block(&step.catch, &branch(at, "catch"), &mut inner)
+                let error = error.clone();
+                self.catch(step, at, scope, attempt, Some(error))
             }
             FLOW => {
                 let name = step.workflow.as_deref().unwrap_or_default().trim();
@@ -589,44 +822,67 @@ impl Run<'_, '_> {
                         format!("There is no workflow called {name:?}."),
                     ));
                 };
-                if self.flows.contains(&id) {
-                    return Err(wrong(
-                        self,
-                        format!("The workflow {name:?} would run itself."),
-                    ));
-                }
-                if self.flows.len() >= MAX_FLOW_DEPTH {
-                    return Err(wrong(
-                        self,
-                        format!(
-                            "Workflows may run inside each other {MAX_FLOW_DEPTH} deep at most."
-                        ),
-                    ));
-                }
-                let given = template::resolve(
-                    scope,
-                    &Value::Object(step.inputs.clone().unwrap_or_default()),
-                    &self.eval,
-                )
-                .map_err(|e| wrong(self, e))?;
-                let given = given.as_object().cloned().unwrap_or_default();
-                let inputs = bind_inputs(&sub, &given).map_err(|e| wrong(self, e))?;
-                said(self, format!("ran {name}"));
+                let (inputs, outer) = match back {
+                    Some(Frame::Call { id: was, outer }) if was == id => (Value::Null, Some(outer)),
+                    Some(_) => return Err(self.changed()),
+                    None => {
+                        if self.flows.contains(&id) {
+                            return Err(wrong(
+                                self,
+                                format!("The workflow {name:?} would run itself."),
+                            ));
+                        }
+                        if self.flows.len() >= MAX_FLOW_DEPTH {
+                            return Err(wrong(
+                                self,
+                                format!(
+                                    "Workflows may run inside each other {MAX_FLOW_DEPTH} deep at most."
+                                ),
+                            ));
+                        }
+                        let given = template::resolve(
+                            scope,
+                            &Value::Object(step.inputs.clone().unwrap_or_default()),
+                            &self.eval,
+                        )
+                        .map_err(|e| wrong(self, e))?;
+                        let given = given.as_object().cloned().unwrap_or_default();
+                        let inputs = bind_inputs(&sub, &given).map_err(|e| wrong(self, e))?;
+                        said(self, format!("ran {name}"));
+                        (inputs, None)
+                    }
+                };
                 // The workflow sees only what it is given, and is held for outside text only if
-                // what it was given is.
-                let outside = reads(step)
-                    .iter()
-                    .find_map(|n| self.tainted.get(n).copied());
-                let mine = std::mem::take(&mut self.tainted);
-                if let Some(why) = outside {
-                    self.tainted.insert("inputs".to_owned(), why);
-                }
-                self.flows.push(id);
+                // what it was given is. A resumed run has that already in what it brought back.
+                let mine = match outer {
+                    Some(outer) => outer
+                        .into_iter()
+                        .map(|(k, v)| (k, intern(&v)))
+                        .collect::<BTreeMap<_, _>>(),
+                    None => {
+                        let outside = reads(step)
+                            .iter()
+                            .find_map(|n| self.tainted.get(n).copied());
+                        let mine = std::mem::take(&mut self.tainted);
+                        if let Some(why) = outside {
+                            self.tainted.insert("inputs".to_owned(), why);
+                        }
+                        mine
+                    }
+                };
+                self.flows.push(id.clone());
                 let mut inner = Scope::new();
                 inner.insert("inputs".to_owned(), inputs);
                 let done = self.block(&sub.steps, &branch(at, "flow"), &mut inner);
                 self.flows.pop();
-                self.tainted = mine;
+                if matches!(done, Err(Halt::Waiting { .. })) {
+                    self.frames.push(Frame::Call {
+                        id,
+                        outer: mine.into_iter().map(|(k, v)| (k, v.to_owned())).collect(),
+                    });
+                } else {
+                    self.tainted = mine;
+                }
                 done
             }
             SET => {
@@ -705,11 +961,9 @@ impl Run<'_, '_> {
     }
 }
 
-/// Runs the workflow. `inputs` are what [`bind_inputs`] gave.
-pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
-    let mut scope = Scope::new();
-    scope.insert("inputs".to_owned(), inputs.clone());
-    let mut run = Run {
+/// A new run, empty.
+fn start<'a, 'e>(env: &'a Env<'e>) -> Run<'a, 'e> {
+    Run {
         env,
         eval: Evaluator::new(env.cancel),
         out: Outcome {
@@ -717,6 +971,7 @@ pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
             output: String::new(),
             steps: Vec::new(),
             usage: Usage::default(),
+            snapshot: None,
         },
         taken: 0,
         rounds: Vec::new(),
@@ -724,13 +979,73 @@ pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
         touched: None,
         steered: None,
         flows: Vec::new(),
-    };
+        frames: Vec::new(),
+        resume: VecDeque::new(),
+        decision: None,
+    }
+}
+
+/// Works through the steps, from the top or from where a resume left off, and says how it ended.
+fn walk(mut run: Run, def: &Definition, mut scope: Scope) -> Outcome {
     run.out.ending = match run.block(&def.steps, "", &mut scope) {
         Ok(_) => Ending::Succeeded,
         Err(Halt::Stopped) => Ending::Stopped,
         Err(Halt::Failed { step, error }) => Ending::Failed { step, error },
+        Err(Halt::Waiting {
+            step,
+            prompt,
+            until,
+        }) => {
+            let mut frames = std::mem::take(&mut run.frames);
+            frames.reverse();
+            run.out.snapshot = Some(Snapshot {
+                frames,
+                taken: run.taken,
+                tainted: run
+                    .tainted
+                    .iter()
+                    .map(|(k, v)| (k.clone(), (*v).to_owned()))
+                    .collect(),
+                steered: run.steered.map(str::to_owned),
+                output: run.out.output.clone(),
+                steps: run.out.steps.clone(),
+                usage: run.out.usage,
+            });
+            Ending::Waiting {
+                step,
+                prompt,
+                until,
+            }
+        }
     };
     run.out
+}
+
+/// Runs the workflow. `inputs` are what [`bind_inputs`] gave.
+pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
+    let mut scope = Scope::new();
+    scope.insert("inputs".to_owned(), inputs.clone());
+    walk(start(env), def, scope)
+}
+
+/// Goes on with a run that paused, from where `snapshot` says, once `decision` answers the step it
+/// waited at. A snapshot that does not fit `def` (it was changed since) ends the run with that
+/// said.
+pub fn resume(def: &Definition, snapshot: Snapshot, decision: Decision, env: &Env) -> Outcome {
+    let mut run = start(env);
+    run.out.output = snapshot.output;
+    run.out.steps = snapshot.steps;
+    run.out.usage = snapshot.usage;
+    run.taken = snapshot.taken;
+    run.tainted = snapshot
+        .tainted
+        .iter()
+        .map(|(k, v)| (k.clone(), intern(v)))
+        .collect();
+    run.steered = snapshot.steered.as_deref().map(intern);
+    run.resume = snapshot.frames.into();
+    run.decision = Some(decision);
+    walk(run, def, Scope::new())
 }
 
 #[cfg(test)]
@@ -1643,6 +1958,278 @@ mod tests {
             matches!(&out.ending, Ending::Failed { step, .. } if step == "boom"),
             "{:?}",
             out.ending
+        );
+    }
+
+    /// Runs and resumes workflows with a shell that records every command, and why each was held
+    /// as outside text. `web_fetch` gives outside text.
+    struct Bench {
+        seen: RefCell<Vec<(String, Option<String>)>>,
+        others: Vec<(String, Definition)>,
+    }
+
+    impl Bench {
+        fn new(others: &[(&str, Value)]) -> Bench {
+            Bench {
+                seen: RefCell::new(Vec::new()),
+                others: others
+                    .iter()
+                    .map(|(n, v)| ((*n).to_owned(), serde_json::from_value(v.clone()).unwrap()))
+                    .collect(),
+            }
+        }
+
+        fn go<R>(&self, work: impl FnOnce(&Env) -> R) -> R {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let tool = |name: &str, args: &Value, outside: Option<&str>| {
+                let said = args["command"].as_str().unwrap_or(name).to_owned();
+                self.seen
+                    .borrow_mut()
+                    .push((said, outside.map(str::to_owned)));
+                ToolOutcome {
+                    value: json!({"stdout": "page text"}),
+                    outside: (name == "web_fetch").then_some("a web page"),
+                    ..ToolOutcome::default()
+                }
+            };
+            let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+            let flow = |name: &str| {
+                self.others
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                    .map(|(n, d)| (n.to_lowercase(), d.clone()))
+            };
+            work(&Env {
+                tool: &tool,
+                model: &model,
+                cancel: &cancel,
+                flow: &flow,
+            })
+        }
+
+        fn run(&self, d: &Definition) -> Outcome {
+            let inputs = bind_inputs(d, &Map::new()).unwrap();
+            self.go(|env| execute(d, &inputs, env))
+        }
+
+        /// Answers the wait the run is at, as if the app had been closed and opened since: the
+        /// snapshot goes through its stored text first.
+        fn answer(&self, d: &Definition, out: &mut Outcome, decision: Decision) -> Outcome {
+            let text = serde_json::to_string(&out.snapshot.take().unwrap()).unwrap();
+            let snapshot: Snapshot = serde_json::from_str(&text).unwrap();
+            self.go(|env| resume(d, snapshot, decision, env))
+        }
+
+        /// Runs to the end, approving each wait; says how many there were.
+        fn through(&self, d: &Definition) -> (Outcome, usize) {
+            let mut out = self.run(d);
+            let mut waits = 0;
+            while matches!(out.ending, Ending::Waiting { .. }) {
+                waits += 1;
+                out = self.answer(d, &mut out, Decision::Go);
+            }
+            (out, waits)
+        }
+
+        fn said(&self) -> Vec<String> {
+            self.seen.borrow().iter().map(|(c, _)| c.clone()).collect()
+        }
+    }
+
+    fn ask(id: &str, text: &str) -> Value {
+        json!({"id": id, "kind": "wait", "approve": text})
+    }
+
+    #[test]
+    fn an_approval_pauses_the_run_and_it_goes_on_from_the_stored_snapshot_without_repeating_steps()
+    {
+        let d = def(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "echo first"}, "bind": "a"},
+            ask("ok", "Go on after {{a.stdout}}?"),
+            sh("b", "echo second")
+        ]}));
+        let bench = Bench::new(&[]);
+        let mut out = bench.run(&d);
+        assert!(
+            matches!(&out.ending, Ending::Waiting { step, prompt, until: None }
+                if step == "ok" && prompt == "Go on after page text?"),
+            "{:?}",
+            out.ending
+        );
+        assert_eq!(bench.said(), ["echo first"]);
+        assert_eq!(out.steps.len(), 2);
+        assert_eq!(out.steps[1].output, "Go on after page text?");
+        let done = bench.answer(&d, &mut out, Decision::Go);
+        assert_eq!(done.ending, Ending::Succeeded, "{:?}", done.ending);
+        assert_eq!(bench.said(), ["echo first", "echo second"]);
+        let lines: Vec<_> = done.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(lines, ["a", "ok", "b"], "one line each, none repeated");
+        assert_eq!(done.steps[1].output, "{\"approved\":true}");
+    }
+
+    #[test]
+    fn a_run_paused_deep_inside_loops_branches_and_workflows_goes_on_exactly_where_it_was() {
+        let sub = json!({"steps": [
+            sh("s1", "echo sub-before"),
+            ask("sub-ok", "Sub ok?"),
+            sh("s2", "echo sub-after")
+        ]});
+        let d = def(json!({"steps": [
+            {"id": "each", "kind": "for_each", "over": "[\"x\", \"y\"]", "bind": "all", "steps": [
+                sh("pre", "echo pre-{{item}}"),
+                {"id": "br", "kind": "if", "cond": "item == \"y\"",
+                 "then": [ask("only-y", "Y ok?"), call("go", "sub", json!({}), "r")],
+                 "else": [sh("plain", "echo plain-{{item}}")]},
+                {"id": "sw", "kind": "switch", "on": "item",
+                 "cases": [{"when": "\"x\"", "steps": [ask("only-x", "X ok?")]}],
+                 "default": [sh("dflt", "echo default")]},
+                {"id": "t", "kind": "try", "retries": 1, "steps": [sh("inside", "echo try-{{item}}")]},
+                sh("post", "echo post-{{item}}")
+            ]},
+            {"id": "wh", "kind": "while", "cond": "index < 1", "bind": "w",
+             "steps": [sh("tick", "echo tick-{{index}}"), ask("round", "Round {{index}} ok?")]},
+            sh("end", "echo end {{all.0.stdout}}")
+        ]}));
+        let bench = Bench::new(&[("sub", sub)]);
+        let (out, waits) = bench.through(&d);
+        assert_eq!(out.ending, Ending::Succeeded, "{:?}", out.ending);
+        // x asks once (switch), y asks twice (the branch, the workflow), the while twice.
+        assert_eq!(waits, 5);
+        assert_eq!(
+            bench.said(),
+            [
+                "echo pre-x",
+                "echo plain-x",
+                "echo try-x",
+                "echo post-x",
+                "echo pre-y",
+                "echo sub-before",
+                "echo sub-after",
+                "echo default",
+                "echo try-y",
+                "echo post-y",
+                "echo tick-0",
+                "echo tick-1",
+                "echo end page text",
+            ]
+        );
+        // Every step has one line in the log however many times its run was stopped and started.
+        let paths: Vec<_> = out
+            .steps
+            .iter()
+            .map(|s| (s.path.as_str(), s.rounds.clone()))
+            .collect();
+        let mut unique = paths.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(paths.len(), unique.len(), "{paths:?}");
+        assert!(
+            paths.contains(&("0.body.1.then.1.flow.2", vec![2])),
+            "{paths:?}"
+        );
+    }
+
+    #[test]
+    fn a_waiting_step_declined_fails_there_and_a_try_around_it_can_catch_that() {
+        let plain = def(json!({"steps": [ask("ok", "Sure?"), sh("after", "echo after")]}));
+        let bench = Bench::new(&[]);
+        let mut out = bench.run(&plain);
+        let done = bench.answer(&plain, &mut out, Decision::Declined);
+        assert!(
+            matches!(&done.ending, Ending::Failed { step, error } if step == "ok" && error.contains("declined")),
+            "{:?}",
+            done.ending
+        );
+        assert!(bench.said().is_empty());
+
+        let guarded = def(json!({"steps": [
+            {"id": "t", "kind": "try", "steps": [ask("ok", "Sure?")],
+             "catch": [sh("said-no", "echo no: {{error}}")]},
+            sh("after", "echo after")
+        ]}));
+        let bench = Bench::new(&[]);
+        let mut out = bench.run(&guarded);
+        let done = bench.answer(&guarded, &mut out, Decision::Declined);
+        assert_eq!(done.ending, Ending::Succeeded, "{:?}", done.ending);
+        assert_eq!(
+            bench.said(),
+            ["echo no: You declined this step.", "echo after"]
+        );
+        // A wait inside the catch pauses too, and goes on inside it.
+        let both = def(json!({"steps": [
+            {"id": "t", "kind": "try", "steps": [sh("a", "echo a"), {"id": "x", "kind": "code", "script": "inputs.nothing"}],
+             "catch": [ask("in-catch", "Handle it?"), sh("handled", "echo handled {{error}}")]}
+        ], "inputs": {}}));
+        let bench = Bench::new(&[]);
+        let (out, waits) = bench.through(&both);
+        assert_eq!(
+            (waits, out.ending.clone()),
+            (1, Ending::Succeeded),
+            "{:?}",
+            out.ending
+        );
+        assert!(bench.said()[1].starts_with("echo handled "));
+    }
+
+    #[test]
+    fn a_long_delay_pauses_with_when_it_is_over_and_a_short_one_is_waited_out_on_the_spot() {
+        let d = def(json!({"steps": [
+            {"id": "pause", "kind": "wait", "seconds": 600, "bind": "p"},
+            sh("after", "echo {{p.waited}}")
+        ]}));
+        let bench = Bench::new(&[]);
+        let before = unix_now();
+        let mut out = bench.run(&d);
+        let Ending::Waiting {
+            prompt,
+            until: Some(until),
+            ..
+        } = out.ending.clone()
+        else {
+            panic!("{:?}", out.ending)
+        };
+        assert_eq!(prompt, "Wait 10 minutes");
+        assert!((before + 600..=before + 602).contains(&until));
+        let done = bench.answer(&d, &mut out, Decision::Go);
+        assert_eq!(done.ending, Ending::Succeeded);
+        assert_eq!(bench.said(), ["echo 600"]);
+        // Short: no pause at all.
+        let short =
+            def(json!({"steps": [{"id": "s", "kind": "wait", "seconds": 1}, sh("a", "echo a")]}));
+        let bench = Bench::new(&[]);
+        let began = Instant::now();
+        assert_eq!(bench.run(&short).ending, Ending::Succeeded);
+        assert!(began.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn outside_text_stays_held_across_a_pause_and_a_changed_workflow_is_refused() {
+        let d = def(json!({"steps": [
+            web_step(),
+            ask("ok", "Use it?"),
+            sh("use", "echo {{page.stdout}}"),
+            sh("clean", "echo fine")
+        ]}));
+        let bench = Bench::new(&[]);
+        let (out, _) = bench.through(&d);
+        assert_eq!(out.ending, Ending::Succeeded);
+        let seen = bench.seen.borrow();
+        assert_eq!(
+            seen[1],
+            ("echo page text".to_owned(), Some("a web page".to_owned()))
+        );
+        assert_eq!(seen[2], ("echo fine".to_owned(), None));
+        drop(seen);
+
+        // Resumed against steps that are no longer there.
+        let bench = Bench::new(&[]);
+        let mut out = bench.run(&d);
+        let shorter = def(json!({"steps": [sh("only", "echo x")]}));
+        let done = bench.answer(&shorter, &mut out, Decision::Go);
+        assert!(
+            matches!(&done.ending, Ending::Failed { error, .. } if error.contains("changed")),
+            "{:?}",
+            done.ending
         );
     }
 }

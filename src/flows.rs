@@ -21,7 +21,8 @@ use crate::usage::{Source, Totals};
 use crate::workflow::compile::{self, Trace};
 use crate::workflow::definition::{Definition, STEP_TOOLS};
 use crate::workflow::engine::{self, Ending, Env, Outcome, ToolOutcome, Usage};
-use crate::workflow::{Draft, RunRecord, RunStatus, Saved};
+use crate::workflow::pause::{Decision, Snapshot};
+use crate::workflow::{Draft, Pause, RunRecord, RunStatus, Saved};
 
 /// What is happening to a chat's draft, when something is.
 #[derive(Clone, PartialEq, Debug)]
@@ -128,7 +129,13 @@ fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Com
 }
 
 /// Runs the workflow's steps with real tools and a real model. Blocks.
-fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> Ran {
+/// How a run begins: from the top with its inputs, or from where a paused one stopped.
+pub(crate) enum Go {
+    Fresh(Value),
+    Resume(Snapshot, Decision),
+}
+
+fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>) -> Ran {
     let renewed = std::sync::Mutex::new(Vec::new());
     let handed = std::sync::Mutex::new(Vec::new());
     let cancel: &AtomicBool = stop;
@@ -265,21 +272,21 @@ fn work(def: &Definition, inputs: &Value, p: &Prep, stop: &Arc<AtomicBool>) -> R
             )
         })
     };
-    let outcome = engine::execute(
-        def,
-        inputs,
-        &Env {
-            tool: &tool,
-            model: &model,
-            cancel: stop,
-            flow: &|name: &str| {
-                p.flows
-                    .iter()
-                    .find(|w| w.name.eq_ignore_ascii_case(name))
-                    .map(|w| (w.id.clone(), w.definition.clone()))
-            },
+    let env = Env {
+        tool: &tool,
+        model: &model,
+        cancel: stop,
+        flow: &|name: &str| {
+            p.flows
+                .iter()
+                .find(|w| w.name.eq_ignore_ascii_case(name))
+                .map(|w| (w.id.clone(), w.definition.clone()))
         },
-    );
+    };
+    let outcome = match go {
+        Go::Fresh(inputs) => engine::execute(def, &inputs, &env),
+        Go::Resume(snapshot, decision) => engine::resume(def, snapshot, decision, &env),
+    };
     (
         outcome,
         renewed.into_inner().unwrap_or_default(),
@@ -694,9 +701,10 @@ impl App {
             output_tokens: 0,
             started_at: now(),
             finished_at: None,
+            pause: None,
         };
         self.save("the workflow run", |db| db.start_workflow_run(&record));
-        let name = wf.name.clone();
+        let (name, def) = (wf.name.clone(), wf.definition.clone());
         let model = ModelRef::new(&prep.provider, &prep.model);
         let agent_name = self
             .roster
@@ -707,7 +715,7 @@ impl App {
         self.spawn_flow(
             prep,
             wf.definition.clone(),
-            inputs,
+            Go::Fresh(inputs),
             cancel,
             move |app, outcome| {
                 let mut record = record;
@@ -717,7 +725,8 @@ impl App {
                     agent_name: &agent_name,
                     source: Source::Workflow,
                 };
-                let finish = app.finish_flow(&mut record, &name, &outcome, &who);
+                let finish =
+                    app.finish_flow(&mut record, &name, &def, &outcome, &who, Usage::default());
                 done(app, &record, finish);
             },
         );
@@ -751,14 +760,14 @@ impl App {
         &mut self,
         prep: Prep,
         def: Definition,
-        inputs: Value,
+        go: Go,
         cancel: Arc<AtomicBool>,
         done: D,
     ) where
         D: FnOnce(&mut App, Outcome) + Send + 'static,
     {
         self.spawn(
-            move || work(&def, &inputs, &prep, &cancel),
+            move || work(&def, go, &prep, &cancel),
             move |app, (outcome, renewed, handed)| {
                 for (server, tokens) in renewed {
                     app.mcp_keep_tokens(&server, tokens, false);
@@ -787,20 +796,23 @@ impl App {
         self.save("the usage", |db| db.add_usage(at, who, &t));
     }
 
-    /// Records how a run ended, counts its model calls as `who`'s, and says it in words for an
-    /// agent that started it.
+    /// Records how a run ended, or that it paused at a wait, counts the model calls it made since
+    /// `earlier` as `who`'s, and says it in words for an agent that started it. `def` is what a
+    /// paused run is saved with, so it goes on with the steps it was running.
     fn finish_flow(
         &mut self,
         record: &mut RunRecord,
         name: &str,
+        def: &Definition,
         o: &Outcome,
         who: &Counted,
+        earlier: Usage,
     ) -> Finish {
         record.steps = o.steps.clone();
         record.output = o.output.clone();
         record.input_tokens = o.usage.input;
         record.output_tokens = o.usage.output;
-        record.finished_at = Some(now());
+        record.pause = None;
         let finish = match &o.ending {
             Ending::Succeeded => {
                 record.status = RunStatus::Succeeded;
@@ -817,17 +829,191 @@ impl App {
                     "The workflow {name:?} failed at step {step}: {error}"
                 ))
             }
+            Ending::Waiting {
+                step,
+                prompt,
+                until,
+            } => {
+                record.status = RunStatus::Waiting;
+                let pause = Pause {
+                    step: step.clone(),
+                    prompt: prompt.clone(),
+                    until: *until,
+                };
+                record.pause = Some(pause.clone());
+                Finish::Done(format!(
+                    "The workflow {name:?} paused at step {step}: {prompt}. It goes on when the person answers on the Workflows page{}; what it makes after that does not come back here.",
+                    if until.is_some() {
+                        " or when the wait is over"
+                    } else {
+                        ""
+                    }
+                ))
+            }
             Ending::Stopped => {
                 record.status = RunStatus::Stopped;
                 Finish::Stopped("The person stopped the workflow before it finished.".to_owned())
             }
         };
-        self.save("the workflow run", |db| db.finish_workflow_run(record));
-        self.count_flow_usage(record.started_at, o.usage, who);
+        match (&record.pause, &o.snapshot) {
+            (Some(pause), Some(snapshot)) => {
+                record.finished_at = None;
+                self.save("the workflow run", |db| {
+                    db.pause_workflow_run(record, pause, snapshot, def)
+                });
+            }
+            _ => {
+                record.finished_at = Some(now());
+                self.save("the workflow run", |db| db.finish_workflow_run(record));
+            }
+        }
+        let at = if earlier.calls == 0 {
+            record.started_at
+        } else {
+            now()
+        };
+        self.count_flow_usage(at, o.usage.since(earlier), who);
         if self.route == Route::Workflows {
             self.reload_wf_runs();
         }
         finish
+    }
+
+    /// Answers the wait a run is at: it goes on, or fails there if `decision` is no. `by_you` says
+    /// whether you pressed it or the delay ended; only you are told why it could not go on.
+    pub fn answer_wait(
+        &mut self,
+        workflow_id: &str,
+        run_id: &str,
+        decision: Decision,
+        by_you: bool,
+    ) {
+        let loaded = self.store.as_ref().map(|db| db.workflow_wait(run_id));
+        let (_, snapshot, def) = match loaded {
+            Some(Ok(Some(w))) => w,
+            Some(Ok(None)) | None => {
+                if by_you {
+                    self.wf_notice = Some("That run is not waiting any more.".to_owned());
+                }
+                self.reload_wf_runs();
+                return;
+            }
+            Some(Err(e)) => {
+                self.wf_notice = Some(format!("The waiting run could not be read: {e}"));
+                return;
+            }
+        };
+        let Some(wf) = self.workflows.iter().find(|w| w.id == workflow_id).cloned() else {
+            return;
+        };
+        if self.wf_jobs.contains_key(&wf.id) {
+            if by_you {
+                self.wf_notice =
+                    Some("Another run of this workflow is going. Let it finish first.".to_owned());
+            }
+            return;
+        }
+        let at = crate::guard::ask::Where::Workflow(wf.id.clone());
+        let prep = match self.prep_run(&def, Some(&wf.id), &wf.agent_id, at, &wf.name) {
+            Ok(p) => p,
+            Err(why) => {
+                if by_you {
+                    self.wf_notice = Some(why);
+                } else {
+                    self.fail_wait(&wf, run_id, &why);
+                }
+                return;
+            }
+        };
+        let Some(mut record) = self
+            .store
+            .as_ref()
+            .and_then(|db| db.list_workflow_runs(&wf.id, 200).ok())
+            .and_then(|runs| runs.into_iter().find(|r| r.id == run_id))
+        else {
+            return;
+        };
+        self.save("the workflow run", |db| db.clear_workflow_wait(run_id));
+        record.status = RunStatus::Running;
+        record.pause = None;
+        self.wf_notice = None;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.wf_jobs.insert(wf.id.clone(), Arc::clone(&cancel));
+        let model = ModelRef::new(&prep.provider, &prep.model);
+        let agent_name = self
+            .roster
+            .agent_ref(&wf.agent_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        let earlier = snapshot.usage;
+        let run_def = def.clone();
+        self.spawn_flow(
+            prep,
+            def,
+            Go::Resume(snapshot, decision),
+            cancel,
+            move |app, outcome| {
+                app.wf_jobs.remove(&wf.id);
+                let who = Counted {
+                    model: &model,
+                    agent_id: &wf.agent_id,
+                    agent_name: &agent_name,
+                    source: Source::Workflow,
+                };
+                app.finish_flow(&mut record, &wf.name, &run_def, &outcome, &who, earlier);
+                app.reload_wf_runs();
+            },
+        );
+        self.reload_wf_runs();
+    }
+
+    /// A waiting run that cannot go on (nothing to run it with) ends as failed, saying why.
+    fn fail_wait(&mut self, wf: &Saved, run_id: &str, why: &str) {
+        let found = self
+            .store
+            .as_ref()
+            .and_then(|db| db.list_workflow_runs(&wf.id, 200).ok())
+            .and_then(|runs| runs.into_iter().find(|r| r.id == run_id));
+        let Some(mut record) = found else {
+            return;
+        };
+        self.save("the workflow run", |db| db.clear_workflow_wait(run_id));
+        record.status = RunStatus::Failed;
+        record.pause = None;
+        record.error = why.to_owned();
+        record.failed_step = String::new();
+        record.finished_at = Some(now());
+        self.save("the workflow run", |db| db.finish_workflow_run(&record));
+        self.reload_wf_runs();
+    }
+
+    /// Ends a waiting run without going on: it is over, stopped.
+    pub fn stop_wait(&mut self, workflow_id: &str, run_id: &str) {
+        let found = self
+            .store
+            .as_ref()
+            .and_then(|db| db.list_workflow_runs(workflow_id, 200).ok())
+            .and_then(|runs| runs.into_iter().find(|r| r.id == run_id));
+        let Some(mut record) = found else {
+            return;
+        };
+        self.save("the workflow run", |db| db.clear_workflow_wait(run_id));
+        record.status = RunStatus::Stopped;
+        record.pause = None;
+        record.finished_at = Some(now());
+        self.save("the workflow run", |db| db.finish_workflow_run(&record));
+        self.reload_wf_runs();
+    }
+
+    /// Goes on with every waiting run whose delay is over, as the half-minute tick finds them.
+    pub fn resume_due(&mut self, now: i64) {
+        let due = match self.store.as_ref().map(|db| db.due_workflow_waits(now)) {
+            Some(Ok(due)) => due,
+            _ => return,
+        };
+        for (run_id, workflow_id) in due {
+            self.answer_wait(&workflow_id, &run_id, Decision::Go, false);
+        }
     }
 
     /// The agent called `run_workflow`: starts it as a background job like a command, so the
@@ -1031,6 +1217,7 @@ mod tests {
     use crate::model::{Outcome, ToolCall};
     use crate::testing::{EVENTS, TempDb, app_with_server, call_stream, text_stream};
     use crate::workflow::definition::Step;
+    use crate::workflow::pause::Decision;
 
     fn tool_step(id: &str, command: &str, bind: &str) -> Step {
         Step {
@@ -1395,6 +1582,133 @@ mod tests {
             .err()
             .unwrap();
         assert!(why.contains("not on") && why.contains("team"), "{why}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_waits_for_your_answer_across_a_restart_and_goes_on_from_the_wait_when_you_give_it() {
+        let wait = |id: &str| Step {
+            id: id.into(),
+            kind: "wait".into(),
+            approve: Some("Send {{shown.stdout}}?".into()),
+            ..Step::default()
+        };
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(&db, vec![]);
+        app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        let w = save_workflow(
+            &mut app,
+            vec![
+                tool_step("show", "echo report", "shown"),
+                wait("ok"),
+                tool_step("send", "echo sent", "sent"),
+            ],
+            json!({}),
+        );
+        app.go(Route::Workflows);
+        app.run_open_workflow();
+        let run = app.wf_runs[0].clone();
+        assert_eq!(run.status, RunStatus::Waiting, "{}", run.error);
+        assert!(app.wf_jobs.is_empty(), "nothing is running while it waits");
+        let pause = run.pause.clone().unwrap();
+        assert_eq!((pause.step.as_str(), pause.until), ("ok", None));
+        assert!(
+            pause.prompt.starts_with("Send ") && pause.prompt.contains("report"),
+            "{}",
+            pause.prompt
+        );
+        assert_eq!(run.steps.len(), 2, "the step after the wait has not run");
+
+        // The app is closed and opened again: the run is still waiting, not failed.
+        let mut later = db.open();
+        later.set_model(app.current().unwrap().model.clone());
+        later.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        later.load_workflows();
+        later.go(Route::Workflows);
+        later.select_workflow(&w.id);
+        assert_eq!(later.wf_runs[0].status, RunStatus::Waiting);
+        assert_eq!(later.wf_runs[0].pause, Some(pause));
+
+        // Answered: it goes on from there, once, and is done.
+        later.answer_wait(&w.id, &run.id, Decision::Go, true);
+        let done = &later.wf_runs[0];
+        assert_eq!(
+            done.status,
+            RunStatus::Succeeded,
+            "{} {:?}",
+            done.error,
+            later.wf_notice
+        );
+        assert_eq!(done.steps.len(), 3);
+        assert!(done.steps[2].output.contains("sent"), "{:?}", done.steps[2]);
+        assert!(done.pause.is_none() && done.finished_at.is_some());
+        assert_eq!(
+            later
+                .store
+                .as_ref()
+                .unwrap()
+                .workflow_wait(&run.id)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declining_a_wait_fails_that_step_and_a_long_delay_goes_on_by_itself_when_it_is_over() {
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(&db, vec![]);
+        app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        let ask = Step {
+            id: "ok".into(),
+            kind: "wait".into(),
+            approve: Some("Sure?".into()),
+            ..Step::default()
+        };
+        let w = save_workflow(
+            &mut app,
+            vec![ask, tool_step("after", "echo after", "a")],
+            json!({}),
+        );
+        app.go(Route::Workflows);
+        app.run_open_workflow();
+        let id = app.wf_runs[0].id.clone();
+        app.answer_wait(&w.id, &id, Decision::Declined, true);
+        let run = &app.wf_runs[0];
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(
+            (run.failed_step.as_str(), run.error.contains("declined")),
+            ("ok", true)
+        );
+        assert_eq!(run.steps.len(), 1, "the step after never ran");
+
+        // A delay of ten minutes: not yet, then by itself once the time has passed.
+        let nap = Step {
+            id: "nap".into(),
+            kind: "wait".into(),
+            seconds: Some(600),
+            ..Step::default()
+        };
+        let w2 = save_workflow(
+            &mut app,
+            vec![nap, tool_step("then", "echo then", "t")],
+            json!({}),
+        );
+        app.go(Route::Workflows);
+        app.select_workflow(&w2.id);
+        app.run_open_workflow();
+        assert_eq!(app.wf_runs[0].status, RunStatus::Waiting);
+        let until = app.wf_runs[0].pause.as_ref().unwrap().until.unwrap();
+        app.resume_due(until - 1);
+        assert_eq!(app.wf_runs[0].status, RunStatus::Waiting, "not yet");
+        app.resume_due(until);
+        assert_eq!(
+            app.wf_runs[0].status,
+            RunStatus::Succeeded,
+            "{}",
+            app.wf_runs[0].error
+        );
+        assert_eq!(app.wf_runs[0].steps.len(), 2);
     }
 
     #[cfg(unix)]

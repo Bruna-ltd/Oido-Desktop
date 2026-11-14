@@ -157,6 +157,8 @@ fn main() {
     schedules::every_tick(move || {
         handle.update(|s: &mut app::App, _| {
             s.fire_due(app::now());
+            // Workflows waiting for a long delay go on once it is over.
+            s.resume_due(app::now());
             // Calls held for a go-ahead nobody gave in time do not run.
             s.expire_holds(app::now());
             // Subscription tokens near expiry are refreshed before a call needs them.

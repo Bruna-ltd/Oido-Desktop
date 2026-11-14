@@ -6,7 +6,8 @@ use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit};
 
 use crate::app::{App, now};
 use crate::workflow::definition::outline;
-use crate::workflow::{RunRecord, RunStatus, Saved};
+use crate::workflow::pause::Decision;
+use crate::workflow::{Pause, RunRecord, RunStatus, Saved};
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     if s.wf_editor.is_some() {
@@ -107,7 +108,7 @@ fn item(s: &App, w: &Saved, k: &Kit) -> El {
 fn badge(status: RunStatus) -> Badge {
     Badge::new(status.as_str()).variant(match status {
         RunStatus::Succeeded => BadgeVariant::Subtle,
-        RunStatus::Running => BadgeVariant::Accent,
+        RunStatus::Running | RunStatus::Waiting => BadgeVariant::Accent,
         RunStatus::Failed | RunStatus::Stopped => BadgeVariant::Neutral,
     })
 }
@@ -350,7 +351,89 @@ fn run_row(s: &App, i: usize, r: &RunRecord, k: &Kit) -> El {
 fn run_detail(r: &RunRecord, k: &Kit) -> El {
     let failure =
         (!r.error.is_empty()).then(|| format!("Failed at {}: {}", r.failed_step, r.error));
-    step_log(&r.steps, failure, "wf-run-detail", k)
+    let log = step_log(&r.steps, failure, "wf-run-detail", k);
+    match &r.pause {
+        Some(pause) => col()
+            .w_full()
+            .gap(8.0)
+            .child(waiting(r, pause, k))
+            .child(log),
+        None => log,
+    }
+}
+
+/// What a waiting run waits for, and the buttons that answer it.
+fn waiting(r: &RunRecord, pause: &Pause, k: &Kit) -> El {
+    let c = &k.c;
+    let asks = pause.until.is_none();
+    let line = match pause.until {
+        Some(at) => format!(
+            "{}. It goes on by itself in {}.",
+            pause.prompt,
+            until(at - now())
+        ),
+        None => pause.prompt.clone(),
+    };
+    let (wf, run) = (r.workflow_id.clone(), r.id.clone());
+    let button = |label: &str, key: &str, variant: ButtonVariant| {
+        Button::new(label.to_owned())
+            .variant(variant)
+            .control_size(ControlSize::Small)
+            .build(k)
+            .key(format!("{key}-{}", r.id))
+    };
+    let (w1, r1) = (wf.clone(), run.clone());
+    let (w2, r2) = (wf.clone(), run.clone());
+    let (w3, r3) = (wf, run);
+    let mut buttons = row().gap(8.0).center_y();
+    buttons = buttons.child(
+        button(
+            if asks { "Approve" } else { "Go on now" },
+            "wf-approve",
+            ButtonVariant::Submit,
+        )
+        .on_press(move |s: &mut App| s.answer_wait(&w1, &r1, Decision::Go, true)),
+    );
+    if asks {
+        buttons = buttons.child(
+            button("Decline", "wf-decline", ButtonVariant::Outline)
+                .on_press(move |s: &mut App| s.answer_wait(&w2, &r2, Decision::Declined, true)),
+        );
+    }
+    buttons = buttons.child(
+        button("Stop it", "wf-stop-wait", ButtonVariant::Ghost)
+            .on_press(move |s: &mut App| s.stop_wait(&w3, &r3)),
+    );
+    col()
+        .key("wf-waiting")
+        .w_full()
+        .gap(8.0)
+        .padding(12.0)
+        .radius(k.radius.md)
+        .border(1.0, c.border_strong)
+        .child(
+            text(if asks { "Waiting for you" } else { "Waiting" })
+                .font(k.ty.ui_medium)
+                .color(c.text_base),
+        )
+        .child(
+            text(line)
+                .font(k.ty.body)
+                .color(c.text_base)
+                .wrap()
+                .selectable(true),
+        )
+        .child(buttons)
+}
+
+/// How long until `secs` from now, in words.
+fn until(secs: i64) -> String {
+    match secs {
+        ..60 => "under a minute".to_owned(),
+        60..3600 => format!("{} min", secs / 60),
+        3600..86400 => format!("{} h", secs / 3600),
+        _ => format!("{} d", secs / 86400),
+    }
 }
 
 /// The steps of a run as they ran, nested the way the workflow is, with each one's output.
