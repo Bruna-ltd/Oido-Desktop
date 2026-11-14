@@ -131,6 +131,8 @@ attachment save. MIME building lives in `google/mime.rs` with tests.
 **P3: Calendar (built).** Title "Google Calendar", tools `mcp__google_calendar__*`, scopes `calendar.events` and `calendar.readonly`. Writes are never retried. `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`,
 `free_busy`. Incremental scope consent exercised for the first time.
 
+**YouTube (built, read only).** Title "YouTube", tools `mcp__youtube__*`: `search`, `get_video`, `get_channel`, `list_playlists`, `list_playlist_items`, `list_subscriptions`, `get_comments`. Scope `youtube.readonly`. The Data API has a daily quota (10,000 units by default) and a search costs 100, which the search tool's description says. Writes (playlists, ratings, comments) need the broad `youtube` scope and are not built.
+
 **P4: Drive (built, Drive API only).** Title "Google Drive", tools `mcp__google_drive__*`: `search_files`, `get_file`, `read_file` (Docs and Slides as text, Sheets as CSV, text files as they are), `create_file` (text file or Google Doc), `trash_file`. Scopes `drive.readonly` and `drive.file`: it reads everything but changes only files Oido made. Editing Docs and Sheets in place needs their own APIs and is not built. Originally planned: `search_files`, `read_file` (export to text), `read_doc`,
 `read_sheet`, `append_rows`, `update_cells`, `create_doc`.
 

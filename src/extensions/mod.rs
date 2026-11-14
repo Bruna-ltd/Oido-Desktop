@@ -14,6 +14,7 @@ mod flow;
 mod gmail;
 pub mod google;
 mod marks;
+mod youtube;
 
 use serde_json::Value;
 
@@ -74,7 +75,12 @@ pub trait Extension: Sync {
 }
 
 /// Every extension, in the order the page lists them.
-pub const ALL: &[&dyn Extension] = &[&gmail::Gmail, &calendar::Calendar, &drive::Drive];
+pub const ALL: &[&dyn Extension] = &[
+    &gmail::Gmail,
+    &calendar::Calendar,
+    &drive::Drive,
+    &youtube::YouTube,
+];
 
 /// What a server's id starts with when the server is an extension's.
 pub const SERVER_PREFIX: &str = "ext:";
