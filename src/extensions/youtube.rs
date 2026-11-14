@@ -1,7 +1,8 @@
-//! YouTube: search, watch details, channels, playlists, subscriptions and comments. Read only.
+//! YouTube: search, watch details, channels, playlists, subscriptions and comments, and making
+//! playlists, filling them, rating videos and commenting.
 //!
-//! The YouTube Data API has a daily quota (10,000 units by default): a search costs 100 units and
-//! almost everything else 1, so the search description says to prefer the cheaper tools.
+//! The YouTube Data API has a daily quota (10,000 units by default): a search costs 100 units,
+//! a write 50, and a read 1, so the search description says to prefer the cheaper tools.
 
 use serde_json::{Value, json};
 
@@ -9,7 +10,8 @@ use super::google::{Api, Failure};
 use super::{Access, Extension, ToolDef};
 use crate::mcp::catalog::Logo;
 
-const READ: &str = "https://www.googleapis.com/auth/youtube.readonly";
+/// Manage the account over SSL: read, and everything below. (Posting comments needs this one.)
+const MANAGE: &str = "https://www.googleapis.com/auth/youtube.force-ssl";
 const BASE: &str = "https://www.googleapis.com/youtube/v3";
 const DEFAULT_RESULTS: u64 = 10;
 const MAX_RESULTS: u64 = 50;
@@ -28,11 +30,11 @@ impl Extension for YouTube {
     }
 
     fn blurb(&self) -> &'static str {
-        "Search videos, read their details and comments, and see the person's channel, playlists and subscriptions."
+        "Search videos, read their details and comments, see the person's channel, playlists and subscriptions, and make playlists, rate videos and comment."
     }
 
     fn scopes(&self) -> &'static [&'static str] {
-        &[READ]
+        &[MANAGE]
     }
 
     fn tools(&self) -> Vec<ToolDef> {
@@ -121,6 +123,77 @@ impl Extension for YouTube {
                         "page_token": page
                     },
                     "required": ["video_id"]
+                }),
+            },
+            ToolDef {
+                name: "create_playlist",
+                description: "Make a new playlist on the person's channel. Private unless told otherwise. Costs 50 units of quota.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "privacy": {"type": "string", "enum": ["private", "unlisted", "public"], "description": "Who can see it. Default private."}
+                    },
+                    "required": ["title"]
+                }),
+            },
+            ToolDef {
+                name: "add_to_playlist",
+                description: "Add a video to one of the person's playlists. Costs 50 units of quota.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "playlist_id": {"type": "string"},
+                        "video_id": {"type": "string"},
+                        "position": {"type": "integer", "description": "Where in the playlist, counting from 1. Default: the end."}
+                    },
+                    "required": ["playlist_id", "video_id"]
+                }),
+            },
+            ToolDef {
+                name: "remove_from_playlist",
+                description: "Take a video out of a playlist. It needs the playlist item's id that list_playlist_items shows after each video, not the video's id.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {"playlist_item_id": {"type": "string"}},
+                    "required": ["playlist_item_id"]
+                }),
+            },
+            ToolDef {
+                name: "rate_video",
+                description: "Like or dislike a video as the person, or take the rating back.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "video_id": {"type": "string"},
+                        "rating": {"type": "string", "enum": ["like", "dislike", "none"]}
+                    },
+                    "required": ["video_id", "rating"]
+                }),
+            },
+            ToolDef {
+                name: "post_comment",
+                description: "Post a new comment on a video as the person. It is public at once. Costs 50 units of quota.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {"video_id": {"type": "string"}, "text": {"type": "string"}},
+                    "required": ["video_id", "text"]
+                }),
+            },
+            ToolDef {
+                name: "reply_to_comment",
+                description: "Reply to a comment as the person, with the id get_comments shows in brackets before it. It is public at once. Costs 50 units of quota.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {"comment_id": {"type": "string"}, "text": {"type": "string"}},
+                    "required": ["comment_id", "text"]
                 }),
             },
         ]
@@ -216,6 +289,89 @@ impl Extension for YouTube {
                     comment_line,
                     "No comments.",
                 )
+            }
+            "create_playlist" => {
+                let title = required(args, "title")?;
+                let privacy = match arg(args, "privacy") {
+                    None => "private",
+                    Some(p @ ("private" | "unlisted" | "public")) => p,
+                    Some(other) => {
+                        return Err(Failure::other(format!(
+                            "privacy must be private, unlisted or public, not {other}"
+                        )));
+                    }
+                };
+                let made = api.post(
+                    &format!("{BASE}/playlists"),
+                    &[("part", "snippet,status")],
+                    &json!({
+                        "snippet": {"title": title, "description": args["description"].as_str().unwrap_or_default()},
+                        "status": {"privacyStatus": privacy}
+                    }),
+                )?;
+                Ok(format!(
+                    "Playlist made ({privacy}). Id {}.",
+                    made["id"].as_str().unwrap_or("?")
+                ))
+            }
+            "add_to_playlist" => {
+                let (playlist, video) =
+                    (required(args, "playlist_id")?, required(args, "video_id")?);
+                let mut snippet = json!({"playlistId": playlist, "resourceId": {"kind": "youtube#video", "videoId": video}});
+                if let Some(p) = args["position"].as_u64().filter(|p| *p >= 1) {
+                    snippet["position"] = json!(p - 1);
+                }
+                let added = api.post(
+                    &format!("{BASE}/playlistItems"),
+                    &[("part", "snippet")],
+                    &json!({"snippet": snippet}),
+                )?;
+                Ok(format!(
+                    "Added. Playlist item id {}.",
+                    added["id"].as_str().unwrap_or("?")
+                ))
+            }
+            "remove_from_playlist" => {
+                let id = required(args, "playlist_item_id")?;
+                api.delete(&format!("{BASE}/playlistItems"), &[("id", id)])?;
+                Ok("Removed from the playlist.".to_owned())
+            }
+            "rate_video" => {
+                let id = required(args, "video_id")?;
+                let rating = match arg(args, "rating") {
+                    Some(r @ ("like" | "dislike" | "none")) => r,
+                    _ => return Err(Failure::other("rating must be like, dislike or none")),
+                };
+                api.post(
+                    &format!("{BASE}/videos/rate"),
+                    &[("id", id), ("rating", rating)],
+                    &json!({}),
+                )?;
+                Ok(format!("Rating set to {rating}."))
+            }
+            "post_comment" => {
+                let (video, text) = (required(args, "video_id")?, required(args, "text")?);
+                let made = api.post(
+                    &format!("{BASE}/commentThreads"),
+                    &[("part", "snippet")],
+                    &json!({"snippet": {"videoId": video, "topLevelComment": {"snippet": {"textOriginal": text}}}}),
+                )?;
+                Ok(format!(
+                    "Comment posted. Id {}.",
+                    made["id"].as_str().unwrap_or("?")
+                ))
+            }
+            "reply_to_comment" => {
+                let (parent, text) = (required(args, "comment_id")?, required(args, "text")?);
+                let made = api.post(
+                    &format!("{BASE}/comments"),
+                    &[("part", "snippet")],
+                    &json!({"snippet": {"parentId": parent, "textOriginal": text}}),
+                )?;
+                Ok(format!(
+                    "Reply posted. Id {}.",
+                    made["id"].as_str().unwrap_or("?")
+                ))
             }
             other => Err(Failure::other(format!(
                 "YouTube has no tool called {other}"
@@ -429,13 +585,14 @@ fn playlist_line(p: &Value) -> String {
 fn playlist_item_line(i: &Value) -> String {
     let s = &i["snippet"];
     format!(
-        "{} · {} · {} · {}",
+        "{} · {} · {} · {} · item {}",
         s["position"]
             .as_u64()
             .map_or_else(|| "?".to_owned(), |p| (p + 1).to_string()),
         s["resourceId"]["videoId"].as_str().unwrap_or("?"),
         s["title"].as_str().unwrap_or("?"),
-        s["videoOwnerChannelTitle"].as_str().unwrap_or("?")
+        s["videoOwnerChannelTitle"].as_str().unwrap_or("?"),
+        i["id"].as_str().unwrap_or("?")
     )
 }
 
@@ -452,7 +609,8 @@ fn subscription_line(s: &Value) -> String {
 fn comment_line(t: &Value) -> String {
     let top = &t["snippet"]["topLevelComment"]["snippet"];
     format!(
-        "{} ({} likes, {} replies): {}",
+        "[{}] {} ({} likes, {} replies): {}",
+        t["id"].as_str().unwrap_or("?"),
         top["authorDisplayName"].as_str().unwrap_or("?"),
         top["likeCount"].as_u64().unwrap_or(0),
         t["snippet"]["totalReplyCount"].as_u64().unwrap_or(0),
@@ -514,10 +672,10 @@ mod tests {
 
     #[test]
     fn list_lines_count_from_one_and_comments_stay_on_one_line() {
-        let item = json!({"snippet": {"position": 0, "resourceId": {"videoId": "v"}, "title": "T", "videoOwnerChannelTitle": "C"}});
-        assert_eq!(playlist_item_line(&item), "1 · v · T · C");
-        let thread = json!({"snippet": {"totalReplyCount": 2, "topLevelComment": {"snippet": {"authorDisplayName": "Ann", "likeCount": 7, "textDisplay": "a\nb"}}}});
-        assert_eq!(comment_line(&thread), "Ann (7 likes, 2 replies): a b");
+        let item = json!({"id": "PI1", "snippet": {"position": 0, "resourceId": {"videoId": "v"}, "title": "T", "videoOwnerChannelTitle": "C"}});
+        assert_eq!(playlist_item_line(&item), "1 · v · T · C · item PI1");
+        let thread = json!({"id": "CT1", "snippet": {"totalReplyCount": 2, "topLevelComment": {"snippet": {"authorDisplayName": "Ann", "likeCount": 7, "textDisplay": "a\nb"}}}});
+        assert_eq!(comment_line(&thread), "[CT1] Ann (7 likes, 2 replies): a b");
         assert_eq!(
             playlist_line(
                 &json!({"id": "P", "snippet": {"title": "Mix"}, "contentDetails": {"itemCount": 4}})
@@ -534,16 +692,31 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_only_reads_and_is_described() {
-        for t in YouTube.tools() {
+    fn every_tool_is_described_and_the_writes_are_marked() {
+        let tools = YouTube.tools();
+        for t in &tools {
             assert!(
-                !t.description.is_empty()
-                    && t.schema["type"] == "object"
-                    && t.access == Access::Reads,
+                !t.description.is_empty() && t.schema["type"] == "object",
                 "{}",
                 t.name
             );
         }
+        let changing: Vec<&str> = tools
+            .iter()
+            .filter(|t| t.access == Access::Changes)
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            changing,
+            [
+                "create_playlist",
+                "add_to_playlist",
+                "remove_from_playlist",
+                "rate_video",
+                "post_comment",
+                "reply_to_comment"
+            ]
+        );
         assert!(required(&json!({}), "ids").is_err());
     }
 }

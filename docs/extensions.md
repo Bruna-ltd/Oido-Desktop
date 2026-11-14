@@ -6,7 +6,7 @@ extension looks like an MCP server (`mcp__gmail__search`); to the person it is a
 screen. Nothing runs on our servers: the app talks straight to the service's API with the person's
 own sign-in.
 
-Status: design agreed 2026-11-14. P1 and P3 (Calendar, built early) are on `feat/extensions-p1`, uncommitted; P4 (Drive, built early, Drive API only) is there too; P2 (Gmail write) and Docs/Sheets editing not started.
+Status: design agreed 2026-11-14. Built on `feat/extensions-p1`: Gmail, Google Calendar, Google Drive, YouTube, Google Docs and Google Sheets, each with read and write tools.
 
 ## Decisions
 
@@ -149,3 +149,35 @@ Extensions screen run with `OIDO_DB=:memory:`.
 - A pasted client secret is as sensitive as a password; it is sealed but is on this computer.
 - Tool names are a contract with saved agents and workflows: renaming one later breaks them.
   Names are chosen once, carefully.
+
+## Write tools (built)
+
+Writes are tools like any other: each has its own switch and is marked *changes things*; the
+toggle is still the only gate (ADR-7). Scopes grew to match, which means an existing sign-in must be
+made again (the card says "Sign in again to allow …" and lists what Google left out).
+
+| Extension | Scopes | Write tools |
+|---|---|---|
+| Gmail | `gmail.modify`, `gmail.send` | `create_draft`, `send_message`, `send_draft`, `reply`, `modify_labels`, `archive`, `mark_read`, `trash` |
+| Google Drive | `drive` (full) | `create_file`, `create_folder`, `update_file_info`, `move_file`, `copy_file`, `update_file_content`, `trash_file`, `restore_file` |
+| YouTube | `youtube.force-ssl` | `create_playlist`, `add_to_playlist`, `remove_from_playlist`, `rate_video`, `post_comment`, `reply_to_comment` |
+| Google Docs | `documents` | `create_doc`, `append_text`, `replace_text` (and `read_doc`) |
+| Google Sheets | `spreadsheets` | `update_range`, `append_rows`, `clear_range`, `create_spreadsheet`, `add_tab` (and reads) |
+
+Things that were decided on the way:
+
+- **Mail is built in `mime.rs`.** Everything in a header comes from a model, so a line break is
+  refused anywhere in one, addresses must be plain (`name@example.com`, no display name), and a
+  subject with non-ASCII text is sent as RFC 2047 encoded words. The body is UTF-8, base64.
+- **Reply threading is done for the model.** `reply` reads the original's headers and sets
+  `In-Reply-To`, `References`, `Re:` and the thread; `reply_all` keeps the others but not the
+  person's own address (from `users/me/profile`).
+- **No permanent deletes.** Gmail has `trash` (30 days), Drive has `trash_file` and
+  `restore_file`; nothing here empties the trash or deletes for good.
+- **A write is never retried** (a second send could do it twice); a read is, once.
+- **Drive went from `drive.file` to `drive`.** The narrow scope could not touch files Oido did not
+  make. Docs and Sheets are edited by their own extensions; `update_file_content` refuses Google
+  Docs and Sheets and says so.
+- **YouTube writes cost quota:** 50 units each, and the descriptions say so.
+- **Not built:** Gmail attachments, Docs formatting (styles, images), Sheets formatting and
+  formulas beyond writing them as text, YouTube playlist editing and deleting.

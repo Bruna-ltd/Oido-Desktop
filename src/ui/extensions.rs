@@ -181,7 +181,7 @@ fn account_card(s: &App, k: &Kit) -> El {
                 ),
         )
         .child(
-            text("Gmail, Calendar, Drive and YouTube sign in through a client of your own, so your mail never passes through anyone else. In Google Cloud Console make a project, turn on the APIs you want, make an OAuth client of type Desktop app, and paste its id and secret here. Set the app's publishing status to In production, or Google ends the sign-in every 7 days.")
+            text("Google's services sign in through a client of your own, so your data never passes through anyone else. In Google Cloud Console make a project, turn on the APIs you want, make an OAuth client of type Desktop app, and paste its id and secret here. Set the app's publishing status to In production, or Google ends the sign-in every 7 days.")
                 .font(k.ty.small)
                 .color(c.text_faint)
                 .wrap(),

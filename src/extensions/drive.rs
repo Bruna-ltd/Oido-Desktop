@@ -1,7 +1,7 @@
-//! Google Drive: find and read files, and make or trash files this app made.
-//!
-//! The sign-in reads everything in Drive but may only change what this app created
-//! (`drive.file`), so a tool that trashes a file only works on one Oido made.
+//! Google Drive: find and read files, make folders and text files, and rename, move, copy,
+//! rewrite and trash any file the person has. The sign-in is the full `drive` scope: the narrower
+//! ones cannot touch files Oido did not make. Editing a Google Doc or Sheet in place is the Docs
+//! and Sheets extensions' work.
 
 use serde_json::{Value, json};
 
@@ -9,8 +9,7 @@ use super::google::{Api, Failure, segment};
 use super::{Access, Extension, ToolDef};
 use crate::mcp::catalog::Logo;
 
-const READ: &str = "https://www.googleapis.com/auth/drive.readonly";
-const OWN: &str = "https://www.googleapis.com/auth/drive.file";
+const DRIVE: &str = "https://www.googleapis.com/auth/drive";
 const FILES: &str = "https://www.googleapis.com/drive/v3/files";
 const UPLOAD: &str = "https://www.googleapis.com/upload/drive/v3/files";
 const DEFAULT_RESULTS: u64 = 20;
@@ -36,11 +35,11 @@ impl Extension for Drive {
     }
 
     fn blurb(&self) -> &'static str {
-        "Find and read the person's files, and make text files and Google Docs."
+        "Find and read the person's files, make folders and text files, and rename, move, copy, rewrite and trash them."
     }
 
     fn scopes(&self) -> &'static [&'static str] {
-        &[READ, OWN]
+        &[DRIVE]
     }
 
     fn tools(&self) -> Vec<ToolDef> {
@@ -88,9 +87,76 @@ impl Extension for Drive {
             },
             ToolDef {
                 name: "trash_file",
-                description: "Move a file to the trash, where the person can still restore it. Only works on files Oido made with create_file.",
+                description: "Move any file or folder to the trash, where the person can still restore it.",
                 access: Access::Changes,
                 schema: json!({"type": "object", "properties": {"id": id}, "required": ["id"]}),
+            },
+            ToolDef {
+                name: "restore_file",
+                description: "Take a file or folder out of the trash.",
+                access: Access::Changes,
+                schema: json!({"type": "object", "properties": {"id": id}, "required": ["id"]}),
+            },
+            ToolDef {
+                name: "create_folder",
+                description: "Make a folder, inside another folder when given, else at the top of the person's Drive.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "parent_id": {"type": "string", "description": "The folder to make it in."}
+                    },
+                    "required": ["name"]
+                }),
+            },
+            ToolDef {
+                name: "update_file_info",
+                description: "Rename a file or folder, or change its description. Only what is given changes.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": id,
+                        "name": {"type": "string"},
+                        "description": {"type": "string"}
+                    },
+                    "required": ["id"]
+                }),
+            },
+            ToolDef {
+                name: "move_file",
+                description: "Move a file or folder into another folder.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {"id": id, "to_folder_id": {"type": "string", "description": "The folder to move it to."}},
+                    "required": ["id", "to_folder_id"]
+                }),
+            },
+            ToolDef {
+                name: "copy_file",
+                description: "Make a copy of a file, with a new name and in another folder when given.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": id,
+                        "name": {"type": "string", "description": "The copy's name. Default: Copy of the original's."},
+                        "folder_id": {"type": "string", "description": "Where to put the copy. Default: next to the original."}
+                    },
+                    "required": ["id"]
+                }),
+            },
+            ToolDef {
+                name: "update_file_content",
+                description: "Replace everything in a text, Markdown, CSV, JSON or code file with new text. The old content is gone, though Drive keeps earlier versions. Google Docs and Sheets are edited with the Google Docs and Google Sheets extensions instead.",
+                access: Access::Changes,
+                schema: json!({
+                    "type": "object",
+                    "properties": {"id": id, "content": {"type": "string", "description": "The file's new content."}},
+                    "required": ["id", "content"]
+                }),
             },
         ]
     }
@@ -119,11 +185,136 @@ impl Extension for Drive {
                     file["id"].as_str().unwrap_or("?")
                 ))
             }
+            "restore_file" => {
+                let file = api.patch(
+                    &file_url(args)?,
+                    &[("fields", "id,name,trashed"), ("supportsAllDrives", "true")],
+                    &json!({"trashed": false}),
+                )?;
+                Ok(format!(
+                    "Restored from the trash: {} ({}).",
+                    file["name"].as_str().unwrap_or("?"),
+                    file["id"].as_str().unwrap_or("?")
+                ))
+            }
+            "create_folder" => {
+                let name = required(args, "name")?;
+                let mut meta = json!({"name": name, "mimeType": FOLDER});
+                if let Some(parent) = given(args, "parent_id") {
+                    meta["parents"] = json!([parent]);
+                }
+                let made = api.post(
+                    FILES,
+                    &[("fields", DETAILED), ("supportsAllDrives", "true")],
+                    &meta,
+                )?;
+                Ok(format!("Folder made.\n{}", render_file(&made)))
+            }
+            "update_file_info" => {
+                let mut meta = json!({});
+                for key in ["name", "description"] {
+                    if let Some(v) = args[key].as_str() {
+                        meta[key] = json!(v);
+                    }
+                }
+                if meta.as_object().is_some_and(serde_json::Map::is_empty) {
+                    return Err(Failure::other("give a new name or description"));
+                }
+                let file = api.patch(
+                    &file_url(args)?,
+                    &[("fields", DETAILED), ("supportsAllDrives", "true")],
+                    &meta,
+                )?;
+                Ok(format!("Updated.\n{}", render_file(&file)))
+            }
+            "move_file" => {
+                let (url, to) = (file_url(args)?, required(args, "to_folder_id")?);
+                let now = api.get(
+                    &url,
+                    &[("fields", "parents"), ("supportsAllDrives", "true")],
+                )?;
+                let from: Vec<&str> = now["parents"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                let remove = from.join(",");
+                let file = api.patch(
+                    &url,
+                    &[
+                        ("addParents", to),
+                        ("removeParents", remove.as_str()),
+                        ("fields", DETAILED),
+                        ("supportsAllDrives", "true"),
+                    ],
+                    &json!({}),
+                )?;
+                Ok(format!("Moved.\n{}", render_file(&file)))
+            }
+            "copy_file" => {
+                let mut meta = json!({});
+                if let Some(name) = given(args, "name") {
+                    meta["name"] = json!(name);
+                }
+                if let Some(folder) = given(args, "folder_id") {
+                    meta["parents"] = json!([folder]);
+                }
+                let url = format!("{}/copy", file_url(args)?);
+                let made = api.post(
+                    &url,
+                    &[("fields", DETAILED), ("supportsAllDrives", "true")],
+                    &meta,
+                )?;
+                Ok(format!("Copied.\n{}", render_file(&made)))
+            }
+            "update_file_content" => update_content(args, api),
             other => Err(Failure::other(format!(
                 "Google Drive has no tool called {other}"
             ))),
         }
     }
+}
+
+fn given<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
+    args[name].as_str().filter(|v| !v.is_empty())
+}
+
+fn required<'a>(args: &'a Value, name: &str) -> Result<&'a str, Failure> {
+    given(args, name).ok_or_else(|| Failure::other(format!("`{name}` is required")))
+}
+
+fn update_content(args: &Value, api: &Api) -> Result<String, Failure> {
+    let content = args["content"]
+        .as_str()
+        .ok_or_else(|| Failure::other("`content` is required"))?;
+    let id = required(args, "id")?;
+    let meta = api.get(
+        &file_url(args)?,
+        &[
+            ("fields", "id,name,mimeType"),
+            ("supportsAllDrives", "true"),
+        ],
+    )?;
+    let mime = meta["mimeType"].as_str().unwrap_or("");
+    if way_to_read(mime) != Way::Download {
+        return Err(Failure::other(format!(
+            "{} is a {} file: only text, Markdown, CSV, JSON and code files can be rewritten here (Google Docs and Sheets have their own extensions)",
+            meta["name"].as_str().unwrap_or("it"),
+            kind_of(mime)
+        )));
+    }
+    let made = api.patch_raw(
+        &format!("{UPLOAD}/{}", segment(id)),
+        &[
+            ("uploadType", "media"),
+            ("fields", DETAILED),
+            ("supportsAllDrives", "true"),
+        ],
+        mime,
+        content.to_owned(),
+    )?;
+    Ok(format!("Rewritten.\n{}", render_file(&made)))
 }
 
 fn file_url(args: &Value) -> Result<String, Failure> {
@@ -397,6 +588,18 @@ mod tests {
             .filter(|t| t.access == Access::Changes)
             .map(|t| t.name)
             .collect();
-        assert_eq!(changing, ["create_file", "trash_file"]);
+        assert_eq!(
+            changing,
+            [
+                "create_file",
+                "trash_file",
+                "restore_file",
+                "create_folder",
+                "update_file_info",
+                "move_file",
+                "copy_file",
+                "update_file_content"
+            ]
+        );
     }
 }

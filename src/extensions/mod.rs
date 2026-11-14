@@ -9,11 +9,14 @@
 //! account (see [`google`]).
 
 mod calendar;
+mod docs;
 mod drive;
 mod flow;
 mod gmail;
 pub mod google;
 mod marks;
+mod mime;
+mod sheets;
 mod youtube;
 
 use serde_json::Value;
@@ -79,6 +82,8 @@ pub const ALL: &[&dyn Extension] = &[
     &gmail::Gmail,
     &calendar::Calendar,
     &drive::Drive,
+    &docs::Docs,
+    &sheets::Sheets,
     &youtube::YouTube,
 ];
 

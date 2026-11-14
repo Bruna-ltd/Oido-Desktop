@@ -436,7 +436,7 @@ mod tests {
         e.account.signed_in = true;
         let why = e.blocked(gmail()).unwrap();
         assert!(why.starts_with("Sign in again to allow Gmail."));
-        assert!(why.contains("Missing: gmail.readonly. Google granted: nothing."));
+        assert!(why.contains("Missing: gmail.modify, gmail.send. Google granted: nothing."));
         e.account.scopes = gmail().scopes().iter().map(|s| (*s).to_owned()).collect();
         assert_eq!(e.blocked(gmail()), None);
     }
@@ -453,7 +453,7 @@ mod tests {
             },
         );
         let wanted = e.wanted_scopes();
-        assert_eq!(wanted.len(), 2);
+        assert_eq!(wanted.len(), 1 + gmail().scopes().len());
         assert!(wanted.contains(&gmail().scopes()[0]));
     }
 
@@ -514,15 +514,12 @@ mod tests {
                 .filter(|n| n.starts_with("mcp__gmail__"))
                 .collect()
         };
-        assert_eq!(
-            names(&app),
-            [
-                "mcp__gmail__search",
-                "mcp__gmail__read_message",
-                "mcp__gmail__read_thread",
-                "mcp__gmail__list_labels"
-            ]
-        );
+        let all: Vec<String> = gmail()
+            .tools()
+            .iter()
+            .map(|t| format!("mcp__gmail__{}", t.name))
+            .collect();
+        assert_eq!(names(&app), all);
         assert!(app.tool_known("mcp__gmail__search"));
 
         app.ext_toggle_tool(gmail(), "read_thread");

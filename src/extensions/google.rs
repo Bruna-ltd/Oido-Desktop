@@ -110,6 +110,23 @@ impl Api<'_> {
         self.json(Method::Patch, url, query, Some(body))
     }
 
+    /// A PUT of `body` as JSON, which replaces what is there.
+    pub fn put(&self, url: &str, query: &[(&str, &str)], body: &Value) -> Result<Value, Failure> {
+        self.json(Method::Put, url, query, Some(body))
+    }
+
+    /// A PATCH of `body` as `content_type` (new content for a file), answered in JSON.
+    pub fn patch_raw(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+        content_type: &str,
+        body: String,
+    ) -> Result<Value, Failure> {
+        let text = self.raw(Method::Patch, url, query, Some((content_type, body)))?;
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
     pub fn delete(&self, url: &str, query: &[(&str, &str)]) -> Result<Value, Failure> {
         self.json(Method::Delete, url, query, None)
     }
@@ -158,13 +175,19 @@ impl Api<'_> {
                     .header("Authorization", &bearer)
                     .header("Content-Type", *kind)
                     .send(text.as_str()),
+                (Method::Put, Some((kind, text))) => ask
+                    .put(url)
+                    .query_pairs(query.iter().copied())
+                    .header("Authorization", &bearer)
+                    .header("Content-Type", *kind)
+                    .send(text.as_str()),
                 (Method::Patch, Some((kind, text))) => ask
                     .patch(url)
                     .query_pairs(query.iter().copied())
                     .header("Authorization", &bearer)
                     .header("Content-Type", *kind)
                     .send(text.as_str()),
-                (Method::Post | Method::Patch, None) => {
+                (Method::Post | Method::Put | Method::Patch, None) => {
                     return Err(Failure::other("a write was sent with nothing in it"));
                 }
             };
@@ -195,6 +218,7 @@ impl Api<'_> {
 enum Method {
     Get,
     Post,
+    Put,
     Patch,
     Delete,
 }
