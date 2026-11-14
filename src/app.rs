@@ -129,6 +129,22 @@ pub struct App {
     pub wf_jobs: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub wf_notice: Option<String>,
     pub wf_confirm: bool,
+    /// The workflow being made or changed, and which of its pop-up lists is open.
+    pub wf_editor: Option<crate::workflow::editor::Editor>,
+    /// The editor's test run: what is given, and how the last one went.
+    pub wf_test: crate::flow_editor::TestRun,
+    /// The editor's graph view: which view shows, what is selected, the camera.
+    pub wf_graph: crate::flow_graph::GraphView,
+    pub wf_menu: Option<crate::workflow::editor::Menu>,
+    /// Stands in for a box that is no longer there when something is typed into it.
+    pub wf_stray: TextEdit,
+    /// Whether the workflow editor shows each step's id, result name and raw boxes.
+    pub wf_advanced: bool,
+    /// The list of tools a workflow step can use, shared by every step's field: it is open for the
+    /// step in `wf_tool_step`. `wf_tool_closed` is what the others show.
+    pub wf_tool_picker: crate::picker::MultiPicker,
+    pub wf_tool_closed: crate::picker::MultiPicker,
+    pub wf_tool_step: Option<crate::workflow::editor::Loc>,
     pub composer: crate::composer::Composer,
     /// What was typed in the chats not open, by session id: each tab keeps its own draft.
     pub parked: std::collections::HashMap<String, crate::composer::Composer>,
@@ -211,6 +227,13 @@ pub struct App {
 /// The running app, for worker threads to hand their results back through. Unset in tests and
 /// headless runs, where [`App::spawn`] runs the work on the spot instead.
 static HANDLE: OnceLock<AppHandle<App>> = OnceLock::new();
+
+/// Runs `f` on the UI thread from any other. With no running app (tests, headless) it is not run.
+pub fn on_ui_thread(f: impl FnOnce(&mut App) + Send + 'static) {
+    if let Some(handle) = HANDLE.get() {
+        handle.update(move |app, _| f(app));
+    }
+}
 
 pub fn set_handle(handle: AppHandle<App>) {
     let _ = HANDLE.set(handle);
@@ -304,6 +327,15 @@ impl App {
             wf_jobs: std::collections::HashMap::new(),
             wf_notice: None,
             wf_confirm: false,
+            wf_editor: None,
+            wf_test: crate::flow_editor::TestRun::default(),
+            wf_graph: crate::flow_graph::GraphView::default(),
+            wf_menu: None,
+            wf_stray: TextEdit::new(""),
+            wf_advanced: false,
+            wf_tool_picker: Default::default(),
+            wf_tool_closed: Default::default(),
+            wf_tool_step: None,
             composer: crate::composer::Composer::new(),
             parked: std::collections::HashMap::new(),
             queued: std::collections::HashMap::new(),

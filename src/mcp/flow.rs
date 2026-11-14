@@ -475,7 +475,7 @@ impl App {
     }
 
     /// Saves new sign-in tokens; `then_list` asks the server for its tools with them.
-    fn mcp_keep_tokens(&mut self, id: &str, tokens: oauth::Tokens, then_list: bool) {
+    pub(crate) fn mcp_keep_tokens(&mut self, id: &str, tokens: oauth::Tokens, then_list: bool) {
         let Some(db) = &self.store else { return };
         let saved = db.mcp_secrets(id).and_then(|mut s| {
             s.oauth = Some(tokens);
@@ -582,19 +582,35 @@ impl App {
     /// Opens what a call to the server needs. The vault stays on this thread, so it is done here,
     /// before the work goes to another.
     fn mcp_target(&mut self, id: &str) -> Option<Target> {
-        let server = self.mcp.servers.iter().find(|s| s.id == id)?;
-        let transport = server.transport.clone();
+        match self.mcp_target_for(id) {
+            Ok(t) => Some(t),
+            Err(why) => {
+                if why != "that server is gone." {
+                    self.mcp_notice(why);
+                }
+                None
+            }
+        }
+    }
+
+    /// What a worker needs to reach server `id`, or why that cannot be had.
+    pub(crate) fn mcp_target_for(&self, id: &str) -> Result<Target, String> {
+        let server = self
+            .mcp
+            .servers
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or("that server is gone.")?;
         let secrets = match self.store.as_ref().map(|db| db.mcp_secrets(id)) {
             Some(Ok(s)) => s,
             Some(Err(e)) => {
-                self.mcp_notice(format!("The server's saved secrets could not be read: {e}"));
-                return None;
+                return Err(format!("The server's saved secrets could not be read: {e}"));
             }
             None => Secrets::default(),
         };
-        Some(Target {
+        Ok(Target {
             id: id.to_owned(),
-            transport,
+            transport: server.transport.clone(),
             secrets,
         })
     }

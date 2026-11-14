@@ -111,8 +111,8 @@ ChatGPT's Codex backend, which OpenAI does not document, so it may change withou
   `src/usage.rs`: usage totals, cost, and the Usage screen's report; `src/pricing.rs`: model prices from models.dev.
   `src/context.rs`: what the agent is told about the moment (the date and time), sent after its brief.
   `src/tools.rs`: the tools every agent is given (`ask_user_question`, `shell`, `read_file`, `write_file`, `edit_file`, `teach_workflow`, `run_workflow`).
-  `src/workflow/`: workflows (definition and checks, references, the engine, learning one from a chat);
-  `src/flows.rs`: teaching, saving and running them in the app.
+  `src/workflow/`: workflows (definition and checks, references and expressions, the engine, the editor's state, learning one from a chat);
+  `src/flows.rs`: teaching, saving and running them in the app; `src/flow_editor.rs`: what the editor's buttons do. Steps can branch (`if`, `switch`) and repeat (`for_each`, `while`), and values are worked out with Rhai expressions: see `docs/workflow-builder.md`.
   `src/mcp/`: MCP servers, any number of them. `client.rs` speaks JSON-RPC to a remote server (HTTP) or a local
   program (a child process, kept running between calls); `oauth.rs` signs in through the browser (discovery,
   registration, PKCE, a loopback callback, renewal); `flow.rs` is the form, the background work and the call;

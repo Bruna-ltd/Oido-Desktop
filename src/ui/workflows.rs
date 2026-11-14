@@ -5,12 +5,16 @@ use rune::{Color, El, ScrollSpec, col, el, row, text, text_input};
 use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit};
 
 use crate::app::{App, now};
-use crate::workflow::definition::describe;
-use crate::workflow::{RunRecord, RunStatus, Saved};
+use crate::workflow::definition::outline;
+use crate::workflow::pause::Decision;
+use crate::workflow::{Pause, RunRecord, RunStatus, Saved};
 
-pub fn screen(s: &App, k: &Kit) -> El {
+pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    if s.wf_editor.is_some() {
+        return super::workflow_editor::screen(s, k, layer);
+    }
     if s.workflows.is_empty() {
-        return empty(k);
+        return empty(s, k);
     }
     row()
         .key("workflows")
@@ -20,7 +24,36 @@ pub fn screen(s: &App, k: &Kit) -> El {
         .child(detail(s, k))
 }
 
-fn empty(k: &Kit) -> El {
+fn new_button(k: &Kit) -> El {
+    Button::new("New workflow")
+        .variant(ButtonVariant::Outline)
+        .control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.new_workflow())
+        .build(k)
+        .key("wf-new")
+}
+
+fn examples_button(k: &Kit) -> El {
+    Button::new("Add examples")
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press(|s: &mut App| s.add_examples())
+        .build(k)
+        .key("wf-examples")
+}
+
+/// What the last press said, if anything.
+fn notice(s: &App, k: &Kit) -> Option<El> {
+    s.wf_notice.as_ref().map(|why| {
+        text(why.clone())
+            .font(k.ty.small)
+            .color(k.c.text_muted)
+            .max_w(460.0)
+            .wrap()
+    })
+}
+
+fn empty(s: &App, k: &Kit) -> El {
     col()
         .key("workflows-empty")
         .w_full()
@@ -29,12 +62,19 @@ fn empty(k: &Kit) -> El {
         .gap(6.0)
         .child(text("No workflows yet").font(k.ty.body_medium).color(k.c.text_base))
         .child(
-            text("Have an agent do something with its tools, then press Save as workflow above the chat. It becomes steps you can run again.")
+            text("Have an agent do something with its tools, then press Save as workflow above the chat. It becomes steps you can run again. Or add a few examples to try the builder on.")
                 .font(k.ty.small)
                 .color(k.c.text_muted)
                 .max_w(460.0)
                 .wrap(),
         )
+        .child(
+            row()
+                .gap(8.0)
+                .child(new_button(k))
+                .child(examples_button(k)),
+        )
+        .children(notice(s, k))
 }
 
 fn list(s: &App, k: &Kit) -> El {
@@ -48,6 +88,9 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+        .child(new_button(k))
+        .child(examples_button(k))
+        .children(notice(s, k))
         .children(s.workflows.iter().map(|w| item(s, w, k)))
 }
 
@@ -79,10 +122,13 @@ fn item(s: &App, w: &Saved, k: &Kit) -> El {
                 .truncate(),
         )
         .child(
-            text(format!("{agent} · {} steps", w.definition.steps.len()))
-                .font(k.ty.small)
-                .color(c.text_muted)
-                .truncate(),
+            text(format!(
+                "{agent} · {} steps",
+                crate::workflow::editor::step_count(&w.definition)
+            ))
+            .font(k.ty.small)
+            .color(c.text_muted)
+            .truncate(),
         );
     k.interactive(e)
 }
@@ -90,7 +136,7 @@ fn item(s: &App, w: &Saved, k: &Kit) -> El {
 fn badge(status: RunStatus) -> Badge {
     Badge::new(status.as_str()).variant(match status {
         RunStatus::Succeeded => BadgeVariant::Subtle,
-        RunStatus::Running => BadgeVariant::Accent,
+        RunStatus::Running | RunStatus::Waiting => BadgeVariant::Accent,
         RunStatus::Failed | RunStatus::Stopped => BadgeVariant::Neutral,
     })
 }
@@ -137,11 +183,20 @@ fn detail(s: &App, k: &Kit) -> El {
                 .wrap(),
         );
     }
-    out = out.children(w.definition.steps.iter().enumerate().map(|(i, st)| {
-        text(format!("{}. {}", i + 1, describe(st)))
+    let mut n = 0;
+    out = out.children(outline(&w.definition.steps).into_iter().map(|r| {
+        // Steps in the first level are numbered; what is inside them is indented under them.
+        let label = if r.path.contains('.') {
+            r.label
+        } else {
+            n += 1;
+            format!("{n}. {}", r.label)
+        };
+        text(label)
             .font(k.ty.small)
             .color(c.text_base)
             .wrap()
+            .pl(r.depth as f32 * 16.0)
     }));
     if !w.definition.success.is_empty() {
         out = out.child(
@@ -227,6 +282,15 @@ fn detail(s: &App, k: &Kit) -> El {
                 .key("wf-run"),
         )
     };
+    actions = actions.child(
+        Button::new("Edit")
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .disabled(running)
+            .on_press(|s: &mut App| s.edit_open_workflow())
+            .build(k)
+            .key("wf-edit"),
+    );
     actions = if s.wf_confirm {
         actions
             .child(
@@ -313,29 +377,128 @@ fn run_row(s: &App, i: usize, r: &RunRecord, k: &Kit) -> El {
 }
 
 fn run_detail(r: &RunRecord, k: &Kit) -> El {
+    let failure =
+        (!r.error.is_empty()).then(|| format!("Failed at {}: {}", r.failed_step, r.error));
+    let log = step_log(&r.steps, failure, "wf-run-detail", k);
+    match &r.pause {
+        Some(pause) => col()
+            .w_full()
+            .gap(8.0)
+            .child(waiting(r, pause, k))
+            .child(log),
+        None => log,
+    }
+}
+
+/// What a waiting run waits for, and the buttons that answer it.
+fn waiting(r: &RunRecord, pause: &Pause, k: &Kit) -> El {
+    let c = &k.c;
+    let asks = pause.until.is_none();
+    let line = match pause.until {
+        Some(at) => format!(
+            "{}. It goes on by itself in {}.",
+            pause.prompt,
+            until(at - now())
+        ),
+        None => pause.prompt.clone(),
+    };
+    let (wf, run) = (r.workflow_id.clone(), r.id.clone());
+    let button = |label: &str, key: &str, variant: ButtonVariant| {
+        Button::new(label.to_owned())
+            .variant(variant)
+            .control_size(ControlSize::Small)
+            .build(k)
+            .key(format!("{key}-{}", r.id))
+    };
+    let (w1, r1) = (wf.clone(), run.clone());
+    let (w2, r2) = (wf.clone(), run.clone());
+    let (w3, r3) = (wf, run);
+    let mut buttons = row().gap(8.0).center_y();
+    buttons = buttons.child(
+        button(
+            if asks { "Approve" } else { "Go on now" },
+            "wf-approve",
+            ButtonVariant::Submit,
+        )
+        .on_press(move |s: &mut App| s.answer_wait(&w1, &r1, Decision::Go, true)),
+    );
+    if asks {
+        buttons = buttons.child(
+            button("Decline", "wf-decline", ButtonVariant::Outline)
+                .on_press(move |s: &mut App| s.answer_wait(&w2, &r2, Decision::Declined, true)),
+        );
+    }
+    buttons = buttons.child(
+        button("Stop it", "wf-stop-wait", ButtonVariant::Ghost)
+            .on_press(move |s: &mut App| s.stop_wait(&w3, &r3)),
+    );
+    col()
+        .key("wf-waiting")
+        .w_full()
+        .gap(8.0)
+        .padding(12.0)
+        .radius(k.radius.md)
+        .border(1.0, c.border_strong)
+        .child(
+            text(if asks { "Waiting for you" } else { "Waiting" })
+                .font(k.ty.ui_medium)
+                .color(c.text_base),
+        )
+        .child(
+            text(line)
+                .font(k.ty.body)
+                .color(c.text_base)
+                .wrap()
+                .selectable(true),
+        )
+        .child(buttons)
+}
+
+/// How long until `secs` from now, in words.
+fn until(secs: i64) -> String {
+    match secs {
+        ..60 => "under a minute".to_owned(),
+        60..3600 => format!("{} min", secs / 60),
+        3600..86400 => format!("{} h", secs / 3600),
+        _ => format!("{} d", secs / 86400),
+    }
+}
+
+/// The steps of a run as they ran, nested the way the workflow is, with each one's output.
+pub(super) fn step_log(
+    steps: &[crate::workflow::engine::StepLog],
+    failure: Option<String>,
+    key: &str,
+    k: &Kit,
+) -> El {
     let c = &k.c;
     let mut out = col()
-        .key("wf-run-detail")
+        .key(key.to_owned())
         .w_full()
         .gap(8.0)
         .padding(12.0)
         .radius(k.radius.md)
         .fill(c.layer_01);
-    if !r.error.is_empty() {
+    if let Some(failure) = failure {
         out = out.child(
-            text(format!("Failed at {}: {}", r.failed_step, r.error))
+            text(failure)
                 .font(k.ty.small)
                 .color(k.c.warning.icon)
                 .wrap()
                 .selectable(true),
         );
     }
-    for (i, st) in r.steps.iter().enumerate() {
+    for (i, st) in steps.iter().enumerate() {
+        let note = st
+            .round_note()
+            .map_or(String::new(), |n| format!("  ({n})"));
+        let indent = st.depth() as f32 * 16.0;
         out = out.child(
-            text(format!("{}. {}", i + 1, st.what))
+            text(format!("{}. {}{note}", i + 1, st.what))
                 .font(k.ty.small)
                 .color(c.text_base)
-                .wrap(),
+                .wrap()
+                .pl(indent),
         );
         let shown = st.error.clone().unwrap_or_else(|| st.output.clone());
         if !shown.is_empty() {
@@ -349,6 +512,7 @@ fn run_detail(r: &RunRecord, k: &Kit) -> El {
                         c.text_faint
                     })
                     .wrap()
+                    .pl(indent)
                     .selectable(true),
             );
         }

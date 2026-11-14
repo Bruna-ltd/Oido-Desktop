@@ -1238,6 +1238,9 @@ pub static SCENES: &[Scene] = &[
             output: out.into(),
             error: err.map(str::to_owned),
             ms: 120,
+            path: String::new(),
+            rounds: Vec::new(),
+            running: false,
         };
         s.wf_runs = vec![
             RunRecord {
@@ -1265,6 +1268,7 @@ pub static SCENES: &[Scene] = &[
                 output_tokens: 60,
                 started_at: app::now() - 300,
                 finished_at: None,
+                pause: None,
             },
             RunRecord {
                 id: "r2".into(),
@@ -1280,9 +1284,184 @@ pub static SCENES: &[Scene] = &[
                 output_tokens: 0,
                 started_at: app::now() - 90000,
                 finished_at: None,
+                pause: None,
             },
         ];
         s.route = Route::Workflows;
+    }),
+    ("workflow-nested", |s| nested_workflow(s)),
+    ("workflow-editor", |s| {
+        s.wf_graph.shown = crate::flow_graph::View::Cards;
+        use crate::workflow::editor::Editor;
+        nested_workflow(s);
+        if let Some(w) = s.workflows.first() {
+            s.wf_editor = Some(Editor::from_saved(w));
+        }
+    }),
+    ("workflow-graph", |s| graph_scene(s)),
+    ("workflow-drag", |s| {
+        use crate::flow_graph::StepDrag;
+        use crate::workflow::editor::Loc;
+        use crate::workflow::layout::layout;
+        graph_scene(s);
+        // `ls` (the first step) is being carried over the notes column, below its first step.
+        let Some(ed) = s.wf_editor.as_ref() else {
+            return;
+        };
+        let lay = layout(ed);
+        let from = Loc {
+            place: Vec::new(),
+            index: 0,
+        };
+        let r = lay
+            .find(&Loc {
+                place: vec![(1, 1)],
+                index: 0,
+            })
+            .map(|i| i.rect)
+            .unwrap_or_default();
+        let point = [r.centre_x() + 30.0, r.bottom() + 12.0];
+        s.wf_graph.selected = Some(from.clone());
+        s.wf_graph.drag = Some(StepDrag {
+            drop: lay.drop_target(&from, point),
+            from,
+            grab: [40.0, 20.0],
+            moving: true,
+            point,
+            copy: false,
+        });
+    }),
+    ("workflow-simple", |s| simple_workflow(s, "check")),
+    ("workflow-add", |s| simple_workflow(s, "add")),
+    ("workflow-tool", |s| simple_workflow(s, "tool")),
+    ("workflow-tools", |s| simple_workflow(s, "tools")),
+    ("workflow-new", |s| {
+        nested_workflow(s);
+        s.new_workflow();
+        // A snapshot draws one frame, so give the view the size the window leaves it.
+        s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+        s.fit_graph();
+    }),
+    ("workflow-run", |s| {
+        use crate::workflow::engine::{Ending, Outcome, StepLog, Usage};
+        graph_scene(s);
+        s.wf_graph.selected = Some(crate::workflow::editor::Loc {
+            place: vec![(1, 1), (1, 0), (0, 0)],
+            index: 0,
+        });
+        let line = |path: &str, id: &str, out: &str, err: Option<&str>, rounds: &[u32]| StepLog {
+            id: id.into(),
+            kind: "tool".into(),
+            what: String::new(),
+            output: out.into(),
+            error: err.map(Into::into),
+            ms: 40,
+            path: path.into(),
+            rounds: rounds.to_vec(),
+            running: false,
+        };
+        let steps = vec![
+            line("0", "ls", "a.pdf\nb.png\nc.txt", None, &[]),
+            line("1", "gather", "2 branches", None, &[]),
+            line("1.news.0", "n", "Headlines: …", None, &[]),
+            line(
+                "1.notes.0",
+                "r",
+                "# Today\n- ship the graph view",
+                None,
+                &[],
+            ),
+            line("1.notes.1", "each", "3 rounds", None, &[]),
+            line("1.notes.1.body.0", "kind", "case 1", None, &[1]),
+            line("1.notes.1.body.0.case0.0", "pdf", "", None, &[1]),
+            line("1.notes.1.body.0", "kind", "otherwise", None, &[2]),
+            line(
+                "1.notes.1.body.0.default.0",
+                "skip",
+                "skip b.png",
+                None,
+                &[2],
+            ),
+            line("1.notes.1.body.0", "kind", "case 1", None, &[3]),
+            line(
+                "1.notes.1.body.0.case0.0",
+                "pdf",
+                "",
+                Some("mv: cannot move 'c.pdf': no such file"),
+                &[3],
+            ),
+            line("2", "say", "Two stories and a note.", None, &[]),
+            line("3", "ok", "Send the summary?", None, &[]),
+        ];
+        s.wf_test.result = Some(Outcome {
+            ending: Ending::Waiting {
+                step: "ok".into(),
+                prompt: "Send the summary?".into(),
+                until: None,
+            },
+            output: String::new(),
+            steps,
+            usage: Usage::default(),
+            snapshot: None,
+        });
+        if let Some(ed) = s.wf_editor.as_mut() {
+            ed.problems = vec!["step 5.1 (\"send\"): a tool step needs a tool".into()];
+        }
+    }),
+    ("workflow-parallel", |s| {
+        s.wf_graph.shown = crate::flow_graph::View::Cards;
+        use crate::workflow::definition::Step;
+        use crate::workflow::editor::Editor;
+        nested_workflow(s);
+        let step: Step = serde_json::from_value(serde_json::json!({
+            "id": "gather", "kind": "parallel", "on_error": "continue", "bind": "got",
+            "branches": [
+                {"name": "news", "steps": [{"id": "n", "kind": "tool", "tool": "web_fetch",
+                    "args": {"url": "https://example.com/news"}}]},
+                {"name": "notes", "steps": [{"id": "r", "kind": "tool", "tool": "read_file",
+                    "args": {"path": "notes/today.md"}}]}
+            ]
+        }))
+        .unwrap_or_default();
+        if let Some(w) = s.workflows.first_mut() {
+            w.definition.steps = vec![step];
+            s.wf_editor = Some(Editor::from_saved(w));
+        }
+    }),
+    ("workflow-waiting", |s| {
+        use crate::workflow::{Pause, RunStatus};
+        nested_workflow(s);
+        if let Some(r) = s.wf_runs.first_mut() {
+            r.status = RunStatus::Waiting;
+            r.finished_at = None;
+            r.pause = Some(Pause {
+                step: "ok".into(),
+                prompt: "Move 3 files into docs/ and pictures/?".into(),
+                until: None,
+            });
+        }
+    }),
+    ("workflow-test", |s| {
+        s.wf_graph.shown = crate::flow_graph::View::Cards;
+        use crate::workflow::editor::Editor;
+        use crate::workflow::engine::{Ending, Outcome, Usage};
+        nested_workflow(s);
+        if let Some(w) = s.workflows.first() {
+            s.wf_editor = Some(Editor::from_saved(w));
+        }
+        let steps = s
+            .wf_runs
+            .first()
+            .map(|r| r.steps.clone())
+            .unwrap_or_default();
+        s.wf_test.inputs = rune::TextEdit::new("folder = notes");
+        s.wf_test.result = Some(Outcome {
+            ending: Ending::Succeeded,
+            output: String::new(),
+            steps,
+            usage: Usage::default(),
+            snapshot: None,
+        });
     }),
     ("draft", |s| {
         use crate::workflow::Draft;
@@ -1627,4 +1806,182 @@ fn demo_runs(app: &mut App) {
         timed(last, 4020, 5380),
     ];
     app.record = 5;
+}
+
+/// A workflow with loops and a switch, and a run of it, for the Workflows page.
+/// A flow with every kind of nesting, open in the graph with a step selected.
+fn graph_scene(s: &mut App) {
+    use crate::flow_graph::View;
+    use crate::workflow::definition::Definition;
+    use crate::workflow::editor::{Editor, Loc};
+    nested_workflow(s);
+    let def: Definition = serde_json::from_value(serde_json::json!({
+            "inputs": {"folder": {"type": "string", "default": "downloads", "description": "Where to look"}},
+            "steps": [
+                {"id": "ls", "kind": "tool", "tool": "shell", "bind": "files",
+                 "args": {"command": "ls {{inputs.folder}}"}},
+                {"id": "gather", "kind": "parallel", "bind": "got", "branches": [
+                    {"name": "news", "steps": [{"id": "n", "kind": "tool", "tool": "web_fetch",
+                        "args": {"url": "https://example.com/news"}}]},
+                    {"name": "notes", "steps": [
+                        {"id": "r", "kind": "tool", "tool": "read_file", "args": {"path": "notes/today.md"}},
+                        {"id": "each", "kind": "for_each", "over": "files.stdout.split(\"\\n\")", "as": "name",
+                         "steps": [{"id": "kind", "kind": "switch", "on": "name.split(\".\").pop()",
+                            "cases": [{"when": "\"pdf\"", "steps": [{"id": "pdf", "kind": "tool", "tool": "shell",
+                                "args": {"command": "mv {{name}} docs/"}}]}],
+                            "default": [{"id": "skip", "kind": "tool", "tool": "shell",
+                                "args": {"command": "echo skip {{name}}"}}]}]}
+                    ]}
+                ]},
+                {"id": "say", "kind": "generate", "instruction": "Summarise {{got.news}}", "bind": "gist"},
+                {"id": "ok", "kind": "wait", "approve": "Send the summary?"},
+                {"id": "safe", "kind": "try", "retries": 2, "steps": [
+                    {"id": "send", "kind": "tool", "tool": "shell", "args": {"command": "mail {{gist}}"}}],
+                 "catch": []}
+            ]
+        }))
+        .unwrap_or_default();
+    if let Some(w) = s.workflows.first_mut() {
+        w.definition = def;
+        s.wf_editor = Some(Editor::from_saved(w));
+    }
+    s.wf_graph.shown = View::Graph;
+    // A snapshot draws one frame, so the view cannot report its size first: give it what the
+    // window leaves beside the form.
+    s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+    s.fit_graph();
+    s.wf_graph.selected = Some(Loc {
+        place: vec![(1, 1), (1, 0)],
+        index: 0,
+    });
+}
+
+fn nested_workflow(s: &mut App) {
+    use crate::workflow::engine::StepLog;
+    use crate::workflow::{RunRecord, RunStatus, Saved};
+    load_samples(s);
+    let w = Saved {
+            id: "w1".into(),
+            agent_id: "atlas".into(),
+            name: "Tidy downloads".into(),
+            goal: "Sorts what is in the folder, one kind at a time.".into(),
+            definition: serde_json::from_value(serde_json::json!({
+                "inputs": {"folder": {"type": "string", "description": "Where to look", "default": "downloads"}},
+                "steps": [
+                    {"id": "ls", "kind": "tool", "tool": "shell", "bind": "files",
+                     "args": {"command": "ls {{inputs.folder}}"}},
+                    {"id": "each", "kind": "for_each", "over": "files.stdout.split(\"\\n\")", "as": "name",
+                     "on_error": "continue",
+                     "steps": [
+                        {"id": "kind", "kind": "switch", "on": "name.split(\".\").pop()",
+                         "cases": [
+                            {"when": "\"pdf\"", "steps": [{"id": "pdf", "kind": "tool", "tool": "shell", "args": {"command": "mv {{name}} docs/"}}]},
+                            {"when": "\"png\"", "steps": [{"id": "png", "kind": "tool", "tool": "shell", "args": {"command": "mv {{name}} pictures/"}}]}],
+                         "default": [{"id": "other", "kind": "tool", "tool": "shell", "args": {"command": "echo skip {{name}}"}}]}]}
+                ],
+                "success": "Every file was looked at."
+            }))
+            .unwrap_or_default(),
+            created_at: app::now(),
+        };
+    s.wf_runs = vec![RunRecord {
+        id: "r1".into(),
+        workflow_id: "w1".into(),
+        started_by: "you".into(),
+        status: RunStatus::Succeeded,
+        inputs: "{}".into(),
+        output: String::new(),
+        failed_step: String::new(),
+        error: String::new(),
+        steps: vec![
+            StepLog {
+                id: "each".into(),
+                kind: "for_each".into(),
+                what: "For each name in files.stdout.split(\"\\n\")".into(),
+                output: "2 rounds".into(),
+                error: None,
+                ms: 40,
+                path: "1".into(),
+                rounds: vec![],
+                running: false,
+            },
+            StepLog {
+                id: "kind".into(),
+                kind: "switch".into(),
+                what: "Switch on name.split(\".\").pop()".into(),
+                output: "case 1".into(),
+                error: None,
+                ms: 1,
+                path: "1.body.0".into(),
+                rounds: vec![1],
+                running: false,
+            },
+            StepLog {
+                id: "pdf".into(),
+                kind: "tool".into(),
+                what: "shell: `mv a.pdf docs/`".into(),
+                output: String::new(),
+                error: None,
+                ms: 9,
+                path: "1.body.0.case0.0".into(),
+                rounds: vec![1],
+                running: false,
+            },
+        ],
+        input_tokens: 0,
+        output_tokens: 0,
+        started_at: app::now() - 300,
+        finished_at: Some(app::now() - 290),
+        pause: None,
+    }];
+    s.workflows = vec![w.clone()];
+    s.wf_open = Some("w1".into());
+    s.route = Route::Workflows;
+}
+
+/// A short workflow the way a person makes it: a command, then a check on what it printed. The
+/// step with the check is selected, or the list of steps to add is open.
+fn simple_workflow(s: &mut App, mode: &str) {
+    let adding = mode == "add";
+    use crate::flow_graph::View;
+    use crate::workflow::definition::Definition;
+    use crate::workflow::editor::{Editor, Loc, Menu};
+    nested_workflow(s);
+    let def: Definition = serde_json::from_value(serde_json::json!({
+        "inputs": {"folder": {"type": "string", "default": "downloads"}},
+        "steps": [
+            {"id": "step-1", "kind": "tool", "tool": "shell",
+             "args": {"command": "ls {{inputs.folder}}"}},
+            {"id": "step-2", "kind": "if",
+             "cond": "command.stdout.trimmed().contains(\"pdf\")",
+             "then": [{"id": "step-3", "kind": "generate", "instruction": "Say what is in {{command.stdout}}"}],
+             "else": []}
+        ]
+    }))
+    .unwrap_or_default();
+    // The first step has no name for its result yet: the check reads it, so it has one.
+    if let Some(w) = s.workflows.first_mut() {
+        w.definition = def;
+        let mut ed = Editor::from_saved(w);
+        ed.steps[0].bind = rune::TextEdit::new("command");
+        s.wf_editor = Some(ed);
+    }
+    s.wf_graph.shown = View::Graph;
+    s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+    s.fit_graph();
+    s.wf_graph.selected = Some(Loc {
+        place: Vec::new(),
+        index: if adding || mode.starts_with("tool") {
+            0
+        } else {
+            1
+        },
+    });
+    if mode == "tools" {
+        s.wf_tool_step = s.wf_graph.selected.clone();
+        s.wf_tool_picker.show();
+    }
+    if adding {
+        s.wf_menu = Some(Menu::AddStep);
+    }
 }

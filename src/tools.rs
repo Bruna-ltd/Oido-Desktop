@@ -304,6 +304,10 @@ fn own(name: &str) -> Option<(&'static str, &'static str)> {
             "Manage agents",
             "Lists agents, and drafts creating, changing or deleting them for your approval.",
         ),
+        DELEGATE => (
+            "Hand a task to a teammate",
+            "Gives a task to one of its team members and gets the answer back.",
+        ),
         crate::web::NAME => (
             "Fetch web pages",
             "Reads web pages and other text from the internet.",

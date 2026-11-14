@@ -53,6 +53,8 @@ ksni = { version = "0.3.7", default-features = false, features = ["async-io", "b
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 # Guardrails: the patterns that find secrets and risky commands before they reach a model or run.
 regex = "1.13"
+# Workflow expressions and the code step: a small embedded script engine with no file, network or process access. `sync` so a run can use it from its own thread.
+rhai = { version = "1.27", features = ["serde", "sync", "no_module"] }
 
 # Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with its scroll
 # speed raised on Linux, where the system gives no acceleration: a mouse wheel notch scrolls 180

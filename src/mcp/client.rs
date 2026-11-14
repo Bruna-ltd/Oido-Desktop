@@ -31,6 +31,7 @@ const STDERR_KEEP: usize = 1500;
 const MAX_PAGES: usize = 10;
 
 /// Everything a worker needs to reach a server, opened on the UI thread (the vault cannot leave it).
+#[derive(Clone)]
 pub struct Target {
     pub id: String,
     pub transport: Transport,

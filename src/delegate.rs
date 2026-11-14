@@ -99,7 +99,7 @@ pub fn tools_for(agent: &Agent, typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolSpe
     all
 }
 
-fn spec(team: &[Agent]) -> ToolSpec {
+pub(crate) fn spec(team: &[Agent]) -> ToolSpec {
     let roster: Vec<String> = team
         .iter()
         .map(|m| match m.description.trim() {
@@ -126,7 +126,7 @@ fn spec(team: &[Agent]) -> ToolSpec {
 }
 
 /// Who a call is for and what it asks of them. A call that is not that shape gets empty strings.
-fn parse(args: &str) -> (String, String) {
+pub(crate) fn parse(args: &str) -> (String, String) {
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     let get = |k: &str| {
         v.get(k)
@@ -148,6 +148,7 @@ pub fn summary(args: &str) -> String {
 }
 
 /// Everything a team member's worker needs, worked out before leaving the UI thread.
+#[derive(Clone)]
 struct Job {
     prep: Prep,
     /// The member's run as it began: its steps are recorded against it.
@@ -443,6 +444,78 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
     }
 }
 
+/// A team member a workflow can hand tasks to.
+#[derive(Clone)]
+pub(crate) struct Crew {
+    name: String,
+    job: Job,
+}
+
+/// A task a workflow handed over, done: its run and how it went, to be recorded.
+pub(crate) struct Taken {
+    run: Run,
+    out: Outcome,
+}
+
+impl Taken {
+    /// The member's answer, or why there is none.
+    pub(crate) fn answer(&self) -> Result<String, String> {
+        match &self.out.end {
+            End::Done(text) => Ok(text.clone()),
+            End::Failed(why) => Err(format!("{}: {why}", self.run.agent_name)),
+            End::Stopped => Err("Stopped.".to_owned()),
+        }
+    }
+
+    /// Whether the answer was written with outside text in view, and so may carry it.
+    pub(crate) fn outside(&self) -> bool {
+        self.out.outside.is_some()
+    }
+}
+
+impl Crew {
+    pub(crate) fn is(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name.trim())
+    }
+
+    /// Who a card this member raises goes to.
+    pub(crate) fn ask_through(&mut self, asker: &crate::guard::ask::Asker) {
+        self.job.prep.asker = asker.clone();
+    }
+
+    /// Does `task`, with `outside` the outside text it came from, if any. Blocks; `cancel` stops
+    /// it.
+    pub(crate) fn take(
+        &self,
+        task: &str,
+        outside: Option<&str>,
+        cancel: &Arc<AtomicBool>,
+    ) -> Taken {
+        let mut job = self.job.clone();
+        job.run.id = new_id();
+        job.run.title = crate::runs::title_of(task);
+        job.task = task.to_owned();
+        job.outside = outside.map(str::to_owned);
+        job.cancel = Arc::clone(cancel);
+        let out = work(&job, &|_| {});
+        Taken { run: job.run, out }
+    }
+}
+
+/// Fills in how a member's run ended.
+fn settle(run: &mut Run, out: &Outcome) {
+    let t = out.tokens;
+    (run.input_tokens, run.output_tokens) = (t.input, t.output);
+    (run.cache_read_tokens, run.cache_write_tokens) = (t.cache_read, t.cache_write);
+    run.duration_ms = Some(out.ms);
+    run.ended_at = Some(now());
+    match &out.end {
+        End::Done(_) => run.status = Status::Ok,
+        End::Failed(why) => (run.status, run.error) = (Status::Error, Some(why.clone())),
+        End::Stopped => run.status = Status::Cancelled,
+    }
+}
+
 impl App {
     /// Starts every task the agent just handed over, all at once. Each result goes back to the
     /// agent as its call's result; when the last is in, the agent carries on.
@@ -542,13 +615,36 @@ impl App {
         if task.is_empty() {
             return Err(format!("no task was given for {}.", member.name));
         }
+        let (run, job) = self.member_job(
+            member,
+            sid,
+            Where::Chat(sid.to_owned()),
+            task,
+            parent,
+            self.tainted.get(sid).cloned(),
+        )?;
+        Ok((run, job, member.name.clone()))
+    }
+
+    /// What `member` needs to take `task`, and its run as it begins. `session` is what the run is
+    /// filed under, `at` where a card it raises goes, and `outside` the outside text whoever hands
+    /// it over had in view.
+    fn member_job(
+        &self,
+        member: &Agent,
+        session: &str,
+        at: Where,
+        task: String,
+        parent: Option<String>,
+        outside: Option<String>,
+    ) -> Result<(Run, Job), String> {
         let prep = self.prepare_model(&member.id)?;
         let model = ModelRef::new(&prep.provider, &prep.model);
         let can_think = self
             .providers
             .model_info(&model)
             .is_none_or(|i| models::can_think(&i.caps));
-        let mut run = Run::new(&new_id(), &member.id, &member.name, sid, model);
+        let mut run = Run::new(&new_id(), &member.id, &member.name, session, model);
         run.parent = parent;
         run.title = crate::runs::title_of(&task);
         let (brief, skills) = self.brief_of(member);
@@ -565,15 +661,67 @@ impl App {
                 .collect(),
             limit: self.context_limit(&ModelRef::new(&prep.provider, &prep.model)),
             prep: crate::flows::Prep {
-                asker: self.asker(Where::Chat(sid.to_owned()), &member.name),
+                asker: self.asker(at, &member.name),
                 ..prep
             },
             task,
-            outside: self.tainted.get(sid).cloned(),
+            outside,
             trust_folder: member.trust_workdir,
             cancel: Arc::new(AtomicBool::new(false)),
         };
-        Ok((run, job, member.name.clone()))
+        Ok((run, job))
+    }
+
+    /// The team members of `lead_id` that a workflow hands tasks to, each ready to take them.
+    /// `workflow` is what their runs are filed under and where a card they raise goes.
+    pub(crate) fn crew_for(
+        &self,
+        lead_id: &str,
+        workflow: &str,
+        names: &[String],
+    ) -> Result<Vec<Crew>, String> {
+        let lead = self
+            .roster
+            .agent_ref(lead_id)
+            .ok_or("That agent is gone.")?;
+        names
+            .iter()
+            .map(|name| {
+                let member = lead
+                    .subagents
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(name))
+                    .ok_or_else(|| {
+                        format!(
+                            "This workflow hands work to {name:?}, who is not on {}'s team.",
+                            lead.name
+                        )
+                    })?;
+                let (_, job) = self.member_job(
+                    member,
+                    workflow,
+                    Where::Workflow(workflow.to_owned()),
+                    String::new(),
+                    None,
+                    None,
+                )?;
+                Ok(Crew {
+                    name: member.name.clone(),
+                    job,
+                })
+            })
+            .collect()
+    }
+
+    /// Records a task a workflow handed over, as a run of its own.
+    pub(crate) fn record_taken(&mut self, taken: Taken) {
+        let Taken { mut run, out } = taken;
+        self.save("the run", |db| db.start_run(&run));
+        settle(&mut run, &out);
+        self.save_run(&run, &out.steps);
+        if self.route == crate::app::Route::Runs {
+            self.reload_runs();
+        }
     }
 
     /// A worker reported progress: it goes on the task's card.
@@ -632,28 +780,16 @@ impl App {
             .get(call_id)
             .is_some_and(|d| d.ended.is_some());
         let t = out.tokens;
-        (run.input_tokens, run.output_tokens) = (t.input, t.output);
-        (run.cache_read_tokens, run.cache_write_tokens) = (t.cache_read, t.cache_write);
-        run.duration_ms = Some(out.ms);
-        run.ended_at = Some(now());
+        settle(&mut run, &out);
         // Stop on the chat holds the lead for you; stopping one member lets the lead go on without it.
         let halted = self.delegating.get(sid).is_some_and(|d| d.halted);
         let (told, carry_on) = match &out.end {
-            End::Done(text) => {
-                run.status = Status::Ok;
-                (text.clone(), true)
-            }
-            End::Failed(why) => {
-                (run.status, run.error) = (Status::Error, Some(why.clone()));
-                (format!("Error: {name} could not finish. {why}"), true)
-            }
-            End::Stopped => {
-                run.status = Status::Cancelled;
-                (
-                    format!("The person stopped {name} before it finished."),
-                    !halted,
-                )
-            }
+            End::Done(text) => (text.clone(), true),
+            End::Failed(why) => (format!("Error: {name} could not finish. {why}"), true),
+            End::Stopped => (
+                format!("The person stopped {name} before it finished."),
+                !halted,
+            ),
         };
         if !handed_back {
             self.end_card(call_id, (t.input.unwrap_or(0), t.output.unwrap_or(0)));

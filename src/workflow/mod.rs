@@ -4,9 +4,16 @@
 //! agent, no schedule.
 
 pub mod compile;
+pub mod cond;
 pub mod definition;
+pub mod editor;
 pub mod engine;
+pub mod examples;
+pub mod expr;
+pub mod layout;
+pub mod pause;
 pub mod template;
+pub mod trace;
 
 use definition::Definition;
 use engine::StepLog;
@@ -35,6 +42,8 @@ pub struct Draft {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RunStatus {
     Running,
+    /// Stopped at a `wait`. Not stored as a status: a run is waiting if it has a [`Pause`].
+    Waiting,
     Succeeded,
     Failed,
     Stopped,
@@ -44,6 +53,7 @@ impl RunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Stopped => "stopped",
@@ -55,9 +65,21 @@ impl RunStatus {
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "stopped" => Self::Stopped,
+            "waiting" => Self::Waiting,
             _ => Self::Running,
         }
     }
+}
+
+/// What a waiting run is waiting for.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Pause {
+    /// The id of the `wait` step.
+    pub step: String,
+    /// What it asks you, or says it waits for.
+    pub prompt: String,
+    /// When a delay is over, in seconds since the epoch; none for an approval.
+    pub until: Option<i64>,
 }
 
 /// One execution of a workflow.
@@ -78,4 +100,6 @@ pub struct RunRecord {
     pub output_tokens: u32,
     pub started_at: i64,
     pub finished_at: Option<i64>,
+    /// Set while it waits at a `wait`.
+    pub pause: Option<Pause>,
 }
