@@ -21,9 +21,10 @@ pub const WHILE: &str = "while";
 pub const SET: &str = "set";
 pub const TRY: &str = "try";
 pub const FLOW: &str = "flow";
+pub const CODE: &str = "code";
 
-const KINDS: [&str; 10] = [
-    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY, FLOW,
+const KINDS: [&str; 11] = [
+    TOOL, GENERATE, DECIDE, IF, SWITCH, FOR_EACH, WHILE, SET, TRY, FLOW, CODE,
 ];
 
 /// The tools a workflow step may call. A flow runs on its own, so it cannot stop to ask you.
@@ -152,6 +153,9 @@ pub struct Step {
     pub workflow: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inputs: Option<Map<String, Value>>,
+    // code: a script over what is in scope; its last value is the result
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
 }
 
 impl Step {
@@ -165,7 +169,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 23] = [
+        let fields: [(&str, bool); 24] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -189,6 +193,7 @@ impl Step {
             ("catch", !self.catch.is_empty()),
             ("workflow", self.workflow.is_some()),
             ("inputs", self.inputs.is_some()),
+            ("script", self.script.is_some()),
         ];
         fields
             .into_iter()
@@ -210,6 +215,7 @@ fn takes(kind: &str) -> &'static [&'static str] {
         SET => &["values"],
         TRY => &["retries", "backoff_ms", "steps", "catch"],
         FLOW => &["workflow", "inputs"],
+        CODE => &["script"],
         _ => &[],
     }
 }
@@ -559,6 +565,17 @@ impl Check<'_> {
                     );
                 }
             }
+            CODE => {
+                let names = Self::names(vis, &[]);
+                match s.script.as_deref() {
+                    None => self.bad.push(format!("{at}: a code step needs a script")),
+                    Some(src) => {
+                        if let Err(why) = expr::check_script(&names, src) {
+                            self.bad.push(format!("{at}: script: {why}"));
+                        }
+                    }
+                }
+            }
             FLOW => {
                 match s.workflow.as_deref().map(str::trim) {
                     None | Some("") => self
@@ -706,6 +723,9 @@ pub fn reads(s: &Step) -> BTreeSet<String> {
     for e in s.values.iter().flat_map(|v| v.values()) {
         words(e, &mut out);
     }
+    if let Some(script) = &s.script {
+        words(script, &mut out);
+    }
     out
 }
 
@@ -792,6 +812,7 @@ pub fn describe(s: &Step) -> String {
             (n, false) => format!("Try, again up to {n} times, then handle a failure"),
         },
         FLOW => format!("Run the workflow {}", text(&s.workflow)),
+        CODE => format!("Script: {}", text(&s.script)),
         SET => format!(
             "Set {}",
             s.values
@@ -1101,5 +1122,24 @@ mod tests {
             why.contains("fixed text") && why.contains("needs `task`"),
             "{why}"
         );
+    }
+
+    #[test]
+    fn a_code_step_needs_a_script_that_reads_and_names_only_what_is_in_sight() {
+        let ok = def(json!({"steps": [
+            {"id": "a", "kind": "set", "bind": "x", "values": {"v": "1"}},
+            {"id": "c", "kind": "code", "bind": "r", "script": "let y = x.v + 1; y"}
+        ]}));
+        assert_eq!(validate(&ok), Ok(()));
+        assert_eq!(describe(&ok.steps[1]), "Script: let y = x.v + 1; y");
+        let why = problems(json!({"steps": [
+            {"id": "c", "kind": "code", "script": "later + 1"},
+            {"id": "d", "kind": "code", "script": "let = "},
+            {"id": "e", "kind": "code"},
+            {"id": "b", "kind": "set", "bind": "later", "values": {"v": "1"}}
+        ]}));
+        for expected in ["later", "script:", "needs a script"] {
+            assert!(why.contains(expected), "missing {expected:?} in {why}");
+        }
     }
 }

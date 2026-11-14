@@ -3,7 +3,7 @@
 Agents run saved flows with branches, loops and fixed steps, so a model does not work out the same
 job from scratch each time. You build and edit a flow by hand on the Workflows screen.
 
-Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 started** (`try`, MCP tools, taint tracking, `flow` and `delegate` built); P3 not. Extends `src/workflow/` (see `workflow/mod.rs`); read that
+Status: agreed 2026-11-13. **Phase 1 built** (branches, loops, `set`, expressions, the editor); **P2 done** (`try`, MCP tools, taint tracking, `flow`, `delegate`; `http` was left out and is not planned); **P3 started** (`code` built). Extends `src/workflow/` (see `workflow/mod.rs`); read that
 first.
 
 ## What exists today
@@ -257,6 +257,14 @@ is the one non-deterministic tool step and is marked as such.
   view, so what it does is held too. Its answer counts as outside text if it wrote it with outside
   text in view. Cards it raises go where the workflow's do. A model writes the answer, so the
   step is not deterministic; the editor shows it as a tool step, with its agent and task.
+## As built in P3
+
+- `code`: `script` is a Rhai script over what is in scope (the same names as an expression sees).
+  Statements, loops and functions are allowed; its last value is the result, bound as usual. Same
+  sandbox and caps as expressions (1 000 000 operations, 10 s, Stop ends it); no files, network or
+  programs. Saving compiles it and names the first problem; an undefined name is caught there.
+  What it reads counts as the step's inputs for taint, so it cannot launder outside text. There is
+  no `input` field: the script reads the values it needs by name.
 
 ## Phases
 
@@ -264,7 +272,7 @@ is the one non-deterministic tool step and is marked as such.
 `while`; `{{= expr}}`; nested validation; nested step log and run view; the editor (create, edit,
 validate, delete, open a taught draft). No new tools.
 
-**P2 — recovery and reach (`try`, MCP tools, `flow`, `delegate` built; `http` not).** `try` with retry and catch; `http`; MCP tools in `tool` steps;
+**P2 — recovery and reach (built, except `http`, which was left out: a tool step can already fetch pages, and an MCP server covers other APIs).** `try` with retry and catch; `http`; MCP tools in `tool` steps;
 `flow`; `delegate`.
 
 **P3 — concurrency and humans.** `parallel`; `code`; `wait` with approval and persisted runs

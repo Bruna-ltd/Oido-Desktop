@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::definition::{
-    CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FLOW, FOR_EACH, GENERATE, IF, MAX_FLOW_DEPTH,
-    MAX_ROUNDS, SET, SWITCH, Step, TOOL, TRY, WHILE, branch, case_branch, child, describe, reads,
+    CODE, CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FLOW, FOR_EACH, GENERATE, IF,
+    MAX_FLOW_DEPTH, MAX_ROUNDS, SET, SWITCH, Step, TOOL, TRY, WHILE, branch, case_branch, child,
+    describe, reads,
 };
 use super::expr::Evaluator;
 use super::template::{self, Scope};
@@ -684,6 +685,9 @@ impl Run<'_, '_> {
                 }
                 Ok(Value::String(text.trim().to_owned()))
             }
+            CODE => self
+                .eval
+                .run(scope, step.script.as_deref().unwrap_or_default()),
             DECIDE => {
                 let answer = ask(DECIDE_SYSTEM, &decide_message(scope, step, &self.eval)?)?;
                 pick(&step.options, &answer)
@@ -1612,5 +1616,33 @@ mod tests {
 
     fn web_step() -> Value {
         json!({"id": "get", "kind": "tool", "tool": "web_fetch", "args": {"url": "x"}, "bind": "page"})
+    }
+
+    #[test]
+    fn a_code_step_runs_a_script_over_what_is_bound_and_what_it_makes_from_outside_text_is_held() {
+        let d = def(json!({"steps": [
+            web_step(),
+            {"id": "count", "kind": "code", "bind": "n", "script":
+                "let words = page.stdout.split(\" \"); let k = 0; for w in words { k += w.len(); } #{words: words.len(), letters: k}"},
+            {"id": "plain", "kind": "code", "bind": "two", "script": "1 + 1"},
+            sh("use", "echo {{n.words}} {{n.letters}}"),
+            sh("clean", "echo {{two}}")
+        ]}));
+        let (out, seen) = with_flows(&d, &[]);
+        assert_eq!(out.ending, Ending::Succeeded, "{:?}", out.ending);
+        assert_eq!(
+            seen[1],
+            ("echo 2 8".to_owned(), Some("a web page".to_owned()))
+        );
+        assert_eq!(seen[2], ("echo 2".to_owned(), None));
+        // A script that fails fails its step, saying why.
+        let bad =
+            def(json!({"steps": [{"id": "boom", "kind": "code", "script": "inputs.nothing + 1"}]}));
+        let (out, _) = with_flows(&bad, &[]);
+        assert!(
+            matches!(&out.ending, Ending::Failed { step, .. } if step == "boom"),
+            "{:?}",
+            out.ending
+        );
     }
 }

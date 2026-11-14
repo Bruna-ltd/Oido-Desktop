@@ -78,8 +78,27 @@ impl Evaluator {
         }
     }
 
-    /// The value of `src` over `scope`, as JSON.
+    /// The value of the expression `src` over `scope`, as JSON.
     pub fn eval(&self, scope: &Scope, src: &str) -> Result<Value, String> {
+        self.go(scope, src, |engine, vars| {
+            engine.eval_expression_with_scope(vars, src)
+        })
+    }
+
+    /// What the script `src` gives (its last value) over `scope`, as JSON. Statements, loops and
+    /// functions are allowed; reaching outside the values is not.
+    pub fn run(&self, scope: &Scope, src: &str) -> Result<Value, String> {
+        self.go(scope, src, |engine, vars| {
+            engine.eval_with_scope::<Dynamic>(vars, src)
+        })
+    }
+
+    fn go(
+        &self,
+        scope: &Scope,
+        src: &str,
+        work: impl FnOnce(&Engine, &mut rhai::Scope) -> Result<Dynamic, Box<EvalAltResult>>,
+    ) -> Result<Value, String> {
         if let Ok(mut d) = self.deadline.lock() {
             *d = Instant::now() + self.limit;
         }
@@ -88,10 +107,7 @@ impl Evaluator {
             let dynamic = rhai::serde::to_dynamic(value).map_err(|e| e.to_string())?;
             vars.push_dynamic(name.as_str(), dynamic);
         }
-        let result: Dynamic = self
-            .engine
-            .eval_expression_with_scope(&mut vars, src)
-            .map_err(|e| failure(&e))?;
+        let result = work(&self.engine, &mut vars).map_err(|e| failure(&e))?;
         rhai::serde::from_dynamic(&result)
             .map_err(|_| format!("`{}` gave something a workflow cannot keep", one_line(src)))
     }
@@ -129,6 +145,23 @@ fn failure(e: &EvalAltResult) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// Whether `src` reads as a script and names only `visible` values (and what it declares).
+/// Nothing is run.
+pub fn check_script(visible: &[&str], src: &str) -> Result<(), String> {
+    if src.trim().is_empty() {
+        return Err("it is empty".to_owned());
+    }
+    let engine = base();
+    let mut vars = rhai::Scope::new();
+    for name in visible {
+        vars.push_dynamic(*name, Dynamic::UNIT);
+    }
+    engine
+        .compile_with_scope(&vars, src)
+        .map(|_| ())
+        .map_err(|e: ParseError| e.to_string())
 }
 
 /// Whether `src` reads as an expression and names only `visible` values. Nothing is run.
@@ -265,5 +298,29 @@ mod tests {
             check(&["inputs"], "let x = 1; x").is_err(),
             "a statement is not an expression"
         );
+    }
+
+    #[test]
+    fn a_script_may_use_statements_loops_and_functions_but_still_only_the_values() {
+        let e = ev();
+        let s = scope();
+        let script = "let total = 0; for t in inputs.tags { total += t.len(); } fn twice(x) { x * 2 } twice(total) + inputs.n";
+        assert_eq!(e.run(&s, script).unwrap(), json!(7));
+        assert_eq!(
+            e.run(
+                &s,
+                "#{names: files.stdout.split(\"\\n\"), ok: files.exit_code == 0}"
+            )
+            .unwrap(),
+            json!({"names": ["a.txt", "b.txt"], "ok": true})
+        );
+        assert!(e.run(&s, "import \"x\" as y; 1").is_err());
+        assert!(e.run(&s, "ghost + 1").unwrap_err().contains("ghost"));
+        let why = e.run(&s, "let x = 0; loop { x += 1; }").unwrap_err();
+        assert!(why.contains("too long"), "{why}");
+        assert_eq!(check_script(&["inputs"], "let a = inputs.n; a + 1"), Ok(()));
+        assert!(check_script(&["inputs"], "let a = nope; a").is_err());
+        assert!(check_script(&["inputs"], "let a = ").is_err());
+        assert!(check_script(&["inputs"], "").unwrap_err().contains("empty"));
     }
 }

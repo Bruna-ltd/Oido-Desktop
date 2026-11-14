@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::Saved;
 use super::definition::{
-    CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input, SET, STEP_TOOLS,
+    CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input, SET, STEP_TOOLS,
     SWITCH, Step, TOOL, TRY, WHILE, each_step, validate,
 };
 
@@ -134,6 +134,14 @@ static FLOW_BOXES: [Spec; 2] = [
     ),
 ];
 
+static CODE_BOXES: [Spec; 1] = [spec(
+    "script",
+    "Script (its last value is the result)",
+    "let total = 0;\nfor n in files.stdout.split(\"\\n\") { total += n.len(); }\ntotal",
+    8,
+    Refs::Bare,
+)];
+
 /// The text boxes each kind of step has, in order.
 pub fn specs(kind: &str) -> &'static [Spec] {
     match kind {
@@ -147,12 +155,13 @@ pub fn specs(kind: &str) -> &'static [Spec] {
         SET => &SET_BOXES,
         TRY => &TRY_BOXES,
         FLOW => &FLOW_BOXES,
+        CODE => &CODE_BOXES,
         _ => &[],
     }
 }
 
 /// The kinds of step a person can add, in the order the menu lists them.
-pub const KINDS: [(&str, &str); 10] = [
+pub const KINDS: [(&str, &str); 11] = [
     (TOOL, "Run a tool"),
     (GENERATE, "Write with the model"),
     (DECIDE, "Let the model choose"),
@@ -163,6 +172,7 @@ pub const KINDS: [(&str, &str); 10] = [
     (SET, "Set values"),
     (TRY, "Try, and recover"),
     (FLOW, "Run another workflow"),
+    (CODE, "Run a script"),
 ];
 
 /// What a list of steps inside a step is for.
@@ -349,6 +359,7 @@ impl Node {
                 n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
                 n.blocks[1].steps = s.catch.iter().map(Node::from_step).collect();
             }
+            CODE => n.set_field("script", text(&s.script)),
             FLOW => {
                 n.set_field("workflow", text(&s.workflow));
                 let given = s.inputs.clone().unwrap_or_default();
@@ -455,6 +466,7 @@ impl Node {
                 s.steps = steps(&self.blocks[0], bad, at);
                 s.catch = steps(&self.blocks[1], bad, at);
             }
+            CODE => s.script = get("script"),
             FLOW => {
                 s.workflow = get("workflow").map(|w| w.trim().to_owned());
                 if let Some(text) = get("inputs") {
@@ -876,7 +888,8 @@ mod tests {
                  "steps": [{"id": "push", "kind": "tool", "tool": "shell", "args": {"command": "git push"}}],
                  "catch": [{"id": "note", "kind": "generate", "instruction": "Push failed: {{error}}"}]},
                 {"id": "sub", "kind": "flow", "workflow": "Weekly report", "bind": "report",
-                 "inputs": {"folder": "{{inputs.folder}}"}}
+                 "inputs": {"folder": "{{inputs.folder}}"}},
+                {"id": "calc", "kind": "code", "bind": "sum", "script": "let t = 0;\nfor i in [1, 2] { t += i; }\nt"}
             ],
             "success": "All done."
         })
@@ -895,7 +908,7 @@ mod tests {
                     .definition()
                     .unwrap()
             ),
-            17
+            18
         );
     }
 
