@@ -7,6 +7,7 @@ mod channels;
 mod chat;
 mod chat_header;
 mod composer;
+mod extensions;
 mod flow;
 mod folder_picker;
 mod guard;
@@ -32,9 +33,9 @@ mod workflows;
 
 use std::time::Duration;
 
-use rune::{Cx, El, Spring, col, row, text};
+use rune::{Cx, El, Spring, row};
 use rune_kit::shell::{self, PaneMotion, SidebarPeek, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit};
+use rune_kit::{ControlSize, IconButton, IconButtonVariant};
 
 use crate::app::{App, Route};
 
@@ -42,6 +43,17 @@ use crate::app::{App, Route};
 #[cfg(debug_assertions)]
 pub fn wait_for_logos(urls: &[&str]) {
     logo::wait_all(urls);
+}
+
+/// Waits for the extensions' logos to decode, for a headless picture of the screen.
+#[cfg(debug_assertions)]
+pub fn wait_for_extension_logos() {
+    let mut all: Vec<(&'static str, crate::mcp::catalog::Logo)> = crate::extensions::ALL
+        .iter()
+        .map(|e| (e.title(), e.logo()))
+        .collect();
+    all.push(("Google", crate::extensions::GOOGLE_LOGO));
+    logo::wait_for(&all);
 }
 
 /// Waits for these agent pictures to decode, for a headless picture of the screen.
@@ -80,10 +92,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Schedules => ("Schedules".to_owned(), schedules::screen(s, &k, &mut layer)),
         Route::Usage => ("Usage".to_owned(), usage::screen(s, &k)),
         Route::Mcp => ("MCP".to_owned(), mcp::screen(s, cx, &k)),
+        Route::Extensions => ("Extensions".to_owned(), extensions::screen(s, &k)),
         Route::Channels => ("Channels".to_owned(), channels::screen(s, &k, &mut layer)),
         Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
-        Route::Soon(name) => (name.to_owned(), soon(name, &k)),
     };
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.
     let runs = s.route == Route::Runs;
@@ -166,26 +178,6 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
-}
-
-/// A Studio section with no native screen yet.
-fn soon(name: &str, k: &Kit) -> El {
-    col()
-        .key("soon")
-        .w_full()
-        .h_full()
-        .center()
-        .gap(6.0)
-        .child(
-            text(name.to_owned())
-                .font(k.ty.body_medium)
-                .color(k.c.text_base),
-        )
-        .child(
-            text("Not built natively yet.")
-                .font(k.ty.small)
-                .color(k.c.text_muted),
-        )
 }
 
 #[cfg(test)]

@@ -132,6 +132,12 @@ impl App {
         let old = self.mcp_named(name)?;
         let mut server = old.clone();
         match &mut server.transport {
+            Transport::Extension { .. } => {
+                return Err(format!(
+                    "{} is built in. The person turns it and its tools on or off on the Extensions page",
+                    old.name
+                ));
+            }
             Transport::Http { url } => {
                 if change.command.is_some() || change.args.is_some() || !change.env.is_empty() {
                     return Err(format!(
@@ -218,6 +224,7 @@ impl App {
                 let kind = match s.transport {
                     Transport::Http { .. } => "remote",
                     Transport::Stdio { .. } => "local",
+                    Transport::Extension { .. } => "built in",
                 };
                 let state = match (s.enabled, s.status) {
                     (false, _) => "off".to_owned(),

@@ -18,6 +18,7 @@ mod credentials;
 mod delegate;
 #[cfg(any(test, debug_assertions))]
 mod demo;
+mod extensions;
 mod files;
 mod flow_editor;
 mod flow_graph;

@@ -39,9 +39,11 @@ pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
     let columns = columns(cx);
     let m = &s.mcp;
     // A server answers to its name, its address and the names of its tools.
+    // Built-in extensions have their own page.
     let shown: Vec<&Server> = m
         .servers
         .iter()
+        .filter(|x| !x.is_extension())
         .filter(|x| {
             let target = x.target();
             let mut fields = vec![x.name.as_str(), target.as_str()];
@@ -105,7 +107,7 @@ pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
             columns,
             k,
         ));
-    } else if m.servers.is_empty() {
+    } else if m.servers.iter().all(Server::is_extension) {
         page = page.child(
             text("No servers yet. Add one above, or start from a preset below.")
                 .key("mcp-empty")
@@ -292,7 +294,7 @@ fn server_card(s: &App, server: &Server, k: &Kit) -> El {
 fn server_tile(server: &Server, k: &Kit) -> El {
     match &server.transport {
         Transport::Http { url } => logo::tile(url, k),
-        Transport::Stdio { .. } => None,
+        Transport::Stdio { .. } | Transport::Extension { .. } => None,
     }
     .unwrap_or_else(|| tile(&server.name, crate::providers::SERVER_COLOR, k))
 }

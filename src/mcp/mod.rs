@@ -38,8 +38,17 @@ pub fn is_tool(name: &str) -> bool {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Transport {
-    Http { url: String },
-    Stdio { command: String, args: Vec<String> },
+    Http {
+        url: String,
+    },
+    Stdio {
+        command: String,
+        args: Vec<String>,
+    },
+    /// Built into the app, not a program or an address (see [`crate::extensions`]).
+    Extension {
+        id: String,
+    },
 }
 
 /// How a remote server knows who is calling.
@@ -164,7 +173,14 @@ impl Server {
                 .chain(args.iter().map(String::as_str))
                 .collect::<Vec<_>>()
                 .join(" "),
+            Transport::Extension { .. } => "Built in".to_owned(),
         }
+    }
+
+    /// Whether an extension stands behind it: not one the person registered, so never saved with
+    /// them nor shown on the MCP page.
+    pub fn is_extension(&self) -> bool {
+        matches!(self.transport, Transport::Extension { .. })
     }
 
     /// Whether its tools are offered to agents: it is on and was reached.

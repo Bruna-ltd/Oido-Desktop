@@ -256,6 +256,9 @@ fn reach<T>(
             http.open(ctl)?;
             op(&mut http, ctl)
         }
+        Transport::Extension { .. } => Err(Failure::other(
+            "an extension is called through its own page, not reached as a server",
+        )),
         Transport::Stdio { command, args } => {
             let local = local(target, command, args)?;
             let mut guard = local

@@ -13,14 +13,6 @@ struct Item {
     route: Route,
 }
 
-const fn soon(label: &'static str, icon: &'static Icon) -> Item {
-    Item {
-        label,
-        icon,
-        route: Route::Soon(label),
-    }
-}
-
 static OPERATE: [Item; 3] = [
     Item {
         label: "Schedules",
@@ -55,7 +47,11 @@ static CONFIGURE: [Item; 6] = [
         icon: &icons::CHANNELS,
         route: Route::Channels,
     },
-    soon("Extensions", &icons::EXTENSIONS),
+    Item {
+        label: "Extensions",
+        icon: &icons::EXTENSIONS,
+        route: Route::Extensions,
+    },
     Item {
         label: "MCP",
         icon: &icons::MCP,
