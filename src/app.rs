@@ -140,6 +140,11 @@ pub struct App {
     pub wf_stray: TextEdit,
     /// Whether the workflow editor shows each step's id, result name and raw boxes.
     pub wf_advanced: bool,
+    /// The list of tools a workflow step can use, shared by every step's field: it is open for the
+    /// step in `wf_tool_step`. `wf_tool_closed` is what the others show.
+    pub wf_tool_picker: crate::picker::MultiPicker,
+    pub wf_tool_closed: crate::picker::MultiPicker,
+    pub wf_tool_step: Option<crate::workflow::editor::Loc>,
     pub composer: crate::composer::Composer,
     /// What was typed in the chats not open, by session id: each tab keeps its own draft.
     pub parked: std::collections::HashMap<String, crate::composer::Composer>,
@@ -328,6 +333,9 @@ impl App {
             wf_menu: None,
             wf_stray: TextEdit::new(""),
             wf_advanced: false,
+            wf_tool_picker: Default::default(),
+            wf_tool_closed: Default::default(),
+            wf_tool_step: None,
             composer: crate::composer::Composer::new(),
             parked: std::collections::HashMap::new(),
             queued: std::collections::HashMap::new(),

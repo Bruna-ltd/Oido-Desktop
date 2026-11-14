@@ -11,9 +11,10 @@ use super::workflow_graph;
 use crate::app::App;
 use crate::flow_graph::View;
 use crate::workflow::cond;
-use crate::workflow::definition::{FOR_EACH, PARALLEL, STEP_TOOLS, SWITCH, TOOL, WHILE};
+use crate::workflow::definition::{FOR_EACH, PARALLEL, SWITCH, TOOL, WHILE};
 use crate::workflow::editor::{
-    Block, Editor, INPUT_KINDS, KINDS, Loc, Menu, Node, Part, Place, Refs, Target, specs,
+    ArgKind, Block, Editor, INPUT_KINDS, KINDS, Loc, Menu, Node, ParamSpec, Part, Place, Refs,
+    Target, params_of, specs,
 };
 
 /// The width the editor's text stops at.
@@ -689,8 +690,6 @@ fn card(
     let up = at.clone();
     let down = at.clone();
     let gone = at.clone();
-    let id_at = at.clone();
-    let bind_at = at.clone();
     let advanced = s.wf_advanced;
     let controls = row()
         .gap(2.0)
@@ -771,37 +770,11 @@ fn card(
         );
     }
 
-    if n.kind == crate::workflow::definition::TOOL {
-        let tool_at = at.clone();
-        // The built-in tools, then those of the MCP servers that are on, and the one this step
-        // already names if its server is not.
-        let mut tools: Vec<String> = STEP_TOOLS.iter().map(|t| (*t).to_owned()).collect();
-        for server in s.mcp.servers.iter().filter(|m| m.offers()) {
-            tools.extend(server.tools.iter().map(|t| server.qualified(&t.name)));
+    if n.kind == TOOL {
+        out = out.child(tool_field(s, at, n, &key, k, layer));
+        for p in tool_params(s, ed, at, n, &key, advanced, k, layer) {
+            out = out.child(p);
         }
-        // Handing a task over needs a team to hand it to.
-        if s.roster
-            .agent_ref(&ed.agent_id)
-            .is_some_and(|a| !a.subagents.is_empty())
-        {
-            tools.push(crate::tools::DELEGATE.to_owned());
-        }
-        if !n.tool.is_empty() && !tools.contains(&n.tool) {
-            tools.push(n.tool.clone());
-        }
-        let tools: Vec<&str> = tools.iter().map(String::as_str).collect();
-        out = out.child(row().child(pick(
-            format!("wfe-tool-{key}"),
-            Menu::Tool(at.clone()),
-            &tools,
-            Some(&n.tool),
-            "Tool",
-            true,
-            s,
-            k,
-            layer,
-            move |s, name| s.editor_set_tool(&tool_at, name),
-        )));
     }
     for (i, spec) in specs(&n.kind).iter().enumerate() {
         let Some(edit) = n.fields.get(i) else {
@@ -809,15 +782,6 @@ fn card(
         };
         if spec.key == "cond" && n.when.is_some() {
             out = out.child(comparison(s, ed, at, n, k, layer));
-            continue;
-        }
-        // A shell command is typed as it is; the JSON of the other tools' arguments, and of a
-        // shell command with more than a command, is there for those who ask or whose step has it.
-        let shell = n.tool == crate::tools::SHELL;
-        if n.kind == TOOL
-            && ((spec.key == "command" && !shell)
-                || (spec.key == "args" && shell && !advanced && edit.text.trim().is_empty()))
-        {
             continue;
         }
         let target = Target::Field(at.clone(), i);
@@ -883,6 +847,166 @@ fn card(
                     .key(format!("wfe-add-case-{key}")),
             ),
         );
+    }
+    out
+}
+
+/// The tool a step uses, chosen from the same searchable list an agent's tools are.
+fn tool_field(s: &App, at: &Loc, n: &Node, key: &str, k: &Kit, layer: &mut Vec<El>) -> El {
+    use super::multi_picker::{Spec, build};
+    use crate::picker::Item;
+    let mine = s.wf_tool_step.as_ref() == Some(at);
+    let items: Vec<Item> = s
+        .step_tools(&n.tool)
+        .into_iter()
+        .map(|name| {
+            let shown = crate::tools::shown(&name, &s.mcp.servers);
+            Item {
+                name,
+                label: shown.label,
+                description: shown.about,
+                group: shown.group,
+            }
+        })
+        .collect();
+    let opened = at.clone();
+    build(
+        s,
+        k,
+        layer,
+        Spec {
+            key: crate::workflow::pause::intern(&format!("wfe-tool-{key}")),
+            title: "Tool",
+            placeholder: "Choose a tool",
+            noun: ("tool", "tools"),
+            none: "No tools to use.",
+            items,
+            chosen: Some(n.tool.clone())
+                .filter(|t| !t.is_empty())
+                .into_iter()
+                .collect(),
+            get: if mine {
+                |s| &s.wf_tool_picker
+            } else {
+                |s| &s.wf_tool_closed
+            },
+            edit: |s| &mut s.wf_tool_picker,
+            toggle: |s, name| s.editor_choose_tool(name),
+            single: true,
+            on_open: Some(std::rc::Rc::new(move |s: &mut App| {
+                s.wf_tool_step = Some(opened.clone());
+            })),
+        },
+    )
+}
+
+/// The arguments of a tool step as a form: a box for each, named in words, those the tool needs
+/// first. The rest show when they have something in them, or under Advanced.
+#[allow(clippy::too_many_arguments)]
+fn tool_params(
+    s: &App,
+    ed: &Editor,
+    at: &Loc,
+    n: &Node,
+    key: &str,
+    advanced: bool,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> Vec<El> {
+    let c = &k.c;
+    let mut specs = s
+        .step_tool_schema(&n.tool)
+        .map(|schema| params_of(&schema))
+        .unwrap_or_default();
+    // What the step has that its tool does not list is not lost: it shows as it is.
+    for (name, p) in &n.params {
+        if !specs.iter().any(|x| &x.key == name) {
+            specs.push(ParamSpec {
+                key: name.clone(),
+                label: name.clone(),
+                about: String::new(),
+                kind: p.kind,
+                required: false,
+                options: Vec::new(),
+                lines: if p.kind == ArgKind::Json { 3 } else { 1 },
+            });
+        }
+    }
+    let blank = TextEdit::new("");
+    let mut out = Vec::new();
+    for p in specs {
+        let given = n.params.get(&p.key);
+        let typed = given.map_or("", |g| g.edit.text.as_str());
+        if !(p.required || advanced || !typed.trim().is_empty()) {
+            continue;
+        }
+        let label = if p.required {
+            p.label.clone()
+        } else {
+            format!("{} (optional)", p.label)
+        };
+        let (at_for, name, kind) = (at.clone(), p.key.clone(), p.kind);
+        let box_key = format!("wfe-param-{key}-{}", p.key);
+        let item = if !p.options.is_empty() {
+            let options: Vec<&str> = p.options.iter().map(String::as_str).collect();
+            let choose = (at.clone(), p.key.clone());
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(text(label).font(k.ty.small).color(c.text_muted))
+                .child(row().child(pick(
+                    box_key,
+                    Menu::Param(at.clone(), p.key.clone()),
+                    &options,
+                    Some(typed).filter(|t| !t.is_empty()),
+                    "Choose",
+                    true,
+                    s,
+                    k,
+                    layer,
+                    move |s, label| s.editor_set_param(&choose.0, &choose.1, ArgKind::Text, label),
+                )))
+        } else if p.kind == ArgKind::Flag {
+            let on = typed.trim() == "true";
+            row()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    Switch::new(on)
+                        .label(label.clone())
+                        .hide_label()
+                        .on_toggle(move |s: &mut App| {
+                            s.editor_set_param(
+                                &at_for,
+                                &name,
+                                ArgKind::Flag,
+                                if on { "false" } else { "true" },
+                            );
+                        })
+                        .build(k),
+                )
+                .child(text(label).font(k.ty.small).color(c.text_muted))
+        } else {
+            let target = Target::Param(at.clone(), p.key.clone(), kind);
+            let names = if kind == ArgKind::Text {
+                names_for(s, ed, at, &p.key, Refs::Braces, &target, &box_key, k, layer)
+            } else {
+                None
+            };
+            col().w_full().child(field(
+                &label,
+                given.map_or(&blank, |g| &g.edit),
+                &box_key,
+                &p.about,
+                p.lines,
+                names,
+                k,
+                move |s: &mut App| {
+                    s.editor_text(&Target::Param(at_for.clone(), name.clone(), kind))
+                },
+            ))
+        };
+        out.push(item);
     }
     out
 }

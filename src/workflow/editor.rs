@@ -52,22 +52,8 @@ const fn spec(
     }
 }
 
-static TOOL_BOXES: [Spec; 2] = [
-    spec(
-        "command",
-        "Command to run",
-        "ls -1 {{inputs.folder}}",
-        2,
-        Refs::Braces,
-    ),
-    spec(
-        "args",
-        "Arguments (JSON)",
-        r#"{"url": "https://example.com"}"#,
-        3,
-        Refs::Braces,
-    ),
-];
+/// A tool step's boxes come from the tool's own arguments: see [`params_of`].
+static TOOL_BOXES: [Spec; 0] = [];
 static GENERATE_BOXES: [Spec; 1] = [spec(
     "instruction",
     "Instruction",
@@ -349,6 +335,170 @@ pub struct Node {
     /// For an `if` or a `while`: its condition said as "result, is, value". `None` when the
     /// condition is an expression that does not say that, and the `cond` box holds it.
     pub when: Option<Comparison>,
+    /// For a tool step: what it is given, by the name of each argument.
+    pub params: BTreeMap<String, Param>,
+}
+
+/// What an argument of a tool is, so what is typed in its box is saved as that.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ArgKind {
+    #[default]
+    Text,
+    /// A whole number.
+    Whole,
+    Number,
+    /// Yes or no.
+    Flag,
+    /// A list or an object, typed as JSON.
+    Json,
+}
+
+/// One argument of a tool step, as it is edited.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Param {
+    pub edit: TextEdit,
+    pub kind: ArgKind,
+}
+
+impl Param {
+    /// The value the text says, or what is wrong with it. Nothing typed is no value. A number that
+    /// holds a `{{reference}}` stays text, to be worked out when the step runs.
+    fn value(&self, key: &str, at: &str) -> Result<Option<Value>, String> {
+        let text = self.edit.text.as_str();
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let templated = text.contains("{{");
+        let bad = |what: &str| format!("step {at}: {key} is {what}");
+        Ok(Some(match self.kind {
+            ArgKind::Text => Value::String(text.to_owned()),
+            _ if templated => Value::String(text.to_owned()),
+            ArgKind::Whole => Value::from(
+                text.trim()
+                    .parse::<i64>()
+                    .map_err(|_| bad("a whole number"))?,
+            ),
+            ArgKind::Number => text
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number)
+                .ok_or_else(|| bad("a number"))?,
+            ArgKind::Flag => match text.trim() {
+                "true" => Value::Bool(true),
+                "false" => Value::Bool(false),
+                _ => return Err(bad("yes or no")),
+            },
+            ArgKind::Json => {
+                serde_json::from_str(text).map_err(|e| bad(&format!("not JSON: {e}")))?
+            }
+        }))
+    }
+
+    fn of(value: &Value) -> Param {
+        let (text, kind) = match value {
+            Value::String(s) => (s.clone(), ArgKind::Text),
+            Value::Bool(b) => (b.to_string(), ArgKind::Flag),
+            Value::Number(n) if n.is_i64() || n.is_u64() => (n.to_string(), ArgKind::Whole),
+            Value::Number(n) => (n.to_string(), ArgKind::Number),
+            other => (
+                serde_json::to_string_pretty(other).unwrap_or_default(),
+                ArgKind::Json,
+            ),
+        };
+        Param {
+            edit: TextEdit::new(text),
+            kind,
+        }
+    }
+}
+
+/// One argument a tool takes, as a form shows it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ParamSpec {
+    pub key: String,
+    /// What the box is called: the argument's name in words.
+    pub label: String,
+    /// What it is for, from the tool's own description.
+    pub about: String,
+    pub kind: ArgKind,
+    pub required: bool,
+    /// The values it may be, if the tool lists them.
+    pub options: Vec<String>,
+    /// Lines tall.
+    pub lines: usize,
+}
+
+/// The arguments of a tool from its JSON schema, those it needs first. Names are made into words.
+pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut out: Vec<ParamSpec> = props
+        .iter()
+        .map(|(key, p)| {
+            let kind = match p.get("type").and_then(Value::as_str) {
+                Some("integer") => ArgKind::Whole,
+                Some("number") => ArgKind::Number,
+                Some("boolean") => ArgKind::Flag,
+                Some("object" | "array") => ArgKind::Json,
+                _ => ArgKind::Text,
+            };
+            let options: Vec<String> = p
+                .get("enum")
+                .and_then(Value::as_array)
+                .map(|e| {
+                    e.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let about = p
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let long = matches!(
+                key.as_str(),
+                "command" | "content" | "task" | "old_text" | "new_text" | "instruction"
+            ) || kind == ArgKind::Json;
+            let mut label = key.replace(['_', '-'], " ");
+            if let Some(first) = label.get(..1) {
+                label = format!("{}{}", first.to_uppercase(), &label[1..]);
+            }
+            ParamSpec {
+                key: key.clone(),
+                label,
+                about,
+                kind,
+                required: required.contains(&key.as_str()),
+                options: if kind == ArgKind::Text {
+                    options
+                } else {
+                    Vec::new()
+                },
+                lines: if long { 3 } else { 1 },
+            }
+        })
+        .collect();
+    // What the tool needs comes first, in the order it names them.
+    out.sort_by_key(|p| {
+        required
+            .iter()
+            .position(|r| *r == p.key)
+            .unwrap_or(usize::MAX)
+    });
+    out
 }
 
 /// A condition as "[result] [is / contains / …] [value]".
@@ -414,6 +564,7 @@ impl Node {
             fields: specs(kind).iter().map(|_| TextEdit::new("")).collect(),
             blocks,
             when: matches!(kind, IF | WHILE).then(Comparison::default),
+            params: BTreeMap::new(),
         }
     }
 
@@ -470,22 +621,12 @@ impl Node {
         match s.kind.as_str() {
             TOOL => {
                 n.tool = s.tool.clone().unwrap_or_default();
-                let mut args = s.args.clone().unwrap_or_default();
-                // A shell command has a box of its own, so the arguments are what else there is.
-                if n.tool == crate::tools::SHELL
-                    && let Some(command) = args.get("command").and_then(Value::as_str)
-                {
-                    n.set_field("command", command);
-                    args.remove("command");
-                }
-                n.set_field(
-                    "args",
-                    if args.is_empty() {
-                        String::new()
-                    } else {
-                        serde_json::to_string_pretty(&args).unwrap_or_default()
-                    },
-                );
+                n.params = s
+                    .args
+                    .iter()
+                    .flatten()
+                    .map(|(k, v)| (k.clone(), Param::of(v)))
+                    .collect();
             }
             GENERATE => n.set_field("instruction", text(&s.instruction)),
             DECIDE => {
@@ -603,20 +744,17 @@ impl Node {
         match self.kind.as_str() {
             TOOL => {
                 s.tool = Some(self.tool.clone()).filter(|t| !t.is_empty());
-                if let Some(text) = get("args") {
-                    match serde_json::from_str::<Value>(&text) {
-                        Ok(Value::Object(m)) => s.args = Some(m).filter(|m| !m.is_empty()),
-                        Ok(_) => bad.push(format!("step {at}: the arguments are a JSON object, like {{\"url\": \"https://example.com\"}}")),
-                        Err(e) => bad.push(format!("step {at}: the arguments are not JSON: {e}")),
+                let mut args = serde_json::Map::new();
+                for (key, param) in &self.params {
+                    match param.value(key, at) {
+                        Ok(Some(v)) => {
+                            args.insert(key.clone(), v);
+                        }
+                        Ok(None) => {}
+                        Err(why) => bad.push(why),
                     }
                 }
-                if self.tool == crate::tools::SHELL
-                    && let Some(command) = get("command")
-                {
-                    s.args
-                        .get_or_insert_with(Default::default)
-                        .insert("command".to_owned(), Value::String(command));
-                }
+                s.args = Some(args).filter(|a| !a.is_empty());
             }
             GENERATE => s.instruction = get("instruction"),
             DECIDE => {
@@ -748,6 +886,8 @@ pub enum Target {
     When(Loc, usize),
     /// What an `if` or `while` compares against.
     Right(Loc),
+    /// An argument of a tool step: its name, and what it is, which it is made as when first typed in.
+    Param(Loc, String, ArgKind),
 }
 
 /// Which pop-up list of the editor is open; one at a time.
@@ -761,9 +901,10 @@ pub enum Menu {
     AddAt(Place, usize),
     /// The Add step button in the graph's header, which adds after the selected step.
     AddStep,
-    Tool(Loc),
     /// What an `if` or `while` looks at.
     Left(Loc),
+    /// The choices of one argument of a tool step.
+    Param(Loc, String),
     /// How it compares.
     Compare(Loc),
     /// Names to put into a box.
@@ -1170,6 +1311,16 @@ impl Editor {
             Target::Id(at) => self.node_mut(at).map(|n| &mut n.id),
             Target::Bind(at) => self.node_mut(at).map(|n| &mut n.bind),
             Target::Field(at, i) => self.node_mut(at).and_then(|n| n.fields.get_mut(*i)),
+            Target::Param(at, key, kind) => self.node_mut(at).map(|n| {
+                &mut n
+                    .params
+                    .entry(key.clone())
+                    .or_insert_with(|| Param {
+                        edit: TextEdit::new(""),
+                        kind: *kind,
+                    })
+                    .edit
+            }),
             Target::Right(at) => self
                 .node_mut(at)
                 .and_then(|n| n.when.as_mut())
@@ -1245,6 +1396,7 @@ impl Editor {
 
     /// What a box can name: the inputs as `inputs.name`, what the steps before bind, and inside a
     /// loop its item and `index`. A `while` condition also sees what its body binds.
+    #[cfg(test)]
     pub fn names(&self, at: &Loc, key: Option<&str>) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for seen in self.scope(at, key) {
@@ -1353,6 +1505,19 @@ impl Editor {
                 }
                 Some(format!("{}{suffix}", node.bind.text.trim()))
             }
+        }
+    }
+
+    /// Sets an argument of a tool step to `text` (a choice from a list, or yes or no).
+    pub fn set_param(&mut self, at: &Loc, key: &str, kind: ArgKind, text: &str) {
+        if let Some(n) = self.node_mut(at) {
+            n.params.insert(
+                key.to_owned(),
+                Param {
+                    edit: TextEdit::new(text),
+                    kind,
+                },
+            );
         }
     }
 
@@ -1570,7 +1735,13 @@ mod tests {
     #[test]
     fn a_problem_in_a_box_or_in_the_whole_is_said_in_words() {
         let mut e = Editor::from_saved(&saved(every_kind()));
-        e.steps[0].fields[1] = TextEdit::new("{not json");
+        e.steps[0].params.insert(
+            "timeout_secs".into(),
+            Param {
+                edit: TextEdit::new("soon"),
+                kind: ArgKind::Whole,
+            },
+        );
         let wait = 5;
         e.steps[wait].fields[1] = TextEdit::new("lots");
         e.steps[4].blocks[0].steps[0].fields[0] = TextEdit::new("no equals sign");
@@ -1581,7 +1752,7 @@ mod tests {
         let p = e.problems.join("\n");
         for expected in [
             "The workflow needs a name.",
-            "step 1: the arguments are not JSON",
+            "step 1: timeout_secs is a whole number",
             "step 6: the most rounds is a whole number",
             "step 5.1: write each value as name = expression",
             "the default is not a number",
@@ -1888,30 +2059,84 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_command_has_a_box_of_its_own_and_the_rest_of_its_arguments_stay_json() {
+    fn a_tools_arguments_are_boxes_of_the_kind_each_is_and_come_back_as_what_they_were() {
         let e = Editor::from_saved(&saved(json!({"steps": [
-            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls -1"}},
-            {"id": "b", "kind": "tool", "tool": "shell", "args": {"command": "ls", "cwd": "/tmp"}},
-            {"id": "c", "kind": "tool", "tool": "web_fetch", "args": {"url": "https://x.test"}}
+            {"id": "a", "kind": "tool", "tool": "shell",
+             "args": {"command": "ls -1", "timeout_secs": 5, "background": true, "env": {"A": "1"}}}
         ]})));
-        let text = |n: usize, i: usize| e.steps[n].fields[i].text.clone();
+        let p = &e.steps[0].params;
+        assert_eq!(p["command"].edit.text, "ls -1");
         assert_eq!(
-            (text(0, 0), text(0, 1)),
-            ("ls -1".to_owned(), String::new())
+            (p["command"].kind, p["timeout_secs"].kind),
+            (ArgKind::Text, ArgKind::Whole)
         );
-        assert_eq!(text(1, 0), "ls");
-        assert!(text(1, 1).contains("cwd") && !text(1, 1).contains("command"));
-        assert_eq!(text(2, 0), "", "another tool has no command");
-        assert!(text(2, 1).contains("url"));
-        // Said back, it is what it was.
+        assert_eq!(
+            (p["background"].edit.text.as_str(), p["background"].kind),
+            ("true", ArgKind::Flag)
+        );
+        assert_eq!(p["env"].kind, ArgKind::Json);
         let def = e.definition().unwrap();
-        let args = |n: usize| def.steps[n].args.clone().unwrap();
-        assert_eq!(args(0)["command"], "ls -1");
         assert_eq!(
-            (args(1)["command"].clone(), args(1)["cwd"].clone()),
-            (json!("ls"), json!("/tmp"))
+            def.steps[0].args.clone().unwrap(),
+            json!({"command": "ls -1", "timeout_secs": 5, "background": true, "env": {"A": "1"}})
+                .as_object()
+                .unwrap()
+                .clone()
         );
-        assert_eq!(args(2)["url"], "https://x.test");
+        // A number that holds a reference stays text until the step runs; nothing typed is nothing.
+        let mut e = e;
+        let here = at(&[], 0);
+        e.text_mut(&Target::Param(
+            here.clone(),
+            "timeout_secs".into(),
+            ArgKind::Whole,
+        ))
+        .unwrap()
+        .text = "{{inputs.n}}".into();
+        e.text_mut(&Target::Param(
+            here.clone(),
+            "background".into(),
+            ArgKind::Flag,
+        ))
+        .unwrap()
+        .text = String::new();
+        let args = e.steps[0].to_step("1", &mut Vec::new()).args.unwrap();
+        assert_eq!(args["timeout_secs"], "{{inputs.n}}");
+        assert!(!args.contains_key("background"));
+        // A box made by typing in it has the kind it was opened as.
+        e.text_mut(&Target::Param(here, "offset".into(), ArgKind::Whole))
+            .unwrap()
+            .text = "3".into();
+        assert_eq!(
+            e.steps[0].to_step("1", &mut Vec::new()).args.unwrap()["offset"],
+            3
+        );
+    }
+
+    #[test]
+    fn the_arguments_a_tool_takes_come_from_its_schema_with_what_it_needs_first() {
+        let schema = json!({"type": "object", "properties": {
+            "reason": {"type": "string", "description": "Why.\nMore."},
+            "limit": {"type": "integer"},
+            "path": {"type": "string"},
+            "mode": {"type": "string", "enum": ["a", "b"]},
+            "all": {"type": "boolean"},
+            "tags": {"type": "array"}
+        }, "required": ["path", "mode"]});
+        let got = params_of(&schema);
+        let keys: Vec<&str> = got.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(&keys[..2], ["path", "mode"], "{keys:?}");
+        let of = |k: &str| got.iter().find(|p| p.key == k).unwrap();
+        assert_eq!(
+            (of("path").label.as_str(), of("path").required),
+            ("Path", true)
+        );
+        assert_eq!(of("reason").about, "Why.");
+        assert_eq!(of("limit").kind, ArgKind::Whole);
+        assert_eq!(of("all").kind, ArgKind::Flag);
+        assert_eq!((of("tags").kind, of("tags").lines), (ArgKind::Json, 3));
+        assert_eq!(of("mode").options, ["a", "b"]);
+        assert!(params_of(&json!({})).is_empty());
     }
 
     #[test]

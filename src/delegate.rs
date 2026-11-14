@@ -99,7 +99,7 @@ pub fn tools_for(agent: &Agent, typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolSpe
     all
 }
 
-fn spec(team: &[Agent]) -> ToolSpec {
+pub(crate) fn spec(team: &[Agent]) -> ToolSpec {
     let roster: Vec<String> = team
         .iter()
         .map(|m| match m.description.trim() {

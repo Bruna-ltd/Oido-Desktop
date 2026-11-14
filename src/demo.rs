@@ -1331,8 +1331,10 @@ pub static SCENES: &[Scene] = &[
             copy: false,
         });
     }),
-    ("workflow-simple", |s| simple_workflow(s, false)),
-    ("workflow-add", |s| simple_workflow(s, true)),
+    ("workflow-simple", |s| simple_workflow(s, "check")),
+    ("workflow-add", |s| simple_workflow(s, "add")),
+    ("workflow-tool", |s| simple_workflow(s, "tool")),
+    ("workflow-tools", |s| simple_workflow(s, "tools")),
     ("workflow-new", |s| {
         nested_workflow(s);
         s.new_workflow();
@@ -1939,7 +1941,8 @@ fn nested_workflow(s: &mut App) {
 
 /// A short workflow the way a person makes it: a command, then a check on what it printed. The
 /// step with the check is selected, or the list of steps to add is open.
-fn simple_workflow(s: &mut App, adding: bool) {
+fn simple_workflow(s: &mut App, mode: &str) {
+    let adding = mode == "add";
     use crate::flow_graph::View;
     use crate::workflow::definition::Definition;
     use crate::workflow::editor::{Editor, Loc, Menu};
@@ -1968,8 +1971,16 @@ fn simple_workflow(s: &mut App, adding: bool) {
     s.fit_graph();
     s.wf_graph.selected = Some(Loc {
         place: Vec::new(),
-        index: if adding { 0 } else { 1 },
+        index: if adding || mode.starts_with("tool") {
+            0
+        } else {
+            1
+        },
     });
+    if mode == "tools" {
+        s.wf_tool_step = s.wf_graph.selected.clone();
+        s.wf_tool_picker.show();
+    }
     if adding {
         s.wf_menu = Some(Menu::AddStep);
     }

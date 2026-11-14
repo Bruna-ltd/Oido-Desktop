@@ -15,7 +15,8 @@ use crate::models::ModelRef;
 use crate::store::Counted;
 use crate::usage::Source;
 use crate::workflow::cond::Op;
-use crate::workflow::editor::{Editor, Loc, Menu, Place, Target, kind_named};
+use crate::workflow::definition::STEP_TOOLS;
+use crate::workflow::editor::{ArgKind, Editor, Loc, Menu, Place, Target, kind_named};
 use crate::workflow::engine::{self, Outcome, StepLog};
 
 /// What a card raised by a test run of a workflow that is not saved yet is filed under.
@@ -380,11 +381,68 @@ impl App {
         }
     }
 
+    /// Chooses the tool a step uses. What the old tool was given means nothing to the new one.
     pub fn editor_set_tool(&mut self, at: &Loc, tool: &str) {
-        if let Some(n) = self.wf_editor.as_mut().and_then(|e| e.node_mut(at)) {
+        if let Some(n) = self.wf_editor.as_mut().and_then(|e| e.node_mut(at))
+            && n.tool != tool
+        {
             n.tool = tool.to_owned();
+            n.params.clear();
         }
         self.wf_menu = None;
+    }
+
+    /// Chooses the tool for the step whose list is open.
+    pub fn editor_choose_tool(&mut self, tool: &str) {
+        if let Some(at) = self.wf_tool_step.clone() {
+            self.editor_set_tool(&at, tool);
+        }
+    }
+
+    /// Sets an argument of a tool step from a choice: one of a list, or yes or no.
+    pub fn editor_set_param(&mut self, at: &Loc, key: &str, kind: ArgKind, text: &str) {
+        if let Some(ed) = &mut self.wf_editor {
+            ed.set_param(at, key, kind, text);
+        }
+        self.wf_menu = None;
+    }
+
+    /// The tools a step of the editor's workflow can use, by the name the model knows them by:
+    /// the built-in ones a flow may call, those of the MCP servers that are on, and handing a task
+    /// over when the agent has a team.
+    pub fn step_tools(&self, current: &str) -> Vec<String> {
+        let mut tools: Vec<String> = STEP_TOOLS.iter().map(|t| (*t).to_owned()).collect();
+        for server in self.mcp.servers.iter().filter(|m| m.offers()) {
+            tools.extend(server.tools.iter().map(|t| server.qualified(&t.name)));
+        }
+        let agent = self.wf_editor.as_ref().map(|e| e.agent_id.as_str());
+        if agent
+            .and_then(|id| self.roster.agent_ref(id))
+            .is_some_and(|a| !a.subagents.is_empty())
+        {
+            tools.push(crate::tools::DELEGATE.to_owned());
+        }
+        // The one a step already names stays, though its server is off.
+        if !current.is_empty() && !tools.iter().any(|t| t == current) {
+            tools.push(current.to_owned());
+        }
+        tools
+    }
+
+    /// The JSON schema of the arguments of a tool, as the workflow's agent would see it.
+    pub fn step_tool_schema(&self, tool: &str) -> Option<serde_json::Value> {
+        if tool == crate::tools::DELEGATE {
+            let team = self
+                .wf_editor
+                .as_ref()
+                .and_then(|e| self.roster.agent_ref(&e.agent_id))
+                .map(|a| a.subagents.clone())?;
+            return Some(crate::delegate::spec(&team).schema);
+        }
+        self.all_tools()
+            .into_iter()
+            .find(|t| t.name == tool)
+            .map(|t| t.schema)
     }
 
     pub fn editor_toggle_go_on(&mut self, at: &Loc) {
@@ -536,8 +594,8 @@ mod tests {
         };
         set(
             &mut app,
-            &Target::Field(inner, 1),
-            r#"{"command": "echo {{name}}-{{index}}"}"#,
+            &Target::Param(inner, "command".into(), ArgKind::Text),
+            "echo {{name}}-{{index}}",
         );
         app.editor_add(&Vec::new(), "Check something");
         app.editor_toggle_expression(&top(1));
@@ -546,14 +604,15 @@ mod tests {
         app.editor_add(&then, "Use a tool");
         set(
             &mut app,
-            &Target::Field(
+            &Target::Param(
                 Loc {
                     place: then,
                     index: 0,
                 },
-                1,
+                "command".into(),
+                ArgKind::Text,
             ),
-            r#"{"command": "echo {{= greeted.len() }} greeted"}"#,
+            "echo {{= greeted.len() }} greeted",
         );
 
         app.save_editor();
@@ -678,8 +737,8 @@ mod tests {
         app.editor_add(&Vec::new(), "Use a tool");
         set(
             &mut app,
-            &Target::Field(top(0), 1),
-            r#"{"command": "echo got-{{inputs.word}}"}"#,
+            &Target::Param(top(0), "command".into(), ArgKind::Text),
+            "echo got-{{inputs.word}}",
         );
 
         // Not ready: the box that is not a line, then an input that is missing.
@@ -705,7 +764,11 @@ mod tests {
 
         // A step with a problem is not run.
         app.wf_test.inputs = TextEdit::new("word = hi");
-        set(&mut app, &Target::Field(top(0), 1), "{not json");
+        set(
+            &mut app,
+            &Target::Param(top(0), "timeout_secs".into(), ArgKind::Whole),
+            "soon",
+        );
         app.test_editor();
         assert!(
             app.wf_test
@@ -718,8 +781,13 @@ mod tests {
         // Good: it runs for real and shows each step.
         set(
             &mut app,
-            &Target::Field(top(0), 1),
-            r#"{"command": "echo got-{{inputs.word}}"}"#,
+            &Target::Param(top(0), "timeout_secs".into(), ArgKind::Whole),
+            "",
+        );
+        set(
+            &mut app,
+            &Target::Param(top(0), "command".into(), ArgKind::Text),
+            "echo got-{{inputs.word}}",
         );
         app.test_editor();
         assert!(

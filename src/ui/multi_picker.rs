@@ -19,6 +19,9 @@ const MAX_HEIGHT: f32 = 320.0;
 /// The most width Rune's popover gives its content.
 const WIDTH: f32 = 320.0;
 
+/// What runs when a list is opened from its field.
+pub type Opened = Rc<dyn Fn(&mut App)>;
+
 /// What one multi-select is for and where its state lives.
 pub struct Spec {
     /// Prefix of every element key: "skills", "tools".
@@ -36,6 +39,12 @@ pub struct Spec {
     pub get: fn(&App) -> &MultiPicker,
     pub edit: fn(&mut App) -> &mut MultiPicker,
     pub toggle: fn(&mut App, &str),
+    /// One thing is chosen, not several: the field shows it, choosing closes the list, and there
+    /// are no chips or "Select all".
+    pub single: bool,
+    /// Run when the list is opened from the field, for a picker shared by several fields to learn
+    /// which one asked.
+    pub on_open: Option<Opened>,
 }
 
 fn row_key(key: &str, name: &str) -> String {
@@ -72,11 +81,18 @@ fn lines(found: &[&Item]) -> Vec<Line> {
 
 pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
     let (key, edit, toggle) = (spec.key, spec.edit, spec.toggle);
-    let summary = match spec.chosen.len() {
-        0 => None,
-        1 => Some(format!("1 {}", spec.noun.0)),
-        n => Some(format!("{n} {}", spec.noun.1)),
+    let summary = match (spec.chosen.len(), spec.single) {
+        (0, _) => None,
+        (_, true) => spec.chosen.first().map(|name| {
+            spec.items
+                .iter()
+                .find(|it| it.name == *name)
+                .map_or(name.clone(), |it| it.label.clone())
+        }),
+        (1, _) => Some(format!("1 {}", spec.noun.0)),
+        (n, _) => Some(format!("{n} {}", spec.noun.1)),
     };
+    let on_open = spec.on_open.clone();
     let trigger = Select::new::<&str>(format!("{key}-value"), &[])
         .current(summary.as_deref())
         .placeholder(spec.placeholder)
@@ -90,6 +106,9 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
                 picker.close();
             } else {
                 picker.show();
+                if let Some(f) = &on_open {
+                    f(s);
+                }
             }
         });
     let state = (spec.get)(s);
@@ -107,7 +126,7 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
     };
     // Always wrapped, so a caller's key never lands on the popover's own anchor.
     let mut out = col().w_full().gap(10.0).child(row().child(field));
-    if !spec.chosen.is_empty() {
+    if !spec.chosen.is_empty() && !spec.single {
         out = out.child(chips(key, &spec.chosen, &spec.items, toggle, k));
     }
     out
@@ -139,6 +158,7 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
             (MAX_HEIGHT / ROW) as usize - 1,
             edit,
             toggle,
+            spec.single,
         ))
         .build(k)
         .key("search");
@@ -150,6 +170,7 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
     let count = rows.len();
     let kit = k.clone();
     let chosen = spec.chosen.clone();
+    let single = spec.single;
     let list = col()
         .key("rows")
         .w(inner)
@@ -167,11 +188,23 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
                 }
             },
             move |_: &App, i| match &rows[i] {
-                Line::Heading(g, members) => heading(&kit, key, g, members, &chosen, toggle),
+                Line::Heading(g, members) => {
+                    heading(&kit, key, g, members, &chosen, toggle, single)
+                }
                 Line::Item(at) => {
                     let item = &shown[*at];
                     let on = chosen.contains(&item.name);
-                    option(&kit, key, item, *at, *at == active, on, edit, toggle)
+                    option(
+                        &kit,
+                        key,
+                        item,
+                        *at,
+                        *at == active,
+                        on,
+                        edit,
+                        toggle,
+                        single,
+                    )
                 }
             },
         )
@@ -241,6 +274,7 @@ fn heading(
     members: &[String],
     chosen: &[String],
     toggle: fn(&mut App, &str),
+    single: bool,
 ) -> El {
     let all_on = members.iter().all(|m| chosen.contains(m));
     // Toggling exactly these chooses the rest, or removes every one.
@@ -263,7 +297,7 @@ fn heading(
                 .shrink()
                 .truncate(),
         )
-        .child(
+        .children((!single).then(|| {
             Button::new(if all_on { "Remove all" } else { "Select all" })
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
@@ -278,8 +312,8 @@ fn heading(
                     }
                 })
                 .build(k)
-                .key(format!("{key}-all-{group}")),
-        )
+                .key(format!("{key}-all-{group}"))
+        }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -292,6 +326,7 @@ fn option(
     on: bool,
     edit: fn(&mut App) -> &mut MultiPicker,
     toggle: fn(&mut App, &str),
+    single: bool,
 ) -> El {
     let c = &k.c;
     let name = item.name.clone();
@@ -337,7 +372,12 @@ fn option(
             .a11y_hidden(),
         )
         .on_hover(move |s: &mut App| edit(s).active = at)
-        .on_press(move |s: &mut App| toggle(s, &name))
+        .on_press(move |s: &mut App| {
+            toggle(s, &name);
+            if single {
+                edit(s).close();
+            }
+        })
 }
 
 /// The chosen items, each removable. One that is gone from the list still shows, so it can be
@@ -387,6 +427,7 @@ fn keys(
     page: usize,
     edit: fn(&mut App) -> &mut MultiPicker,
     toggle: fn(&mut App, &str),
+    single: bool,
 ) -> impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static {
     move |s: &mut App, ev: &KeyEvent, tx: &mut Tx| {
         let picker = edit(s);
@@ -409,6 +450,9 @@ fn keys(
                 && let Some(name) = names.get(at).cloned()
             {
                 toggle(s, &name);
+                if single {
+                    edit(s).close();
+                }
             }
             return true;
         }

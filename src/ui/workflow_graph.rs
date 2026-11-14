@@ -10,7 +10,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, MenuItem, context_menu, 
 
 use super::workflow_editor::add_menu;
 use crate::app::App;
-use crate::workflow::editor::{Editor, KINDS, Loc, Menu};
+use crate::workflow::editor::{Editor, Loc, Menu};
 use crate::workflow::engine::StepLog;
 use crate::workflow::layout::{
     Dir, Form, Gap, Item, Label, Layout, NODE_H, NODE_W, Rect, Wire, layout,

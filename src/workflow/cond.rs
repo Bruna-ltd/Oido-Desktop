@@ -137,6 +137,7 @@ pub fn parse(src: &str) -> Option<(String, Op, String)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

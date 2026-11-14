@@ -531,8 +531,17 @@ editor now hides that behind plain words, and the expert forms are one press awa
   *Output of: shell: `ls`*, *Exit code of: …*, *The current item*. `Editor::scope` is the one walk of
   what a box can see; `names` (for checking) and `results` (for the list) both read it. `resolve`
   gives a step its name when its result is first used.
-- **A shell command has a box of its own** ("Command to run"). The JSON arguments show only for other
-  tools, or for a shell step that has more than a command.
+- **A tool's arguments are a form, not JSON.** The boxes come from the tool's own schema
+  (`params_of` in `workflow/editor.rs`; built-in tools, MCP tools, and `delegate` with the agent's
+  team as the choices): "Command", "Path", "Url". What the tool needs shows first; the rest show
+  when filled in or under Advanced. Whole numbers and numbers are saved as numbers, yes/no is a
+  switch, a list of choices is a list, and a list or object is a JSON box. A number that holds a
+  `{{reference}}` is saved as text and worked out when the step runs. Each argument keeps the kind
+  it was opened as (`Param { edit, kind }`), so no schema is needed to save a step; an argument the
+  tool does not list is shown as it is, not lost. Changing a step's tool clears its arguments.
+- **The tool itself is chosen from the agent form's searchable list** (`ui/multi_picker.rs` with
+  `single: true`: it shows the chosen tool's name, and choosing closes the list). One list state is
+  shared by all steps (`App.wf_tool_picker`); `wf_tool_step` says which step opened it.
 - **Conditions of `if` and `while` read "[result] [is / contains / …] [value]"** (`workflow/cond.rs`).
   The saved form is still an expression, `x.trimmed() == "pdf"`; one that is not of that shape opens
   as an expression, with no way to turn it into parts. `trimmed()` now accepts any value and only

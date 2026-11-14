@@ -92,6 +92,8 @@ fn agents_row(s: &App, kind: Kind, k: &Kit, layer: &mut Vec<El>) -> El {
                 get,
                 edit,
                 toggle,
+                single: false,
+                on_open: None,
             }
         };
     let spec = match kind {

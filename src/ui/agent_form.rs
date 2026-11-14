@@ -600,6 +600,8 @@ fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 get: |s| &s.roster.form.skill_picker,
                 edit: |s| &mut s.roster.form.skill_picker,
                 toggle: |s, name| s.roster.toggle_skill(name),
+                single: false,
+                on_open: None,
             },
         ))
         .children(cost(s, k))
@@ -757,6 +759,8 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 get: |s| &s.roster.form.tool_picker,
                 edit: |s| &mut s.roster.form.tool_picker,
                 toggle: |s, name| s.roster.toggle_tool(name),
+                single: false,
+                on_open: None,
             },
         ))
 }
