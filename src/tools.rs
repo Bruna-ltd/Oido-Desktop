@@ -260,7 +260,7 @@ pub fn shown(name: &str, servers: &[crate::mcp::Server]) -> Shown {
     match crate::mcp::resolve(servers, name) {
         Some((server, tool)) => Shown {
             label: humanize(&tool.name),
-            about: first_sentence(&tool.description),
+            about: one_line(&tool.description),
             group: server.name.clone(),
         },
         None => Shown {
@@ -384,12 +384,9 @@ fn humanize(name: &str) -> String {
 }
 
 /// The first sentence of a description, on one line.
-fn first_sentence(text: &str) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match text.find(". ") {
-        Some(end) => text[..=end].to_owned(),
-        None => text,
-    }
+/// The whole description with its line breaks and runs of spaces made single spaces.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn knows(name: &str) -> bool {
@@ -516,7 +513,7 @@ mod tests {
             s,
             Shown {
                 label: "Send email".into(),
-                about: "Send an email.".into(),
+                about: "Send an email. Needs a verified domain.".into(),
                 group: "Resend".into(),
             }
         );

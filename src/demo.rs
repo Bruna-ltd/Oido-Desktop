@@ -918,6 +918,33 @@ pub static SCENES: &[Scene] = &[
         }
         s.picks = vec!["Customers".into()];
     }),
+    ("question-long", |s| {
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        if let Some(a) = s.roster.current_mut() {
+            a.chat_mut().messages = vec![
+                Message::User("Plan the migration.".into()),
+                Message::Assistant {
+                    text: "Two ways to go about it.".into(),
+                    thinking: String::new(),
+                    thought_secs: None,
+                    tools: vec![ToolCall {
+                        name: "ask_user_question".into(),
+                        summary: "Which approach?".into(),
+                        output: None,
+                        id: "c1".into(),
+                        args: r#"{"question":"How should the database move to the new cluster?","options":["Copy everything over one weekend with the app offline while it runs","Replicate continuously and switch over with a few seconds of downtime","Move one table at a time behind a feature flag","Leave it where it is for now"]}"#.into(),
+                        trip: None,
+                        outside: None,
+                    }],
+                    approval: None,
+                    stats: None,
+                    run: Some("r1".into()),
+                    outcome: Outcome::Done,
+                },
+            ];
+        }
+    }),
     ("command", |s| {
         load_samples(s);
         s.roster.select(Target::agent("scout"));
@@ -1546,6 +1573,13 @@ pub static SCENES: &[Scene] = &[
         ];
         s.roster.form.skill_picker.close();
         s.roster.form.skill_picker.search = TextEdit::new("seo");
+    }),
+    ("skills-list", |s| {
+        load_samples(s);
+        s.edit_agent(&Target::agent("atlas"));
+        s.roster.form.advanced = true;
+        s.roster.form.skill_picker.show();
+        s.roster.form.skill_picker.active = 2;
     }),
     ("member-new", |s| {
         load_samples(s);

@@ -1,14 +1,17 @@
 //! A searchable multi-select: a field that opens a list with a check on each chosen item, and the
 //! chosen ones as removable chips beneath it. It is the model picker's sibling, but you can choose
-//! several, so choosing leaves it open. Skills and tools both use it.
+//! several, so choosing leaves it open. Skills and tools both use it. Each row shows a one-line
+//! description; the highlighted row's whole description shows in a panel beside the list.
 
 use std::borrow::Cow;
 use std::rc::Rc;
 
-use rune::{Color, El, GrowthSpec, Key, KeyEvent, ScrollSpec, Tx, col, el, icon, row, text};
+use rune::{
+    Align, Color, El, GrowthSpec, Key, KeyEvent, ScrollSpec, Side, Tx, col, el, icon, row, text,
+};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Placement, Popover,
-    Select, SelectAppearance, TextInput, glyphs, scroll_bar,
+    Select, SelectAppearance, TextInput, glyphs, popover, scroll_bar,
 };
 
 use crate::app::App;
@@ -120,7 +123,10 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
         .open(state.open)
         .on_close(move |s: &mut App| edit(s).close());
     let field = if state.open {
-        popover.child(list_body(s, k, &spec)).build(k, layer)
+        let (body, about) = list_body(s, k, &spec);
+        let field = popover.child(body).build(k, layer);
+        layer.extend(about.map(|d| detail(k, key, d)));
+        field
     } else {
         popover.build(k, layer)
     };
@@ -132,7 +138,8 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
     out
 }
 
-fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
+/// The list, and the highlighted item's whole description for the panel beside it.
+fn list_body(s: &App, k: &Kit, spec: &Spec) -> (El, Option<String>) {
     let c = &k.c;
     let state = (spec.get)(s);
     let key = spec.key;
@@ -249,7 +256,11 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
                 .min_h(0.0),
         )
     };
-    col()
+    let about = found
+        .get(active)
+        .map(|it| it.description.clone())
+        .filter(|d| !d.is_empty() && !crate::skills::needs_complex_text(d));
+    let body = col()
         .w(WIDTH)
         .shrink()
         .min_h(0.0)
@@ -261,7 +272,31 @@ fn list_body(s: &App, k: &Kit, spec: &Spec) -> El {
                 .fill(c.border_weak)
                 .a11y_hidden(),
         )
-        .child(results)
+        .child(results);
+    (body, about)
+}
+
+/// The highlighted item's whole description, which its row cuts to one line, in a panel beside
+/// the list: top-aligned with it, so moving through the rows changes only the text, never the
+/// list's size or place. Assistive technology reads it from the row instead.
+fn detail(k: &Kit, key: &str, about: String) -> El {
+    let panel = col()
+        .key(format!("{key}-detail"))
+        .w(WIDTH)
+        .padding(12.0)
+        .child(
+            text(about)
+                .font(k.ty.small)
+                .color(k.c.text_muted)
+                .wrap()
+                .a11y_hidden(),
+        );
+    popover::raised(k, panel, k.radius.md).anchored(
+        format!("{key}-content"),
+        Side::Right,
+        Align::Start,
+        8.0,
+    )
 }
 
 /// A group's name over its items, with a button that chooses every item shown under it, or
@@ -334,6 +369,7 @@ fn option(
         .key(row_key(key, &item.name))
         .role("option")
         .label(item.label.clone())
+        .description(item.description.clone())
         .checked(on)
         .focus_selected(active)
         .w_full()

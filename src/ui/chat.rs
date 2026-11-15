@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use rune::{El, GrowthSpec, ScrollPos, ScrollSpec, TextStyle, col, el, row, text};
+use rune::{El, GrowthSpec, ScrollPos, ScrollSpec, TextStyle, col, el, icon, row, text};
 use rune_kit::{
     Badge, BadgeVariant, Button, ButtonVariant, Card, Collapsible, ControlSize, Dialog, IconButton,
     IconButtonVariant, Kit, Markdown, MarkdownStyle, glyphs,
@@ -730,26 +730,13 @@ fn question(s: &App, t: &ToolCall, last: bool, j: usize, k: &Kit) -> El {
     }
     let mut body = col().w_full().gap(10.0);
     if !q.options.is_empty() {
-        body = body.child(row().w_full().gap(6.0).children(q.options.iter().map(|o| {
-            let picked = s.picks.contains(o);
-            let (multiple, option) = (q.multiple, o.clone());
-            Button::new(o.clone())
-                .variant(if picked {
-                    ButtonVariant::Contrast
-                } else {
-                    ButtonVariant::Outline
-                })
-                .control_size(ControlSize::Small)
-                .on_press(move |s: &mut App| {
-                    if multiple {
-                        s.toggle_pick(&option);
-                    } else {
-                        s.answer(&option);
-                    }
-                })
-                .build(k)
-                .key(format!("ask-option-{o}"))
-        })));
+        body = body.child(
+            col().w_full().gap(6.0).children(
+                q.options
+                    .iter()
+                    .map(|o| ask_option(o, q.multiple, s.picks.contains(o), k)),
+            ),
+        );
     }
     let style = rune::TextStyle {
         line_height: 22.0,
@@ -811,6 +798,73 @@ fn question(s: &App, t: &ToolCall, last: bool, j: usize, k: &Kit) -> El {
                 ),
         );
     card(k.c.warning.icon, body)
+}
+
+/// One of a question's options, a full-width row whose words wrap, so a long option or many of
+/// them stay inside the card. With several to choose, it toggles and shows a check; with one, the
+/// press is the answer.
+fn ask_option(option: &str, multiple: bool, picked: bool, k: &Kit) -> El {
+    let c = &k.c;
+    let chosen = option.to_owned();
+    let mut line = row()
+        .key(format!("ask-option-{option}"))
+        .role(if multiple { "checkbox" } else { "button" })
+        .label(option.to_owned())
+        .focusable(true)
+        .focus_ring(2.0, 1.0, c.border_strong)
+        .w_full()
+        .px(12.0)
+        .py(8.0)
+        .gap(10.0)
+        .items_start()
+        .radius(k.radius.md)
+        .border(
+            1.0,
+            if picked {
+                c.border_strong
+            } else {
+                c.border_base
+            },
+        )
+        .hover(c.hover)
+        .on_press(move |s: &mut App| {
+            if multiple {
+                s.toggle_pick(&chosen);
+            } else {
+                s.answer(&chosen);
+            }
+        });
+    if multiple {
+        line = line.checked(picked).child(
+            el().size(16.0, 16.0)
+                .mt(2.0)
+                .center()
+                .radius(k.radius.sm)
+                .border(
+                    1.0,
+                    if picked {
+                        c.border_strong
+                    } else {
+                        c.border_base
+                    },
+                )
+                .child(
+                    icon(k.glyph.check_small, 14.0)
+                        .color(c.icon_base)
+                        .opacity(if picked { 1.0 } else { 0.0 }),
+                )
+                .a11y_hidden(),
+        );
+    }
+    line.child(
+        text(option.to_owned())
+            .font(k.ty.body)
+            .color(c.text_base)
+            .wrap()
+            .grow(1.0)
+            .shrink()
+            .a11y_hidden(),
+    )
 }
 
 /// The workflow being learned from this chat, or the draft of it: the steps as lines, and what you

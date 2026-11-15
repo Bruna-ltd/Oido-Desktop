@@ -8,6 +8,7 @@
 //! asking anyone. What is saved is only whether one is on, which of its tools are off, and the
 //! account (see [`google`]).
 
+mod analytics;
 mod calendar;
 mod docs;
 mod drive;
@@ -16,6 +17,8 @@ mod gmail;
 pub mod google;
 mod marks;
 mod mime;
+mod report;
+mod search_console;
 mod sheets;
 mod youtube;
 
@@ -85,6 +88,8 @@ pub const ALL: &[&dyn Extension] = &[
     &docs::Docs,
     &sheets::Sheets,
     &youtube::YouTube,
+    &analytics::Analytics,
+    &search_console::SearchConsole,
 ];
 
 /// What a server's id starts with when the server is an extension's.
