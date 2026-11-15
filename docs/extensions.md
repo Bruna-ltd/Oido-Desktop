@@ -6,7 +6,7 @@ extension looks like an MCP server (`mcp__gmail__search`); to the person it is a
 screen. Nothing runs on our servers: the app talks straight to the service's API with the person's
 own sign-in.
 
-Status: design agreed 2026-11-14. Built on `feat/extensions-p1`: Gmail, Google Calendar, Google Drive, YouTube, Google Docs and Google Sheets, each with read and write tools.
+Status: design agreed 2026-11-14. Built: Gmail, Google Calendar, Google Drive, YouTube, Google Docs and Google Sheets, each with read and write tools; Google Analytics and Google Search Console (2026-11-15).
 
 ## Decisions
 
@@ -189,3 +189,44 @@ dimensions, filters and sort; last 28 days by default), `top_videos` (best video
 and `video_analytics` (one video's totals, or split by day, country, device or traffic source).
 Revenue is not offered: it has its own scope (`yt-analytics-monetary.readonly`). Data runs a day or
 two behind.
+
+## Google Analytics and Search Console (built 2026-11-15)
+
+Two more extensions on the same Google account, for people who run websites. Each must have its
+API turned on in the person's Google Cloud project, and turning one on asks Google for its scope
+(the usual "Sign in again to allow …").
+
+**Google Analytics** (`mcp__google_analytics__*`, scope `analytics.readonly`, read only). GA4
+only; Universal Analytics is gone. Needs the Google Analytics Data API, and the Admin API for
+`list_properties`.
+
+| Tool | What |
+|---|---|
+| `list_properties` | Accounts and their GA4 properties with ids (Admin API `accountSummaries`) |
+| `run_report` | Any metrics and dimensions over a period, `filters` (dimension, exact/contains/begins_with/ends_with/regex, exclude), `sort`, up to 1,000 rows |
+| `top_pages` | Most viewed pages: views, users, engagement time |
+| `traffic_sources` | Sessions by channel, or by source and medium |
+| `realtime_report` | Last 30 minutes |
+
+A property is a number (bare or `properties/N`); anything else is refused before an address is
+built. Filters are a list of objects turned into the Data API's `FilterExpression`, not a string
+syntax the model would have to learn. When the API says more rows exist than were returned, the
+output says so.
+
+**Google Search Console** (`mcp__google_search_console__*`, scope `webmasters`). Needs the Google
+Search Console API.
+
+| Tool | Access | What |
+|---|---|---|
+| `list_sites` | reads | Sites and permission level |
+| `search_analytics` | reads | Clicks, impressions, CTR, position by query/page/country/device/date/searchAppearance; filters; `type` (web, image, video, news, discover, googleNews); paging with `start_row` |
+| `inspect_url` | reads | Index verdict, coverage, last crawl, canonicals, robots, mobile, rich results (2,000 a day per site) |
+| `list_sitemaps` | reads | Submitted sitemaps, errors, warnings, page counts |
+| `submit_sitemap` | changes things | Submit or resubmit a sitemap |
+
+Why `webmasters` and not `webmasters.readonly`: submitting a sitemap needs it, and it is the only
+write. Not built: adding or removing sites, deleting sitemaps (both need verification flows or
+undo the person's setup).
+
+Shared by YouTube, Analytics and Search Console: `extensions/report.rs` (arguments, the
+28-days-to-today period, number formatting).

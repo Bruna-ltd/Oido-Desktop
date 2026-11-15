@@ -8,6 +8,7 @@
 use serde_json::{Value, json};
 
 use super::google::{Api, Failure};
+use super::report::{arg, cell, recent, required};
 use super::{Access, Extension, ToolDef};
 use crate::mcp::catalog::Logo;
 
@@ -18,8 +19,6 @@ const ANALYTICS: &str = "https://www.googleapis.com/auth/yt-analytics.readonly";
 const REPORTS: &str = "https://youtubeanalytics.googleapis.com/v2/reports";
 /// What a report shows when no metrics are asked for.
 const DEFAULT_METRICS: &str = "views,estimatedMinutesWatched,averageViewDuration,likes,comments,shares,subscribersGained,subscribersLost";
-/// A report covers this many days up to today when no dates are given.
-const DEFAULT_DAYS: i64 = 28;
 const BASE: &str = "https://www.googleapis.com/youtube/v3";
 const DEFAULT_RESULTS: u64 = 10;
 const MAX_RESULTS: u64 = 50;
@@ -428,7 +427,7 @@ impl Extension for YouTube {
                 ))
             }
             "analytics_report" => {
-                let (start, end) = period(args, chrono::Utc::now().date_naive())?;
+                let (start, end) = recent(args)?;
                 let metrics =
                     tokens(args, "metrics")?.unwrap_or_else(|| DEFAULT_METRICS.to_owned());
                 let max = args["max_results"]
@@ -462,7 +461,7 @@ impl Extension for YouTube {
             "top_videos" => top_videos(args, api),
             "video_analytics" => {
                 let video = required(args, "video_id")?;
-                let (start, end) = period(args, chrono::Utc::now().date_naive())?;
+                let (start, end) = recent(args)?;
                 let filter = format!("video=={video}");
                 let mut query = vec![
                     ("ids", "channel==MINE"),
@@ -490,27 +489,6 @@ impl Extension for YouTube {
             ))),
         }
     }
-}
-
-/// The dates a report covers: `start_date` to `end_date`, as asked, else the 28 days up to `today`.
-fn period(args: &Value, today: chrono::NaiveDate) -> Result<(String, String), Failure> {
-    let date = |name: &str| -> Result<Option<chrono::NaiveDate>, Failure> {
-        arg(args, name)
-            .map(|d| {
-                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
-                    Failure::other(format!(
-                        "`{name}` must be a date like 2025-03-01, not {d:?}"
-                    ))
-                })
-            })
-            .transpose()
-    };
-    let end = date("end_date")?.unwrap_or(today);
-    let start = date("start_date")?.unwrap_or(end - chrono::Duration::days(DEFAULT_DAYS - 1));
-    if start > end {
-        return Err(Failure::other("`start_date` is after `end_date`"));
-    }
-    Ok((start.to_string(), end.to_string()))
 }
 
 /// A list of metric, dimension, filter or sort names: letters, digits and the few marks they use.
@@ -550,25 +528,8 @@ fn render_report(report: &Value) -> String {
     out
 }
 
-fn cell(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.as_i64().map_or_else(
-            || {
-                let f = n.as_f64().unwrap_or(0.0);
-                format!("{f:.2}")
-                    .trim_end_matches('0')
-                    .trim_end_matches('.')
-                    .to_owned()
-            },
-            |i| i.to_string(),
-        ),
-        other => other.to_string(),
-    }
-}
-
 fn top_videos(args: &Value, api: &Api) -> Result<String, Failure> {
-    let (start, end) = period(args, chrono::Utc::now().date_naive())?;
+    let (start, end) = recent(args)?;
     let by = match arg(args, "sort_by") {
         None => "views",
         Some(
@@ -654,14 +615,6 @@ fn render_top(report: &Value, titles: &Value) -> String {
         ));
     }
     lines.join("\n")
-}
-
-fn arg<'a>(args: &'a Value, name: &str) -> Option<&'a str> {
-    args[name].as_str().filter(|v| !v.trim().is_empty())
-}
-
-fn required<'a>(args: &'a Value, name: &str) -> Result<&'a str, Failure> {
-    arg(args, name).ok_or_else(|| Failure::other(format!("`{name}` is required")))
 }
 
 fn items(found: &Value) -> &[Value] {
@@ -958,37 +911,6 @@ mod tests {
             ),
             "P · Mix · 4 videos"
         );
-    }
-
-    fn day(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
-        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
-    }
-
-    #[test]
-    fn a_report_covers_the_asked_dates_or_the_28_days_up_to_today() {
-        let today = day(2025, 3, 31);
-        assert_eq!(
-            period(&json!({}), today).unwrap(),
-            ("2025-03-04".to_owned(), "2025-03-31".to_owned())
-        );
-        assert_eq!(
-            period(&json!({"end_date": "2025-02-10"}), today).unwrap(),
-            ("2025-01-14".to_owned(), "2025-02-10".to_owned())
-        );
-        assert_eq!(
-            period(
-                &json!({"start_date": "2025-01-01", "end_date": "2025-01-31"}),
-                today
-            )
-            .unwrap(),
-            ("2025-01-01".to_owned(), "2025-01-31".to_owned())
-        );
-        for bad in [
-            json!({"start_date": "yesterday"}),
-            json!({"start_date": "2025-05-01", "end_date": "2025-04-01"}),
-        ] {
-            assert!(period(&bad, today).is_err(), "{bad}");
-        }
     }
 
     #[test]
