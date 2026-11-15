@@ -109,13 +109,45 @@ fn split(text: &str) -> (&str, &str) {
     }
 }
 
-/// A top-level `key: value` line of the front matter.
+/// A top-level `key: value` of the front matter, with the indented lines that continue it: a
+/// quoted or plain value folded onto one line, or a `|` / `>` block.
 fn field(front: &str, key: &str) -> Option<String> {
-    front
-        .lines()
-        .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))
-        .map(|v| v.trim().trim_matches(['"', '\'']).to_owned())
-        .filter(|v| !v.is_empty())
+    let mut lines = front.lines();
+    let first = lines
+        .by_ref()
+        .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))?
+        .trim();
+    let more: Vec<&str> = lines
+        .take_while(|l| l.trim().is_empty() || l.starts_with([' ', '\t']))
+        .map(str::trim)
+        .collect();
+    let value = match first.chars().next() {
+        Some(block @ ('|' | '>')) => {
+            let joint = if block == '|' { "\n" } else { " " };
+            let mut text = more.join(joint);
+            text.truncate(text.trim_end().len());
+            text
+        }
+        _ => {
+            let words: Vec<&str> = std::iter::once(first)
+                .chain(more)
+                .filter(|l| !l.is_empty())
+                .collect();
+            unquote(&words.join(" "))
+        }
+    };
+    (!value.is_empty()).then_some(value)
+}
+
+/// A YAML scalar without its quotes: `''` in single quotes and `\"` in double ones are a quote.
+fn unquote(v: &str) -> String {
+    if let Some(inner) = v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
+        inner.replace("''", "'")
+    } else if let Some(inner) = v.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        inner.replace("\\\"", "\"")
+    } else {
+        v.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +190,31 @@ mod tests {
         );
         assert!(discover(&root.join("nowhere")).is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_description_over_several_lines_is_read_whole() {
+        let front = |value: &str| format!("name: x\ndescription:{value}\nmetadata:\n  a: b");
+        let read = |value: &str| field(&front(value), "description");
+        assert_eq!(
+            read(" 'Spend audit: idle\n  spend, the user''s bill.'"),
+            Some("Spend audit: idle spend, the user's bill.".into())
+        );
+        assert_eq!(
+            read(" >-\n  Folded onto\n  one line.\n"),
+            Some("Folded onto one line.".into())
+        );
+        assert_eq!(
+            read(" |\n  Kept on\n  two lines.\n"),
+            Some("Kept on\ntwo lines.".into())
+        );
+        assert_eq!(
+            read(" Plain that\n  goes on."),
+            Some("Plain that goes on.".into())
+        );
+        assert_eq!(read(" \"Say \\\"hi\\\".\""), Some("Say \"hi\".".into()));
+        assert_eq!(read(""), None);
+        assert_eq!(field(&front(" x"), "name"), Some("x".into()));
     }
 
     #[test]

@@ -355,10 +355,7 @@ impl App {
             others_closed: false,
             rail_open: false,
             providers,
-            skills: skills_dir
-                .as_deref()
-                .map(crate::skills::discover)
-                .unwrap_or_default(),
+            skills: Vec::new(),
             skills_dir,
             mcp: crate::mcp::Mcp::new(Vec::new()),
             ext: crate::extensions::Extensions::new(),
@@ -388,6 +385,7 @@ impl App {
             focused: false,
         };
         app.settle_interrupted_commands();
+        app.reload_skills();
         app.load_workflows();
         app.load_mcp();
         app.load_extensions();
@@ -454,6 +452,15 @@ impl App {
         self.switching_chat(|s| s.roster.select(t));
         self.route = Route::Chat;
         self.save_selection();
+    }
+
+    /// Reads the skills folder again, so a skill installed while the app runs can be chosen.
+    pub fn reload_skills(&mut self) {
+        self.skills = self
+            .skills_dir
+            .as_deref()
+            .map(crate::skills::discover)
+            .unwrap_or_default();
     }
 
     pub fn new_agent(&mut self) {

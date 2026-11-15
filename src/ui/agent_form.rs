@@ -601,7 +601,7 @@ fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 edit: |s| &mut s.roster.form.skill_picker,
                 toggle: |s, name| s.roster.toggle_skill(name),
                 single: false,
-                on_open: None,
+                on_open: Some(std::rc::Rc::new(App::reload_skills)),
             },
         ))
         .children(cost(s, k))
