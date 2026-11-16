@@ -108,7 +108,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 24] = [
+const MIGRATIONS: [&str; 25] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -133,6 +133,7 @@ const MIGRATIONS: [&str; 24] = [
     include_str!("../../db/migrations/022_agent_avatar.sql"),
     include_str!("../../db/migrations/023_workflow_waits.sql"),
     include_str!("../../db/migrations/024_extensions.sql"),
+    include_str!("../../db/migrations/025_agent_browse.sql"),
 ];
 
 const QUERY_FILES: [&str; 11] = [

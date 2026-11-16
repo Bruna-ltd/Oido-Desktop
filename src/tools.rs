@@ -84,6 +84,7 @@ pub fn registered() -> Vec<ToolSpec> {
         ),
     ];
     all.extend(crate::typesafe::specs());
+    all.push(crate::connector::spec());
     all
 }
 
@@ -152,10 +153,12 @@ fn ask() -> ToolSpec {
     }
 }
 
-/// Whether a tool is one of the app's own, which every agent has without choosing it. TypeSafe's
-/// and MCP servers' tools are chosen per agent.
+/// Whether a tool is one of the app's own, which every agent has without choosing it. TypeSafe's,
+/// the browser's and MCP servers' tools are chosen per agent.
 pub fn is_builtin(name: &str) -> bool {
-    !needs_typesafe(name) && registered().iter().any(|t| t.name == name)
+    !needs_typesafe(name)
+        && !crate::connector::is_tool(name)
+        && registered().iter().any(|t| t.name == name)
 }
 
 /// What an agent is offered: every built-in tool, then the TypeSafe and MCP tools it has chosen,
@@ -174,11 +177,13 @@ pub fn offered(chosen: &[String], typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolS
 }
 
 /// A tool that runs in the background and ends later: a command, a workflow, a page fetched from
-/// the web, a question put to TypeSafe, a call to an MCP server, or a file sent on Telegram.
+/// the web or used in the browser, a question put to TypeSafe, a call to an MCP server, or a file
+/// sent on Telegram.
 pub fn is_job(name: &str) -> bool {
     name == SHELL
         || name == RUN_WORKFLOW
         || name == crate::web::NAME
+        || crate::connector::is_tool(name)
         || needs_typesafe(name)
         || crate::mcp::is_tool(name)
         || name == crate::channels::SEND_FILE
@@ -209,6 +214,7 @@ pub fn summary(name: &str, args: &str) -> String {
         crate::agent_tool::NAME => crate::agent_tool::summary(args),
         crate::web::NAME => crate::web::summary(args),
         n if needs_typesafe(n) => crate::typesafe::summary(args),
+        crate::connector::NAME => crate::connector::summary(args),
         _ => args.to_owned(),
     }
 }
@@ -245,6 +251,13 @@ pub struct Shown {
 /// How the tool called `name` is shown. An MCP tool is labelled from its server's name for it and
 /// grouped under the server; a name nothing knows shows as itself.
 pub fn shown(name: &str, servers: &[crate::mcp::Server]) -> Shown {
+    if crate::connector::is_tool(name) {
+        return Shown {
+            label: "Use your browser".to_owned(),
+            about: "Opens pages, reads them, clicks and types in tabs of its own in your browser, through the Oido Browser Connector.".to_owned(),
+            group: "Browser".to_owned(),
+        };
+    }
     if let Some((label, about)) = own(name) {
         let group = if needs_typesafe(name) {
             TYPESAFE

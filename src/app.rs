@@ -222,6 +222,8 @@ pub struct App {
     pub intake: std::collections::HashMap<String, Vec<i64>>,
     /// The blocked words as typed on the Guardrails screen, until saved.
     pub guard_words: TextEdit,
+    /// The hub the Oido Browser Connector extension connects to, for the `browser` tool.
+    pub connector: crate::connector::Connector,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
     /// The window has the keyboard focus, so the person is looking at it: no notifications then.
@@ -381,6 +383,8 @@ impl App {
             waiting: Vec::new(),
             intake: std::collections::HashMap::new(),
             guard_words: TextEdit::new(""),
+            connector: crate::connector::Connector::default(),
+
             store,
             focused: false,
         };

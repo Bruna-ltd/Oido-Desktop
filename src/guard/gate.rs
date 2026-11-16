@@ -46,6 +46,14 @@ impl App {
             })
     }
 
+    /// Sets when agents' browser calls wait for your go-ahead, and saves it.
+    pub fn set_browser_approvals(&mut self, approvals: crate::connector::Approvals) {
+        self.guard.set_browser(approvals);
+        self.save("the browser settings", |db| {
+            db.set_setting(super::BROWSER, &approvals)
+        });
+    }
+
     /// Sets how long a call held for a go-ahead waits, in minutes, and saves it.
     pub fn set_guard_wait(&mut self, minutes: u32) {
         self.guard.set_wait(minutes);

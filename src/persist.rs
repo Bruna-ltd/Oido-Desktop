@@ -183,6 +183,7 @@ impl App {
         if let Some(a) = self.roster.find(t) {
             self.save("the chat", |db| db.remove_session(id, &a.id, &a.sessions));
         }
+        self.connector.forget(id);
     }
 
     pub(crate) fn save_providers(&self) {

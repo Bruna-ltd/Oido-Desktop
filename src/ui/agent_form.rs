@@ -727,7 +727,7 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .color(c.text_base),
         )
         .child(hint(
-            "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers or TypeSafe here.",
+            "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers, TypeSafe or your browser here.",
             k,
         ))
         .child(super::multi_picker::build(
