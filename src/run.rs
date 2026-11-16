@@ -1381,6 +1381,29 @@ impl App {
             );
             return true;
         }
+        if crate::connector::is_tool(&name) {
+            // On its own thread: an action waits for the browser, a page for its load. Stop
+            // discards what comes back.
+            let cancel = self.track(&sid, &id);
+            let (connector, chat) = (self.connector.clone(), sid.clone());
+            self.spawn(
+                move || {
+                    let told = connector.run(&chat, &args);
+                    (told, cancel.load(Ordering::Relaxed))
+                },
+                move |app, (text, stopped)| {
+                    let finish = if stopped {
+                        crate::command::Finish::Stopped(
+                            "Stopped before the browser was done.".into(),
+                        )
+                    } else {
+                        crate::command::Finish::Done(text)
+                    };
+                    app.command_done(&sid, &id, finish);
+                },
+            );
+            return true;
+        }
         let Some(spec) = crate::command::parse(&args) else {
             self.resolve(
                 &sid,

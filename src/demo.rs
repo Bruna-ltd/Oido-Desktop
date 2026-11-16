@@ -625,6 +625,9 @@ pub static SCENES: &[Scene] = &[
             ));
         }
     }),
+    ("settings-browser", |s| {
+        s.route = Route::Settings;
+    }),
     ("extensions", |s| {
         s.ext.account = crate::extensions::AccountView {
             client_id: "1234-abcd.apps.googleusercontent.com".into(),

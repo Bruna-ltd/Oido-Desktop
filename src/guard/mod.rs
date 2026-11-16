@@ -37,6 +37,8 @@ const WAIT: &str = "guard.wait";
 const WORDS: &str = "guard.words";
 /// Where the limits on channel messages are saved.
 const LIMITS: &str = "guard.channel_limits";
+/// Where the browser calls' approvals are saved (the Settings screen).
+const BROWSER: &str = "browser.approvals";
 
 /// The longest channel message choices on the Guardrails screen, in characters (0: no limit).
 pub const LENGTHS: [u32; 4] = [0, 500, 2000, 8000];
@@ -244,7 +246,7 @@ pub fn title(rule: &str) -> &'static str {
         "secrets.unknown" => "Unknown hidden value",
         "secrets.off_machine" => "Sends a secret away",
         "taint.outside" => "Acts after reading outside text",
-        other => actions::title(other),
+        other => crate::connector::approvals::title(other).unwrap_or_else(|| actions::title(other)),
     }
 }
 
@@ -289,6 +291,8 @@ pub struct Guard {
     /// Words never sent to a model or shown to a channel person who did not write them.
     words: Vec<String>,
     limits: Limits,
+    /// When browser calls wait for the person.
+    browser: crate::connector::Approvals,
 }
 
 /// What [`Guard`] looks for when it learns what to hide from a text.
@@ -359,7 +363,19 @@ impl Guard {
             limits: read(LIMITS)
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default(),
+            browser: read(BROWSER)
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
         }
+    }
+
+    /// When browser calls wait for the person.
+    pub fn browser(&self) -> crate::connector::Approvals {
+        self.browser
+    }
+
+    pub fn set_browser(&mut self, approvals: crate::connector::Approvals) {
+        self.browser = approvals;
     }
 
     /// The words never sent to a model or shown to a channel person who did not write them.
@@ -557,6 +573,10 @@ impl Guard {
                 found.extend(actions::check_write(&crate::files::path_of(&revealed), at));
             }
         }
+        if let Some(kind) = crate::connector::kind(name, &revealed) {
+            let outside = outside.filter(|_| self.on(Pack::Taint));
+            found.extend(self.browser.check(kind, outside));
+        }
         if self.on(Pack::Taint)
             && let Some(from) = outside
             && taint::acts(name)
@@ -601,6 +621,7 @@ impl Guard {
 /// Whether a tool sends what it is given away from this computer, past the guard.
 fn off_machine(name: &str) -> bool {
     name == crate::web::NAME
+        || crate::connector::is_tool(name)
         || name == crate::channels::SEND_FILE
         || crate::mcp::is_tool(name)
         || crate::tools::needs_typesafe(name)

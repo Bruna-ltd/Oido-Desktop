@@ -1,5 +1,6 @@
 //! The app's settings, in sections. Appearance: Oido's own look, the desktop's Omarchy theme, or
-//! any one Omarchy theme. Schedules: whether they run. Updates: this version, looking for a newer
+//! any one Omarchy theme. Schedules: whether they run. Browser: the connector, and when agents'
+//! browser calls wait for you. Updates: this version, looking for a newer
 //! one, and doing so on its own.
 
 use rune::{Color, El, ScrollSpec, Tx, col, el, icon, row, text};
@@ -33,6 +34,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(24.0)
                 .child(section("Appearance", vec![theme_row(s, k, layer)], k))
                 .child(section("Schedules", vec![schedules_row(s, k)], k))
+                .child(section("Browser", browser_rows(s, k), k))
                 .child(section("Usage", vec![clear_usage_row(s, k)], k))
                 .child(section(
                     "Updates",
@@ -122,6 +124,108 @@ fn clear_usage_row(s: &App, k: &Kit) -> El {
         control,
         k,
     )
+}
+
+/// The browser: whether the Oido Browser Connector is connected, what to paste into its Options,
+/// and when agents' browser calls wait for you (see docs/browser.md).
+fn browser_rows(s: &App, k: &Kit) -> Vec<El> {
+    use crate::connector::approvals::Ask;
+    let small = |label: &str| Button::new(label).control_size(ControlSize::Small);
+    let status = match (s.connector.problem(), s.connector.connected()) {
+        (Some(why), _) => format!("Not available: Oido {why}. Close what holds that port and restart Oido."),
+        (None, true) => "Connected. Agents given the browser tool work in tabs of their own there.".to_owned(),
+        (None, false) => "Not connected. Install the Oido Browser Connector in Chrome or Brave, open its Options, paste the base URL and token below, and save. Which sites agents may open is set there too.".to_owned(),
+    };
+    let base = format!("http://127.0.0.1:{}", crate::connector::PORT);
+    let copy_base = base.clone();
+    let a = s.guard.browser();
+    let ask = |key: &str, chosen: Ask, pick: fn(&mut App, Ask)| {
+        super::guard::choices(
+            key,
+            Ask::ALL.map(|v| (v, v.label().to_owned())),
+            chosen,
+            pick,
+            k,
+        )
+    };
+    vec![
+        setting(
+            "browser-status",
+            "Oido Browser Connector",
+            &status,
+            el().size(10.0, 10.0)
+                .radius(5.0)
+                .fill(if s.connector.connected() {
+                    k.c.success.icon
+                } else {
+                    k.c.text_faint
+                }),
+            k,
+        ),
+        setting(
+            "browser-base",
+            "Base URL",
+            &base,
+            small("Copy")
+                .variant(ButtonVariant::Outline)
+                .on_press_tx(move |_: &mut App, tx: &mut Tx| tx.copy(copy_base.clone()))
+                .build(k)
+                .key("browser-base-copy"),
+            k,
+        ),
+        setting(
+            "browser-token",
+            "Token",
+            "Paste it into the connector's Options. It lets the connector take commands from this Oido; a new one disconnects the old.",
+            row()
+                .gap(8.0)
+                .child(
+                    small("Copy")
+                        .variant(ButtonVariant::Outline)
+                        .on_press_tx(|s: &mut App, tx: &mut Tx| tx.copy(s.connector_token()))
+                        .build(k)
+                        .key("browser-token-copy"),
+                )
+                .child(
+                    small("New token")
+                        .variant(ButtonVariant::Ghost)
+                        .on_press(|s: &mut App| {
+                            s.new_connector_token();
+                        })
+                        .build(k)
+                        .key("browser-token-new"),
+                ),
+            k,
+        ),
+        setting(
+            "browser-open",
+            "Opening pages",
+            "An agent opens a page, or goes back, forward or reloads. The connector's allowlist decides which sites it can reach.",
+            ask("browser-open", a.open, |s, v| {
+                s.set_browser_approvals(crate::connector::Approvals {
+                    open: v,
+                    ..s.guard.browser()
+                });
+            }),
+            k,
+        ),
+        setting(
+            "browser-act",
+            "Clicking and typing",
+            if a.act == Ask::Never {
+                "Never asking lets a page it reads steer clicks and typing on sites you are signed in to, without you seeing."
+            } else {
+                "An agent clicks, types, chooses or presses keys in one of its tabs."
+            },
+            ask("browser-act", a.act, |s, v| {
+                s.set_browser_approvals(crate::connector::Approvals {
+                    act: v,
+                    ..s.guard.browser()
+                });
+            }),
+            k,
+        ),
+    ]
 }
 
 fn schedules_row(s: &App, k: &Kit) -> El {

@@ -228,16 +228,16 @@ pub fn screen(s: &App, k: &Kit) -> El {
 }
 
 /// A row of buttons, one per choice (a value and its words), the chosen one marked.
-fn choices(
+pub(super) fn choices<T: Copy + PartialEq + 'static>(
     key: &str,
-    options: impl IntoIterator<Item = (u32, String)>,
-    chosen: u32,
-    pick: fn(&mut App, u32),
+    options: impl IntoIterator<Item = (T, String)>,
+    chosen: T,
+    pick: fn(&mut App, T),
     k: &Kit,
 ) -> El {
     rune::row()
         .gap(6.0)
-        .children(options.into_iter().map(|(value, words)| {
+        .children(options.into_iter().enumerate().map(|(i, (value, words))| {
             Button::new(words)
                 .variant(if value == chosen {
                     ButtonVariant::Contrast
@@ -247,7 +247,7 @@ fn choices(
                 .control_size(ControlSize::Small)
                 .on_press(move |s: &mut App| pick(s, value))
                 .build(k)
-                .key(format!("{key}-{value}"))
+                .key(format!("{key}-{i}"))
         }))
 }
 

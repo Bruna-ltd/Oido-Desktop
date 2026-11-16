@@ -13,6 +13,7 @@ mod command;
 mod completion;
 mod composer;
 mod connect;
+mod connector;
 mod context;
 mod credentials;
 mod delegate;
@@ -135,6 +136,11 @@ fn main() {
     if let Some(claim) = claim {
         let handle = app.handle();
         instance::listen(claim, move |token| handle.activate(token));
+    }
+    // The hub the Oido Browser Connector extension connects to, for agents' `browser` tool.
+    if !headless {
+        app.handle()
+            .update(|s: &mut app::App, _| s.start_connector());
     }
     // With an icon in the tray, closing the window keeps the app running; without one it quits.
     if !headless && tray::start(app.handle()) {

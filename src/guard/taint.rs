@@ -10,7 +10,7 @@
 /// Why the result of the tool `name` is outside text, in words for a trip card, or `None` when it
 /// is not. `trust_folder`: whether the agent's working folder counts as the person's own.
 pub fn result_source(name: &str, trust_folder: bool) -> Option<&'static str> {
-    if name == crate::web::NAME {
+    if name == crate::web::NAME || crate::connector::is_tool(name) {
         Some("a web page")
     } else if crate::mcp::is_tool(name) {
         Some("an MCP tool's result")
@@ -29,7 +29,8 @@ pub fn result_source(name: &str, trust_folder: bool) -> Option<&'static str> {
 
 /// Whether a call to the tool `name` acts: runs something, changes something, or sends something
 /// away. Tools that only draft a change (schedules, agents, MCP servers, workflows to save) are
-/// left out: what they draft already waits for the person's approval.
+/// left out: what they draft already waits for the person's approval. So are the browser's: when
+/// they wait is the person's setting (see [`crate::connector::Approvals`]).
 pub fn acts(name: &str) -> bool {
     name == crate::tools::SHELL
         || name == crate::files::WRITE
