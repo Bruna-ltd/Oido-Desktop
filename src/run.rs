@@ -403,7 +403,7 @@ impl App {
         let carries_on = (resumed || !asked && trailing.iter().all(|t| t.role == Role::Tool))
             && self.traces.contains_key(&sid);
         let (brief, skills) = self.brief_of(agent);
-        let system = Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty());
+        let system = Some(brief.clone()).filter(|p| !p.trim().is_empty());
         // The chat's secrets, numbered from its start, so each keeps its placeholder.
         let mut hidden = self.guard.chat_hidden(
             system.as_deref(),
@@ -423,9 +423,11 @@ impl App {
             turns: turns.clone(),
             tools: crate::delegate::tools_for(
                 agent,
+                &skills,
                 self.typesafe_connected(),
                 &crate::mcp::specs(&self.mcp.servers),
             ),
+            cache_key: Some(sid.clone()),
         };
         // A chat carried on privately from a channel can send files there.
         if let Some(kind) = self.channels.files_go(&sid) {
@@ -475,9 +477,12 @@ impl App {
                 model.clone(),
             ));
             // The run records what the model was told: secrets as their placeholders.
-            let skills: Vec<(String, String)> = skills
+            let skills: Vec<crate::skills::Skill> = skills
                 .iter()
-                .map(|(name, text)| (name.clone(), hidden.hide(text)))
+                .map(|s| crate::skills::Skill {
+                    name: s.name.clone(),
+                    description: hidden.hide(&s.description),
+                })
                 .collect();
             setup = trace.setup(&Setup {
                 brief: &hidden.hide(&brief),
@@ -742,9 +747,12 @@ impl App {
         self.summarize(sid, &model, cut, ask, hidden)
     }
 
-    /// The brief an agent is given, and each of its skills still in the folder with its
-    /// instructions: together, its system prompt.
-    pub(crate) fn brief_of(&self, agent: &crate::agents::Agent) -> (String, Vec<(String, String)>) {
+    /// The brief an agent is given (its system prompt), and each of its skills still in the
+    /// folder, which the skill tool offers by description.
+    pub(crate) fn brief_of(
+        &self,
+        agent: &crate::agents::Agent,
+    ) -> (String, Vec<crate::skills::Skill>) {
         (
             agent.prompt.clone(),
             crate::skills::chosen(self.skills_dir.as_deref(), &agent.skills),
@@ -1049,6 +1057,7 @@ impl App {
     /// another, team members side by side.
     pub(crate) fn dispatch_calls(&mut self, sid: &str) {
         self.run_file_tools(sid);
+        self.run_skill_calls(sid);
         self.run_process_calls(sid);
         self.run_teach_calls(sid);
         self.run_schedule_calls(sid);
@@ -1523,6 +1532,32 @@ impl App {
                 None => "Error: this agent has no working folder, so there is nowhere to read or write files. The person can choose one in the agent's settings.".to_owned(),
             };
             self.resolve(sid, &id, result, true);
+        }
+    }
+
+    /// Answers the calls of the skill tool the agent just made, at once: each is a file read from
+    /// the skills folder, of a skill the agent has.
+    fn run_skill_calls(&mut self, sid: &str) {
+        let Some(agent) = self.roster.owner_of(sid) else {
+            return;
+        };
+        let calls: Vec<(String, String)> = match agent
+            .sessions
+            .iter()
+            .find(|s| s.id == sid)
+            .and_then(|s| s.messages.last())
+        {
+            Some(Message::Assistant { tools, .. }) => tools
+                .iter()
+                .filter(|t| t.name == crate::tools::SKILL && t.output.is_none())
+                .map(|t| (t.id.clone(), t.args.clone()))
+                .collect(),
+            _ => return,
+        };
+        let mine = agent.skills.clone();
+        for (id, args) in calls {
+            let told = crate::skills::run(self.skills_dir.as_deref(), &mine, &args);
+            self.resolve(sid, &id, told, true);
         }
     }
 
@@ -2911,19 +2946,19 @@ data: [DONE]
         app.composer.edit = TextEdit::new("hi");
         app.send();
         let request = seen.recv().unwrap();
-        for tool in [
-            "ask_user_question",
-            "\"shell\"",
-            "web_fetch",
-            "read_file",
-            "agents",
-        ] {
+        for tool in ["ask_user_question", "\"shell\"", "web_fetch", "read_file"] {
             assert!(request.contains(tool), "{tool} is offered");
         }
         assert!(
             !request.contains("typesafe_"),
             "TypeSafe's are still chosen"
         );
+        for tool in crate::tools::MANAGE {
+            assert!(
+                !request.contains(&format!("\"name\":\"{tool}\"")),
+                "{tool} manages the app, so it is chosen too"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2969,6 +3004,46 @@ data: [DONE]
         let d = std::env::temp_dir().join(format!("oido-ft-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_skill_is_offered_by_its_description_and_its_instructions_go_back_when_read() {
+        let skills = temp_folder();
+        std::fs::create_dir_all(skills.join("pdf")).unwrap();
+        std::fs::write(
+            skills.join("pdf").join("SKILL.md"),
+            "---\nname: pdf\ndescription: Reads PDFs.\n---\nUse pdftotext -layout.",
+        )
+        .unwrap();
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    "text/event-stream",
+                    call_stream(crate::tools::SKILL, serde_json::json!({"name": "pdf"})),
+                ),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        app.skills_dir = Some(skills.clone());
+        app.roster.current_mut().unwrap().skills = vec!["pdf".into()];
+        app.composer.edit = TextEdit::new("read the pdf");
+        app.send();
+        let first = seen.recv().unwrap();
+        assert!(
+            first.contains("- pdf: reads pdfs."),
+            "offered by description: {first}"
+        );
+        assert!(
+            !first.contains("pdftotext"),
+            "its instructions are not sent until read"
+        );
+        let second = seen.recv().unwrap();
+        assert!(second.contains("use pdftotext -layout."), "{second}");
+        assert!(matches!(last(&app), Message::Assistant { text, .. } if text == "Hello!"));
+        std::fs::remove_dir_all(&skills).unwrap();
     }
 
     #[test]

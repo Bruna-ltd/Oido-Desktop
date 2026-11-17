@@ -654,6 +654,7 @@ mod tests {
             turns,
             think: None,
             tools: Vec::new(),
+            cache_key: None,
         }
     }
 

@@ -1,6 +1,8 @@
 //! The app's own tools, which every agent has without choosing them (see [`offered`]), and how any
 //! tool, the app's or another's, is shown to the person.
 
+use std::sync::LazyLock;
+
 use serde_json::{Value, json};
 
 use crate::completion::ToolSpec;
@@ -11,6 +13,8 @@ pub const PROCESS: &str = "process";
 pub const TEACH: &str = "teach_workflow";
 pub const RUN_WORKFLOW: &str = "run_workflow";
 pub const DELEGATE: &str = "delegate";
+/// Reads one of the agent's skills (see [`crate::skills`]).
+pub const SKILL: &str = "skill";
 
 /// What is sent back when you skip a question.
 pub const SKIPPED: &str = "The person skipped this question without answering. Carry on with your best judgement and say what you assumed.";
@@ -153,12 +157,27 @@ fn ask() -> ToolSpec {
     }
 }
 
+/// The app's own tools that manage the app itself: its schedules, MCP servers and agents. Few
+/// chats need them and their descriptions are long, so an agent has them only when chosen.
+pub const MANAGE: [&str; 3] = [
+    crate::schedule::tool::NAME,
+    crate::mcp::tool::NAME,
+    crate::agent_tool::NAME,
+];
+
 /// Whether a tool is one of the app's own, which every agent has without choosing it. TypeSafe's,
-/// the browser's and MCP servers' tools are chosen per agent.
+/// the browser's, the managing ones ([`MANAGE`]) and MCP servers' tools are chosen per agent.
 pub fn is_builtin(name: &str) -> bool {
-    !needs_typesafe(name)
-        && !crate::connector::is_tool(name)
-        && registered().iter().any(|t| t.name == name)
+    static BUILTIN: LazyLock<Vec<String>> = LazyLock::new(|| {
+        registered()
+            .into_iter()
+            .map(|t| t.name)
+            .filter(|n| {
+                !needs_typesafe(n) && !crate::connector::is_tool(n) && !MANAGE.contains(&n.as_str())
+            })
+            .collect()
+    });
+    BUILTIN.iter().any(|n| n == name)
 }
 
 /// What an agent is offered: every built-in tool, then the TypeSafe and MCP tools it has chosen,
@@ -204,6 +223,10 @@ pub fn summary(name: &str, args: &str) -> String {
             crate::files::path_of(args)
         }
         DELEGATE => crate::delegate::summary(args),
+        SKILL => serde_json::from_str::<Value>(args)
+            .ok()
+            .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| args.to_owned()),
         RUN_WORKFLOW => serde_json::from_str::<Value>(args)
             .ok()
             .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_owned))
@@ -237,6 +260,8 @@ fn process_summary(args: &str) -> String {
 pub const DEFAULTS: &str = "Defaults";
 /// The group TypeSafe's tools are listed under.
 pub const TYPESAFE: &str = "TypeSafe";
+/// The group the app's managing tools ([`MANAGE`]) are listed under.
+pub const MANAGING: &str = "Manage Oido";
 
 /// How a tool is shown to the person, apart from the name the model calls it by: a plain label, a
 /// line on what it does, and the group it is listed under (the app's own, TypeSafe, or the MCP
@@ -261,6 +286,8 @@ pub fn shown(name: &str, servers: &[crate::mcp::Server]) -> Shown {
     if let Some((label, about)) = own(name) {
         let group = if needs_typesafe(name) {
             TYPESAFE
+        } else if MANAGE.contains(&name) {
+            MANAGING
         } else {
             DEFAULTS
         };
@@ -316,6 +343,10 @@ fn own(name: &str) -> Option<(&'static str, &'static str)> {
         crate::agent_tool::NAME => (
             "Manage agents",
             "Lists agents, and drafts creating, changing or deleting them for your approval.",
+        ),
+        SKILL => (
+            "Read its skills",
+            "Reads the instructions of a skill it was given when a task needs them.",
         ),
         DELEGATE => (
             "Hand a task to a teammate",
@@ -403,8 +434,10 @@ fn one_line(text: &str) -> String {
 }
 
 pub fn knows(name: &str) -> bool {
-    // `send_file` is offered only in chats carried on from Telegram; elsewhere it says so.
+    // `send_file` is offered only in chats carried on from Telegram; elsewhere it says so. The
+    // delegate and skill tools are offered only to agents with a team or skills.
     name == DELEGATE
+        || name == SKILL
         || name == crate::channels::SEND_FILE
         || registered().iter().any(|t| t.name == name)
 }
@@ -504,6 +537,26 @@ mod tests {
         );
         assert!(!is_builtin(crate::typesafe::YES_NO) && !is_builtin("mcp__x__y"));
         assert!(knows(ASK) && !knows("shell.run"));
+    }
+
+    #[test]
+    fn the_tools_that_manage_the_app_are_offered_only_when_chosen() {
+        let names = |chosen: &[&str]| -> Vec<String> {
+            let chosen: Vec<String> = chosen.iter().map(|c| (*c).to_owned()).collect();
+            offered(&chosen, false, &[])
+                .into_iter()
+                .map(|t| t.name)
+                .collect()
+        };
+        for m in MANAGE {
+            assert!(knows(m) && !is_builtin(m), "{m}");
+            assert!(
+                !names(&[]).iter().any(|n| n == m),
+                "{m} without choosing it"
+            );
+            assert!(names(&[m]).iter().any(|n| n == m), "{m} once chosen");
+            assert_eq!(shown(m, &[]).group, MANAGING);
+        }
     }
 
     #[test]

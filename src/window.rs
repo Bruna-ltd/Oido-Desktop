@@ -349,6 +349,7 @@ pub fn summary_request(model: &str, covered: &[Message], limit: Option<u32>) -> 
         ))],
         think: None,
         tools: Vec::new(),
+        cache_key: None,
     }
 }
 
@@ -410,6 +411,7 @@ mod tests {
             turns,
             think: None,
             tools: Vec::new(),
+            cache_key: None,
         }
     }
 

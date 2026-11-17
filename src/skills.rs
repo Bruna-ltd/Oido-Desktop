@@ -1,15 +1,19 @@
 //! Skills: folders in `~/.agents/skills`, each with a `SKILL.md` that says what the skill is and
-//! how to do it. An agent can be given some; their text then goes to the model with its brief.
-//! `OIDO_SKILLS` points somewhere else.
+//! how to do it. An agent can be given some. The model is told each one's name and description
+//! with the [`crate::tools::SKILL`] tool, and reads a skill's instructions with it when a task
+//! needs them, so a skill costs only its description on every message. `OIDO_SKILLS` points
+//! somewhere else.
 
 use std::path::{Path, PathBuf};
+
+use serde_json::{Value, json};
+
+use crate::completion::ToolSpec;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Skill {
     pub name: String,
     pub description: String,
-    /// Size of its instructions in bytes, for estimating what it adds to a request.
-    pub bytes: usize,
 }
 
 /// Where skills live.
@@ -30,11 +34,10 @@ pub fn discover(dir: &Path) -> Vec<Skill> {
         .filter_map(|e| {
             let folder = e.file_name().to_string_lossy().into_owned();
             let text = std::fs::read_to_string(e.path().join("SKILL.md")).ok()?;
-            let (front, rest) = split(&text);
+            let (front, _) = split(&text);
             Some(Skill {
                 name: field(front, "name").unwrap_or(folder),
                 description: field(front, "description").unwrap_or_default(),
-                bytes: rest.trim().len(),
             })
         })
         .collect();
@@ -42,42 +45,88 @@ pub fn discover(dir: &Path) -> Vec<Skill> {
     skills
 }
 
-/// A skill's instructions, without its front matter. `None` if it is gone.
-pub fn body(dir: &Path, name: &str) -> Option<String> {
+/// The `SKILL.md` of the skill called `name`. `None` if it is gone.
+fn read(dir: &Path, name: &str) -> Option<String> {
     // A name is a folder name; never a path out of the skills folder.
     if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
         return None;
     }
-    let text = std::fs::read_to_string(dir.join(name).join("SKILL.md")).ok()?;
-    Some(split(&text).1.trim().to_owned())
+    std::fs::read_to_string(dir.join(name).join("SKILL.md")).ok()
 }
 
-/// Each chosen skill still in the folder, with its instructions, in the order chosen.
-pub fn chosen(dir: Option<&Path>, names: &[String]) -> Vec<(String, String)> {
+/// A skill's instructions, without its front matter. `None` if it is gone.
+pub fn body(dir: &Path, name: &str) -> Option<String> {
+    Some(split(&read(dir, name)?).1.trim().to_owned())
+}
+
+/// Each chosen skill still in the folder, with its description, in the order chosen.
+pub fn chosen(dir: Option<&Path>, names: &[String]) -> Vec<Skill> {
     names
         .iter()
-        .filter_map(|name| Some((name.clone(), body(dir?, name)?)))
+        .filter_map(|name| {
+            let text = read(dir?, name)?;
+            Some(Skill {
+                name: name.clone(),
+                description: field(split(&text).0, "description").unwrap_or_default(),
+            })
+        })
         .collect()
 }
 
-/// The brief with the skills' instructions after it: what the model is sent as its system prompt.
-pub fn system(brief: &str, skills: &[(String, String)]) -> String {
-    let mut out = brief.trim().to_owned();
-    for (name, text) in skills {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(&format!("## Skill: {name}\n\n{text}"));
+/// The tool an agent with skills reads them with: each skill's name and description, and how to
+/// use them.
+pub fn spec(chosen: &[Skill]) -> ToolSpec {
+    let listed: Vec<String> = chosen
+        .iter()
+        .map(|s| match s.description.trim() {
+            "" => format!("- {}", s.name),
+            d => format!("- {}: {d}", s.name),
+        })
+        .collect();
+    ToolSpec {
+        name: crate::tools::SKILL.into(),
+        description: "Read the instructions of one of your skills. Each skill covers a kind of task: before doing a task one covers, read it and follow it. Read a skill once in a chat; if what it said was removed to save room, read it again.".into(),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": chosen.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                    "description": format!("Which skill:\n{}", listed.join("\n")),
+                }
+            },
+            "required": ["name"]
+        }),
     }
-    out
 }
 
-/// Roughly how many tokens the chosen skills add to every message: about four bytes a token.
-/// Skills no longer in the folder add nothing.
+/// Answers a call of the skill tool: the instructions of the skill it names, if the agent has it
+/// (`chosen`) and it is still in `dir`.
+pub fn run(dir: Option<&Path>, chosen: &[String], args: &str) -> String {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if !chosen.iter().any(|c| c == name) {
+        return format!(
+            "Error: you have no skill called \"{name}\". Yours are: {}.",
+            chosen.join(", ")
+        );
+    }
+    match dir.and_then(|d| body(d, name)) {
+        Some(text) => text,
+        None => format!("Error: the skill {name} is no longer installed."),
+    }
+}
+
+/// Roughly how many tokens the chosen skills add to every message: their names and descriptions,
+/// at about four bytes a token. Skills no longer in the folder add nothing.
 pub fn estimate_tokens(all: &[Skill], chosen: &[String]) -> usize {
     all.iter()
         .filter(|s| chosen.contains(&s.name))
-        .map(|s| s.bytes / 4)
+        .map(|s| (s.name.len() + s.description.len() + 4) / 4)
         .sum()
 }
 
@@ -218,15 +267,18 @@ mod tests {
     }
 
     #[test]
-    fn what_chosen_skills_add_is_estimated_from_their_size() {
-        let skill = |n: &str, bytes| Skill {
+    fn what_chosen_skills_add_is_estimated_from_their_descriptions() {
+        let skill = |n: &str, d: &str| Skill {
             name: n.into(),
-            description: String::new(),
-            bytes,
+            description: d.into(),
         };
-        let all = [skill("a", 4000), skill("b", 400), skill("c", 40)];
+        let all = [
+            skill("a", &"x".repeat(396)),
+            skill("b", "bb"),
+            skill("c", ""),
+        ];
         let chosen = ["a".to_owned(), "c".to_owned(), "gone".to_owned()];
-        assert_eq!(estimate_tokens(&all, &chosen), 1010);
+        assert_eq!(estimate_tokens(&all, &chosen), 100 + 1);
         assert_eq!(tokens_label(1010), "about 1.0k tokens");
         assert_eq!(tokens_label(80), "about 80 tokens");
         assert_eq!(estimate_tokens(&all, &[]), 0);
@@ -240,18 +292,43 @@ mod tests {
     }
 
     #[test]
-    fn chosen_skills_follow_the_brief_and_a_missing_or_escaping_one_adds_nothing() {
-        let with_skills =
-            |brief: &str, dir: Option<&Path>, names: &[String]| system(brief, &chosen(dir, names));
+    fn chosen_skills_are_offered_by_description_and_a_missing_or_escaping_one_is_left_out() {
         let root = tree();
-        let chosen = ["beta".to_owned(), "gone".to_owned(), "../beta".to_owned()];
-        let text = with_skills("Be brief.", Some(&root), &chosen);
-        assert_eq!(text, "Be brief.\n\n## Skill: beta\n\n# B\nDo b.");
+        let names = ["beta".to_owned(), "gone".to_owned(), "../beta".to_owned()];
+        let chosen = chosen(Some(&root), &names);
         assert_eq!(
-            with_skills("", Some(&root), &["alpha".to_owned()]),
-            "## Skill: alpha\n\nDo a."
+            chosen,
+            [Skill {
+                name: "beta".into(),
+                description: "Does B.".into()
+            }]
         );
-        assert_eq!(with_skills("Hi", None, &chosen), "Hi");
+        let spec = spec(&chosen);
+        assert_eq!(spec.name, crate::tools::SKILL);
+        assert_eq!(spec.schema["properties"]["name"]["enum"], json!(["beta"]));
+        assert!(
+            spec.schema["properties"]["name"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("- beta: Does B."),
+            "the model is told what each is for"
+        );
+        assert!(super::chosen(None, &names).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_skill_is_read_only_if_the_agent_has_it_and_it_is_still_there() {
+        let root = tree();
+        let mine = ["beta".to_owned(), "alpha".to_owned(), "gone".to_owned()];
+        assert_eq!(run(Some(&root), &mine, r#"{"name":"beta"}"#), "# B\nDo b.");
+        assert_eq!(run(Some(&root), &mine, r#"{"name":" alpha "}"#), "Do a.");
+        assert!(
+            run(Some(&root), &mine, r#"{"name":"plain"}"#).starts_with("Error: you have no skill")
+        );
+        assert!(run(Some(&root), &mine, r#"{"name":"gone"}"#).contains("no longer installed"));
+        assert!(run(None, &mine, r#"{"name":"beta"}"#).starts_with("Error"));
+        assert!(run(Some(&root), &mine, "nonsense").starts_with("Error"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

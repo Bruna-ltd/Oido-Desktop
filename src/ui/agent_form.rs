@@ -607,7 +607,8 @@ fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .children(cost(s, k))
 }
 
-/// What the chosen skills add to every message, in words, once there are any. Amber when large.
+/// What the chosen skills add to every message, in words, once there are any: their descriptions,
+/// since their instructions are read only when a task needs them. Amber when large.
 fn cost(s: &App, k: &Kit) -> Option<El> {
     let chosen = &s.roster.form.skills;
     let tokens = crate::skills::estimate_tokens(&s.skills, chosen);
@@ -616,7 +617,7 @@ fn cost(s: &App, k: &Kit) -> Option<El> {
     }
     let big = tokens >= BIG_SKILLS;
     let mut line = format!(
-        "These add {} to every message.",
+        "Their descriptions add {} to every message; a skill's instructions are read only when a task needs them.",
         crate::skills::tokens_label(tokens)
     );
     if big {
@@ -634,8 +635,8 @@ fn cost(s: &App, k: &Kit) -> Option<El> {
     )
 }
 
-/// From this many tokens the form warns.
-const BIG_SKILLS: usize = 8_000;
+/// From this many tokens the form warns: dozens of skills, or very long descriptions.
+const BIG_SKILLS: usize = 2_000;
 
 /// The working folder block: where this agent's commands run.
 fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -727,7 +728,7 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .color(c.text_base),
         )
         .child(hint(
-            "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and manage workflows, schedules, agents and MCP servers. Add tools from MCP servers, TypeSafe or your browser here.",
+            "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and save and run workflows. Add tools from MCP servers, TypeSafe or your browser here, and the ones that manage schedules, agents and MCP servers.",
             k,
         ))
         .child(super::multi_picker::build(
