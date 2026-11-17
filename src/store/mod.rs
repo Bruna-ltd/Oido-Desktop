@@ -108,7 +108,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 25] = [
+const MIGRATIONS: [&str; 27] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -134,6 +134,8 @@ const MIGRATIONS: [&str; 25] = [
     include_str!("../../db/migrations/023_workflow_waits.sql"),
     include_str!("../../db/migrations/024_extensions.sql"),
     include_str!("../../db/migrations/025_agent_browse.sql"),
+    include_str!("../../db/migrations/026_manage_tools.sql"),
+    include_str!("../../db/migrations/027_manage_tools_name.sql"),
 ];
 
 const QUERY_FILES: [&str; 11] = [
@@ -846,6 +848,76 @@ mod tests {
         s.save_session("a", &chat("f", vec![]), 3).unwrap();
         assert_eq!(ids(&s).len(), 4);
         assert_eq!(&ids(&s)[..3], before, "a new chat does not cut in");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A database migrated up to `steps`, then `sql`, then opened (running the rest).
+    fn migrated_from(steps: usize, sql: &str) -> (std::path::PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("oido-mig-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oido.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for step in &MIGRATIONS[..steps] {
+                conn.execute_batch(step).unwrap();
+            }
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", steps as i64)
+                .unwrap();
+        }
+        let s = Store::open(&path, Vault::fixed([1; 32])).unwrap();
+        (dir, s)
+    }
+
+    #[test]
+    fn migrating_keeps_the_managing_tools_on_agents_made_before_but_not_on_team_members() {
+        let mcp = crate::mcp::tool::NAME;
+        let (dir, s) = migrated_from(
+            25,
+            &format!(
+                r#"INSERT INTO agents (id, name, tools) VALUES ('a', 'Atlas', '["mcp__x__y", "{mcp}"]');
+                   INSERT INTO agents (id, parent_id, name) VALUES ('m', 'a', 'Mia');"#
+            ),
+        );
+        let agents = s.load_agents().unwrap();
+        let mut want = vec!["mcp__x__y".to_owned(), mcp.to_owned()];
+        want.extend(
+            crate::tools::MANAGE
+                .iter()
+                .filter(|t| **t != mcp)
+                .map(|t| (*t).to_owned()),
+        );
+        assert_eq!(agents[0].tools, want, "added once each, after what it had");
+        for m in crate::tools::MANAGE {
+            assert!(agents[0].tools.iter().any(|t| t == m), "{m}");
+        }
+        assert!(agents[0].subagents[0].tools.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_managing_tool_saved_by_the_wrong_name_gets_its_real_one_once() {
+        let (dir, s) = migrated_from(
+            26,
+            r#"INSERT INTO agents (id, name, tools) VALUES
+                 ('a', 'Atlas', '["browser", "schedule", "mcp", "agents"]'),
+                 ('b', 'Bea', '["mcp", "mcp_servers"]'),
+                 ('c', 'Cy', '["mcp__x__y"]');"#,
+        );
+        let tools: Vec<Vec<String>> = s
+            .load_agents()
+            .unwrap()
+            .into_iter()
+            .map(|a| a.tools)
+            .collect();
+        assert_eq!(
+            tools,
+            [
+                vec!["browser", "schedule", "mcp_servers", "agents"],
+                vec!["mcp_servers"],
+                vec!["mcp__x__y"],
+            ]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

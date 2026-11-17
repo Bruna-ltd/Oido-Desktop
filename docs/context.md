@@ -81,6 +81,31 @@ Status: agreed and built 2026-11-10.
 - Team members are trimmed but not summarized. Their work is one task, and a task too big even
   trimmed fails as before.
 
+## What each call costs
+
+Added 2026-11-17. Every round of a run sends the whole request again, so what stays the same from
+call to call should be read from the provider's prompt cache, and what is rarely needed should
+not be sent at all.
+
+- **Order.** Tools, then the brief, then the chat, then the context (date, time and working
+  folder) last. The context changes every minute, so it goes with the last turn: a text block
+  after it on Anthropic, a paragraph added to it on OpenAI-style APIs and Codex. Everything before
+  it stays the same between calls of a run.
+- **Anthropic** gets two cache marks: the brief (and the tools before it), and the end of the
+  chat. The next call of a run then reads the whole chat so far from the cache and pays in full
+  only for the new tool result.
+- **Codex** gets `prompt_cache_key`: the chat's id, or the run's id for a team member, so a
+  conversation's calls go to the same cache. OpenAI-style APIs cache by prefix on their own and
+  get no key, since some compatible servers refuse fields they do not know.
+- **Skills** are offered by name and description in the `skill` tool. The model reads a skill's
+  instructions with it when a task needs them, so a skill costs one line on every message instead
+  of its whole text. A skill read long ago can be trimmed like any tool result; the model reads it
+  again. A channel reply that repeats a skill's instructions is still held back.
+- **Tools that manage the app** (`schedule`, `mcp_servers`, `agents`) are chosen per agent like
+  MCP tools: their descriptions are long and few chats need them. Migration `026_manage_tools.sql`
+  gives them to every agent made before, so none loses what it could do; `027` repairs databases
+  where a development build of 026 saved `mcp_servers` as `mcp`.
+
 ## Decisions
 
 - **Make room on its own, cheapest first.** We did not take a sliding window, which drops early

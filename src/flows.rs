@@ -116,6 +116,7 @@ fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Com
         turns: vec![Turn::user(message)],
         think: None,
         tools: Vec::new(),
+        cache_key: None,
     };
     let mut hidden = crate::guard::Hidden::default();
     let request = p.guard.request(request, &mut hidden);

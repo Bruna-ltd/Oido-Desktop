@@ -216,13 +216,17 @@ pub struct ToolSpec {
 pub struct Request {
     pub model: String,
     pub system: Option<String>,
-    /// What changes with every message (the date and time). Kept apart from `system` so that
-    /// the part a provider caches stays the same.
+    /// What changes with every message (the date and time). Sent after the turns, with the last
+    /// of them, so that everything before it (brief, skills, tools and the chat so far) stays the
+    /// same from call to call and a provider's prompt cache keeps reading it.
     pub context: Option<String>,
     /// Starting with the user; after a tool call, ending with its result.
     pub turns: Vec<Turn>,
     pub think: Option<Think>,
     pub tools: Vec<ToolSpec>,
+    /// What the calls of one conversation share, such as a chat's id: a provider that takes it
+    /// sends them to the same cache. `None` for one-off calls.
+    pub cache_key: Option<String>,
 }
 
 /// The tokens a model call used, as far as the provider has said. Cache reads and writes are
@@ -428,14 +432,8 @@ fn args_object(args: &str) -> Option<Value> {
 
 fn openai_messages(req: &Request) -> Vec<Value> {
     let mut messages = Vec::new();
-    // One system message, the stable part first so a provider that caches by prefix keeps it.
-    let system: Vec<&str> = [req.system.as_deref(), req.context.as_deref()]
-        .into_iter()
-        .flatten()
-        .filter(|s| !s.is_empty())
-        .collect();
-    if !system.is_empty() {
-        messages.push(json!({"role": "system", "content": system.join("\n\n")}));
+    if let Some(system) = req.system.as_deref().filter(|s| !s.is_empty()) {
+        messages.push(json!({"role": "system", "content": system}));
     }
     for t in &req.turns {
         messages.push(match t.role {
@@ -469,7 +467,31 @@ fn openai_messages(req: &Request) -> Vec<Value> {
             }
         });
     }
+    if let Some(context) = context_of(req) {
+        match messages.last_mut().filter(|m| m["role"] != "assistant") {
+            Some(last) => append_text(&mut last["content"], context, "text"),
+            None => messages.push(json!({"role": "user", "content": context})),
+        }
+    }
     messages
+}
+
+/// The context to send after the turns, if there is any.
+fn context_of(req: &Request) -> Option<&str> {
+    req.context.as_deref().filter(|c| !c.is_empty())
+}
+
+/// Adds `extra` after a message's content: a plain string gets it on a paragraph of its own, a
+/// list of parts a part of type `kind`.
+fn append_text(content: &mut Value, extra: &str, kind: &str) {
+    match content {
+        Value::Array(parts) => parts.push(json!({"type": kind, "text": extra})),
+        Value::String(text) if !text.is_empty() => {
+            text.push_str("\n\n");
+            text.push_str(extra);
+        }
+        other => *other = json!(extra),
+    }
 }
 
 fn openai_body(thinking: Thinking, req: &Request) -> Value {
@@ -548,26 +570,37 @@ fn codex_input(req: &Request) -> Vec<Value> {
             ),
         }
     }
+    if let Some(context) = context_of(req) {
+        match input.last_mut() {
+            Some(last) if last["type"] == "function_call_output" => {
+                append_text(&mut last["output"], context, "input_text");
+            }
+            Some(last) if last["role"] == "user" => {
+                append_text(&mut last["content"], context, "input_text");
+            }
+            _ => input.push(
+                json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": context}]}),
+            ),
+        }
+    }
     input
 }
 
 /// A Responses request as ChatGPT's Codex backend takes it: always streamed, and never stored there
 /// (the chat is sent whole each time, as with every other provider).
 fn codex_body(thinking: Thinking, req: &Request) -> Value {
-    // This backend has no system message: the brief goes in `instructions`, the stable part first.
-    let instructions: Vec<&str> = [req.system.as_deref(), req.context.as_deref()]
-        .into_iter()
-        .flatten()
-        .filter(|s| !s.is_empty())
-        .collect();
+    // This backend has no system message: the brief goes in `instructions`.
     let mut body = json!({
         "model": req.model,
-        "instructions": instructions.join("\n\n"),
+        "instructions": req.system.as_deref().unwrap_or_default(),
         "input": codex_input(req),
         "stream": true,
         "store": false,
     });
     if let Some(map) = body.as_object_mut() {
+        if let Some(key) = &req.cache_key {
+            map.insert("prompt_cache_key".into(), json!(key));
+        }
         if !req.tools.is_empty() {
             let tools: Vec<Value> = req
                 .tools
@@ -626,6 +659,23 @@ fn anthropic_messages(req: &Request, oauth: bool) -> Vec<Value> {
         }
     }
     flush(&mut out, &mut user_blocks);
+    // The chat so far is marked cacheable at its end, so the next call of a run (after a tool
+    // result) reads all of it from the cache and pays in full only for what is new. The context
+    // changes each time, so it follows the mark.
+    if let Some(blocks) = out
+        .last_mut()
+        .filter(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_array_mut())
+    {
+        if let Some(last) = blocks.last_mut() {
+            last["cache_control"] = json!({"type": "ephemeral"});
+        }
+        if let Some(context) = context_of(req) {
+            blocks.push(json!({"type": "text", "text": context}));
+        }
+    } else if let Some(context) = context_of(req) {
+        out.push(json!({"role": "user", "content": [{"type": "text", "text": context}]}));
+    }
     out
 }
 
@@ -672,12 +722,9 @@ fn anthropic_body(req: &Request, oauth: bool) -> Value {
         }
         // The brief and skills are the same on every message of a chat, so they are marked
         // cacheable: after the first the provider reads them from its cache at a fraction of the
-        // price. The context changes each time, so it follows as a block of its own.
+        // price. The tools go before them and are cached with them.
         if let Some(s) = req.system.as_deref().filter(|s| !s.is_empty()) {
             system.push(json!({"type": "text", "text": s, "cache_control": {"type": "ephemeral"}}));
-        }
-        if let Some(c) = req.context.as_deref().filter(|c| !c.is_empty()) {
-            system.push(json!({"type": "text", "text": c}));
         }
         if !system.is_empty() {
             map.insert("system".into(), json!(system));
@@ -1078,6 +1125,7 @@ mod tests {
             turns: vec![Turn::user("Hi")],
             think,
             tools: Vec::new(),
+            cache_key: None,
         }
     }
 
@@ -1541,38 +1589,65 @@ data: {"type":"message_stop"}
     }
 
     #[test]
-    fn the_context_follows_the_brief_and_stays_out_of_what_is_cached() {
+    fn the_context_goes_after_the_chat_so_all_before_it_stays_cacheable() {
+        let ctx = "## Context\n- Current date and time: now";
         let mut r = req(None);
-        r.context = Some("## Context\n- Current date and time: now".into());
+        r.context = Some(ctx.into());
         let b = openai_body(Thinking::None, &r);
-        assert_eq!(
-            b["messages"][0]["content"],
-            "Be brief.\n\n## Context\n- Current date and time: now"
-        );
+        assert_eq!(b["messages"][0]["content"], "Be brief.", "the brief alone");
+        assert_eq!(b["messages"][1]["content"], format!("Hi\n\n{ctx}"));
+
         let b = anthropic_body(&r, false);
         let system = b["system"].as_array().unwrap();
-        assert_eq!(system.len(), 2);
+        assert_eq!(system.len(), 1, "the brief alone: {system:?}");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert!(
-            system[1].get("cache_control").is_none(),
-            "it changes, so it is not cached"
+        let blocks = b["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["text"], "Hi");
+        assert_eq!(
+            blocks[0]["cache_control"]["type"], "ephemeral",
+            "the chat is cached up to its end"
         );
+        assert_eq!(blocks[1]["text"], ctx);
         assert!(
-            system[1]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Current date and time")
+            blocks[1].get("cache_control").is_none(),
+            "it changes, so it follows the mark"
         );
 
-        r.system = None;
-        let b = anthropic_body(&r, false);
+        // After a tool call, it goes with the result.
+        r.turns.push(Turn::assistant(
+            "",
+            vec![Call {
+                id: "c1".into(),
+                name: "shell".into(),
+                args: "{}".into(),
+            }],
+        ));
+        r.turns.push(Turn::tool("c1", "done"));
+        let b = openai_body(Thinking::None, &r);
+        let messages = b["messages"].as_array().unwrap();
         assert_eq!(
-            b["system"].as_array().unwrap().len(),
-            1,
-            "context alone still goes"
+            messages[1]["content"], "Hi",
+            "earlier turns go as they were"
         );
-        r.context = None;
+        assert_eq!(messages[3]["content"], format!("done\n\n{ctx}"));
+        let b = anthropic_body(&r, false);
+        let messages = b["messages"].as_array().unwrap();
+        assert!(
+            messages[0]["content"][0].get("cache_control").is_none(),
+            "only the end is marked"
+        );
+        let last = messages[2]["content"].as_array().unwrap();
+        assert_eq!(last[0]["type"], "tool_result");
+        assert_eq!(last[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(last[1]["text"], ctx);
+
+        r.system = None;
         assert!(anthropic_body(&r, false).get("system").is_none());
+        r.context = None;
+        let b = anthropic_body(&r, false);
+        let last = b["messages"][2]["content"].as_array().unwrap();
+        assert_eq!(last.len(), 1, "no context, nothing added");
+        assert_eq!(last[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(
             openai_body(Thinking::None, &r)["messages"][0]["role"],
             "user"
@@ -1645,13 +1720,18 @@ data: {"type":"message_stop"}
                 description: "Reads a file".into(),
                 schema: json!({"type": "object"}),
             }],
+            cache_key: Some("chat-1".into()),
         }
     }
 
     #[test]
     fn a_codex_request_puts_the_brief_in_instructions_and_the_chat_in_items() {
         let b = codex_body(Thinking::Responses, &codex_chat());
-        assert_eq!(b["instructions"], "Be brief.\n\nIt is Friday.");
+        assert_eq!(b["instructions"], "Be brief.");
+        assert_eq!(
+            b["prompt_cache_key"], "chat-1",
+            "a chat's calls share a cache"
+        );
         assert_eq!((&b["stream"], &b["store"]), (&json!(true), &json!(false)));
         assert!(
             b.get("messages").is_none(),
@@ -1697,14 +1777,20 @@ data: {"type":"message_stop"}
             input[3],
             json!({"type": "function_call_output", "call_id": "call_1", "output": "contents"})
         );
+        assert_eq!(
+            input[4]["content"],
+            json!([{"type": "input_text", "text": "Thanks"}, {"type": "input_text", "text": "It is Friday."}]),
+            "the context follows the chat"
+        );
 
         let mut quiet = codex_chat();
-        (quiet.think, quiet.tools) = (None, Vec::new());
+        (quiet.think, quiet.tools, quiet.cache_key) = (None, Vec::new(), None);
         let b = codex_body(Thinking::Responses, &quiet);
         assert!(
             b.get("reasoning").is_none()
                 && b.get("tools").is_none()
-                && b.get("tool_choice").is_none(),
+                && b.get("tool_choice").is_none()
+                && b.get("prompt_cache_key").is_none(),
             "off and no tools send nothing: {b}"
         );
     }

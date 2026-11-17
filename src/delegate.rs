@@ -90,9 +90,18 @@ fn notifier(sid: String, id: String) -> impl Fn(Note) {
     }
 }
 
-/// The tools a lead agent is given: the ones it chose, and `delegate` while it has a team.
-pub fn tools_for(agent: &Agent, typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolSpec> {
+/// The tools a lead agent is given: the ones it chose, `skill` while it has skills (`skills`, as
+/// [`crate::skills::chosen`] found them) and `delegate` while it has a team.
+pub fn tools_for(
+    agent: &Agent,
+    skills: &[crate::skills::Skill],
+    typesafe: bool,
+    mcp: &[ToolSpec],
+) -> Vec<ToolSpec> {
     let mut all = tools::offered(&agent.tools, typesafe, mcp);
+    if !skills.is_empty() {
+        all.push(crate::skills::spec(skills));
+    }
     if !agent.subagents.is_empty() {
         all.push(spec(&agent.subagents));
     }
@@ -154,8 +163,9 @@ struct Job {
     /// The member's run as it began: its steps are recorded against it.
     run: Run,
     brief: String,
-    skills: Vec<(String, String)>,
-    system: Option<String>,
+    skills: Vec<crate::skills::Skill>,
+    /// Where its skills are read from.
+    skills_dir: Option<std::path::PathBuf>,
     context: String,
     think: Option<completion::Think>,
     tools: Vec<ToolSpec>,
@@ -186,9 +196,12 @@ struct Outcome {
     ms: u32,
 }
 
-/// Tools that work without a person there: commands and files.
+/// Tools that work without a person there: commands, files, web pages and its skills.
 fn unattended(name: &str) -> bool {
-    name == tools::SHELL || name == crate::web::NAME || crate::files::is_file_tool(name)
+    name == tools::SHELL
+        || name == crate::web::NAME
+        || name == tools::SKILL
+        || crate::files::is_file_tool(name)
 }
 
 fn run_tool(job: &Job, call: &Call) -> String {
@@ -208,6 +221,10 @@ fn run_tool(job: &Job, call: &Call) -> String {
     }
     if call.name == crate::web::NAME {
         return crate::web::fetch(&call.args);
+    }
+    if call.name == tools::SKILL {
+        let names: Vec<String> = job.skills.iter().map(|s| s.name.clone()).collect();
+        return crate::skills::run(job.skills_dir.as_deref(), &names, &call.args);
     }
     if crate::files::is_file_tool(&call.name) {
         return match &job.prep.workdir {
@@ -251,11 +268,13 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
             }
             let mut request = Request {
                 model: job.prep.model.clone(),
-                system: job.system.clone(),
+                system: (!job.brief.trim().is_empty()).then(|| job.brief.clone()),
                 context: Some(job.context.clone()),
                 think: job.think,
                 turns: turns.clone(),
                 tools: job.tools.clone(),
+                // A member's task is a conversation of its own.
+                cache_key: Some(job.run.id.clone()),
             };
             let trimmed = window::fit(&mut request, job.limit, measured, retry).trimmed;
             in_view = job.outside.clone().or_else(|| {
@@ -648,17 +667,21 @@ impl App {
         run.parent = parent;
         run.title = crate::runs::title_of(&task);
         let (brief, skills) = self.brief_of(member);
+        let mut tools: Vec<ToolSpec> = tools::offered(&member.tools, false, &[])
+            .into_iter()
+            .filter(|t| unattended(&t.name))
+            .collect();
+        if !skills.is_empty() {
+            tools.push(crate::skills::spec(&skills));
+        }
         let job = Job {
             run: run.clone(),
-            system: Some(crate::skills::system(&brief, &skills)).filter(|p| !p.trim().is_empty()),
             brief,
             skills,
+            skills_dir: self.skills_dir.clone(),
             context: crate::context::now_text(&prep.shell_dir),
             think: crate::run::think_of(self.effort).filter(|_| can_think),
-            tools: tools::offered(&member.tools, false, &[])
-                .into_iter()
-                .filter(|t| unattended(&t.name))
-                .collect(),
+            tools,
             limit: self.context_limit(&ModelRef::new(&prep.provider, &prep.model)),
             prep: crate::flows::Prep {
                 asker: self.asker(at, &member.name),

@@ -337,8 +337,8 @@ pub fn offered(tools: &[ToolSpec]) -> String {
 /// What the model was given before the chat, and what started the run.
 pub struct Setup<'a> {
     pub brief: &'a str,
-    /// Each chosen skill's name and instructions.
-    pub skills: &'a [(String, String)],
+    /// Each chosen skill, as the model is told of it: its name and description.
+    pub skills: &'a [crate::skills::Skill],
     pub context: &'a str,
     pub tools: &'a [ToolSpec],
     pub user: &'a str,
@@ -481,8 +481,8 @@ impl Trace {
         if !s.brief.trim().is_empty() {
             steps.push(self.note(StepKind::System, "", s.brief.trim()));
         }
-        for (name, text) in s.skills {
-            steps.push(self.note(StepKind::Skill, name, text));
+        for skill in s.skills {
+            steps.push(self.note(StepKind::Skill, &skill.name, &skill.description));
         }
         if !s.context.is_empty() {
             steps.push(self.note(StepKind::Context, "", s.context));
@@ -666,7 +666,10 @@ mod tests {
     #[test]
     fn a_run_opens_with_the_brief_each_skill_the_context_the_tools_and_your_message() {
         let mut t = trace();
-        let skills = [("pdf".to_owned(), "Use pdftotext.".to_owned())];
+        let skills = [crate::skills::Skill {
+            name: "pdf".into(),
+            description: "Reads PDFs.".into(),
+        }];
         let steps = t.setup(&Setup {
             brief: "You are brief.",
             skills: &skills,
@@ -683,6 +686,7 @@ mod tests {
             [1, 2, 3, 4, 5]
         );
         assert_eq!(steps[1].name, "pdf");
+        assert_eq!(steps[1].output.as_deref(), Some("Reads PDFs."));
         assert_eq!(
             steps[3].output.as_deref(),
             Some("read_file(lines?, path)\nReads a file.")
