@@ -10,7 +10,9 @@
 //! on a new one.
 
 pub mod approvals;
+mod commit;
 mod hub;
+pub mod jev;
 mod render;
 
 use std::collections::HashMap;
@@ -60,13 +62,18 @@ const MODIFIERS: [&str; 8] = [
 /// Where the extension comes from, for an agent to tell the person.
 const STORE_URL: &str = "https://chromewebstore.google.com/detail/oido-browser-connector/ilnhbnfkdmbikikplmfclfdfnamlhhmj";
 
+/// Whether a tool drives the browser: `browser`, or `browser_jev` ([`jev`]).
 pub fn is_tool(name: &str) -> bool {
-    name == NAME
+    name == NAME || name == jev::NAME
 }
 
 /// What a call does, for the approvals.
 pub fn kind(name: &str, args: &str) -> Option<approvals::Kind> {
-    if !is_tool(name) {
+    if name == jev::NAME {
+        // Jev clicks and types: one go-ahead covers the call's goal and values.
+        return Some(approvals::Kind::Act);
+    }
+    if name != NAME {
         return None;
     }
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
@@ -189,6 +196,8 @@ struct Memory {
     refs: HashMap<String, Ref>,
     /// The call whose result was lost: repeating it blind could do it twice.
     lost: Option<String>,
+    /// `browser_jev` calls in a row that only confirmed what was on screen.
+    jev_noops: u32,
 }
 
 /// The connector's hub, and what each chat's agent last saw. Cheap to clone.
@@ -255,8 +264,42 @@ impl Connector {
         // A ref may have turned the call into another action (a click on a link opens it).
         let action = text(a, "action");
         check(&action, a)?;
+        let data = self.send(chat, &action, a)?;
+        let mut out = note;
+        if action == "read" {
+            let page = self.seen(chat, data);
+            out.push_str(&render::page(
+                &page,
+                usize::try_from(int(a, "offset")).unwrap_or(0),
+            ));
+            return Ok(out);
+        }
+        out.push_str(&unref(a, &plain(&data)));
+        let landed = action == "navigate"
+            || (PAGE_MOVERS.contains(&action.as_str())
+                && plain(&data).contains("— navigated to http"));
+        if landed && a.get("read").and_then(Value::as_bool) != Some(false) {
+            // Arriving on a page is always followed by looking at it: do that here.
+            let mut read = Map::new();
+            read.insert("action".into(), json!("read"));
+            if let Some(tab) = a.get("tab") {
+                read.insert("tab".into(), tab.clone());
+            }
+            match self.act(chat, &mut read) {
+                Ok(page) => out.push_str(&format!("\n{page}")),
+                Err(why) => out.push_str(&format!(
+                    "\n(the page could not be read yet: {why} — call read once it has loaded)"
+                )),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Sends one checked call to the browser and gives back what it answered. A mutating call whose
+    /// answer was lost is noted, so it is not repeated blind.
+    fn send(&self, chat: &str, action: &str, a: &Map<String, Value>) -> Result<Value, String> {
         let signature = signature(a);
-        let mutating = MUTATING.contains(&action.as_str());
+        let mutating = MUTATING.contains(&action);
         if mutating && self.mem(chat).lost.as_deref() == Some(signature.as_str()) {
             return Err(format!(
                 "not repeated: the previous identical {action} went to the browser but its result was lost, so it may ALREADY have been applied. read the page to see whether it took effect, then repeat it only if it did not."
@@ -289,7 +332,7 @@ impl Connector {
         }
         let reply = {
             let _turn = lock(&self.turn);
-            self.hub.dispatch(&action, Value::Object(params))
+            self.hub.dispatch(action, Value::Object(params))
         };
         let reply = match reply {
             Ok(r) => r,
@@ -301,43 +344,32 @@ impl Connector {
                 return Err(failure(&f));
             }
         };
-        let data = unwrap_json(reply.data);
         if !reply.error.is_empty() {
             if mutating && reply.error.contains("stalled in the connector") {
                 self.mem(chat).lost = Some(signature);
             }
             return Err(unref(a, &reply.error));
         }
-        let mut out = note;
-        if action == "read" {
-            let page: render::Page = serde_json::from_value(data.clone()).unwrap_or_default();
-            self.remember(chat, &page);
-            self.mem(chat).lost = None;
-            out.push_str(&render::page(
-                &page,
-                usize::try_from(int(a, "offset")).unwrap_or(0),
-            ));
-            return Ok(out);
-        }
-        out.push_str(&unref(a, &plain(&data)));
-        let landed = action == "navigate"
-            || (PAGE_MOVERS.contains(&action.as_str())
-                && plain(&data).contains("— navigated to http"));
-        if landed && a.get("read").and_then(Value::as_bool) != Some(false) {
-            // Arriving on a page is always followed by looking at it: do that here.
-            let mut read = Map::new();
-            read.insert("action".into(), json!("read"));
-            if let Some(tab) = a.get("tab") {
-                read.insert("tab".into(), tab.clone());
-            }
-            match self.act(chat, &mut read) {
-                Ok(page) => out.push_str(&format!("\n{page}")),
-                Err(why) => out.push_str(&format!(
-                    "\n(the page could not be read yet: {why} — call read once it has loaded)"
-                )),
-            }
-        }
-        Ok(out)
+        Ok(unwrap_json(reply.data))
+    }
+
+    /// Takes in a read's answer: its refs become the chat's, and nothing is lost any more.
+    fn seen(&self, chat: &str, data: Value) -> render::Page {
+        let page: render::Page = serde_json::from_value(data).unwrap_or_default();
+        self.remember(chat, &page);
+        self.mem(chat).lost = None;
+        page
+    }
+
+    /// Reads chat `chat`'s current tab: the page as parsed, and as the model reads it. Its refs
+    /// become the chat's, as any read's do.
+    pub(crate) fn look(&self, chat: &str) -> Result<(render::Page, String), String> {
+        let mut a = Map::new();
+        a.insert("action".into(), json!("read"));
+        let data = self.send(chat, "read", &a)?;
+        let page = self.seen(chat, data);
+        let shown = render::page(&page, 0);
+        Ok((page, shown))
     }
 
     fn mem(&self, chat: &str) -> MemoryGuard<'_> {
@@ -842,18 +874,16 @@ mod tests {
         }
     }
 
-    /// The real Oido Browser Connector, driven through this hub. Needs Chromium, Node, and the
-    /// extension's folder in `OIDO_CONNECTOR_DIR` (oido-std/oido-browser-connector).
-    #[test]
-    #[ignore = "starts Chromium with the connector; set OIDO_CONNECTOR_DIR and run with --ignored"]
-    fn the_real_connector_opens_reads_types_and_submits_through_this_hub() {
+    /// Headless Chromium with the real Oido Browser Connector, connected to a hub of its own and
+    /// allowed onto the test site at port `web`. Needs Chromium, Node, and the extension's folder in
+    /// `OIDO_CONNECTOR_DIR` (oido-std/oido-browser-connector); `None` without it.
+    fn connected(web: u16) -> Option<(Connector, Browser)> {
         use std::os::unix::process::CommandExt;
         use std::time::{Duration, Instant};
         let Some(extension) = std::env::var_os("OIDO_CONNECTOR_DIR") else {
             eprintln!("OIDO_CONNECTOR_DIR not set; skipped");
-            return;
+            return None;
         };
-        let web = site();
         let c = Connector::default();
         c.hub.set_token("test-token");
         let hub_port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -882,7 +912,7 @@ mod tests {
             .process_group(0)
             .spawn()
             .unwrap();
-        let _browser = Browser(child, profile.clone());
+        let browser = Browser(child, profile.clone());
         let script = profile.join("configure.mjs");
         std::fs::write(&script, include_str!("testdata/configure.mjs")).unwrap();
         let configured = std::process::Command::new("node")
@@ -899,7 +929,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(c.connected(), "the connector did not connect to the hub");
+        Some((c, browser))
+    }
 
+    /// The real Oido Browser Connector, driven through this hub.
+    #[test]
+    #[ignore = "starts Chromium with the connector; set OIDO_CONNECTOR_DIR and run with --ignored"]
+    fn the_real_connector_opens_reads_types_and_submits_through_this_hub() {
+        let web = site();
+        let Some((c, _browser)) = connected(web) else {
+            return;
+        };
         let call = |v: Value| c.run("chat", &v.to_string());
         let home = call(json!({"action": "navigate", "url": format!("http://127.0.0.1:{web}/")}));
         assert!(
@@ -938,5 +978,30 @@ mod tests {
         let tabs = call(json!({"action": "tabs"}));
         assert!(tabs.contains(&format!("127.0.0.1:{web}")), "{tabs}");
         assert!(!call(json!({"action": "close"})).starts_with("Error"));
+    }
+    /// Jev itself, live: TypeSafe drives the real Connector to search the test site. Needs what
+    /// [`connected`] needs, and a TypeSafe key in `TYPESAFE_API_KEY`.
+    #[test]
+    #[ignore = "starts Chromium and asks TypeSafe; set OIDO_CONNECTOR_DIR and TYPESAFE_API_KEY and run with --ignored"]
+    fn jev_searches_the_test_site_through_the_real_connector() {
+        let Ok(key) = std::env::var("TYPESAFE_API_KEY") else {
+            eprintln!("TYPESAFE_API_KEY not set; skipped");
+            return;
+        };
+        let web = site();
+        let Some((c, _browser)) = connected(web) else {
+            return;
+        };
+        let args = json!({
+            "goal": "the results page for the query cats is shown",
+            "fields": {"query": "cats"},
+            "url": format!("http://127.0.0.1:{web}/")
+        })
+        .to_string();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let told = jev::run(&c, "chat", &args, &key, jev::Commits::Free, &cancel);
+        eprintln!("{told}");
+        assert!(told.contains("Results for cats"), "{told}");
+        assert!(told.contains("Type the query \"cats\""), "{told}");
     }
 }

@@ -378,6 +378,15 @@ impl Guard {
         self.browser = approvals;
     }
 
+    /// What Jev may do with a step that commits, from the browser settings.
+    pub fn jev_commits(&self) -> crate::connector::jev::Commits {
+        if self.browser.commits_ask(self.on(Pack::Taint)) {
+            crate::connector::jev::Commits::Ask
+        } else {
+            crate::connector::jev::Commits::Free
+        }
+    }
+
     /// The words never sent to a model or shown to a channel person who did not write them.
     pub fn words(&self) -> &[String] {
         &self.words
@@ -573,7 +582,22 @@ impl Guard {
                 found.extend(actions::check_write(&crate::files::path_of(&revealed), at));
             }
         }
-        if let Some(kind) = crate::connector::kind(name, &revealed) {
+        let approved = (name == crate::connector::jev::NAME)
+            .then(|| crate::connector::jev::approved_step(&revealed))
+            .flatten();
+        if let Some(step) = approved {
+            // The person's go-ahead for a step that commits is this card: it always shows, unless
+            // nothing asks first.
+            if self.jev_commits() == crate::connector::jev::Commits::Ask {
+                found.push(actions::Finding {
+                    rule: "browser.commit",
+                    why: format!(
+                        "Jev's next step in your browser commits something: {step}. It runs only if you say yes."
+                    ),
+                    action: Action::Ask,
+                });
+            }
+        } else if let Some(kind) = crate::connector::kind(name, &revealed) {
             let outside = outside.filter(|_| self.on(Pack::Taint));
             found.extend(self.browser.check(kind, outside));
         }
@@ -765,6 +789,33 @@ mod tests {
                 .1
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_jev_call_asks_like_a_click_and_a_step_that_commits_always_asks() {
+        use crate::connector::approvals::{Approvals, Ask};
+        let g = Guard::default();
+        let hidden = Hidden::default();
+        let jev = crate::connector::jev::NAME;
+        let goal = json!({"goal": "the post is published", "fields": {"text": "hi"}}).to_string();
+        let (_, trip) = g.review(&hidden, jev, &goal, &at(), Some("a web page"));
+        assert_eq!(trip.unwrap().rule, "browser.act");
+        assert!(g.review(&hidden, jev, &goal, &at(), None).1.is_none());
+
+        let step =
+            json!({"goal": "the post is published", "approved_step": "Click \"Post\""}).to_string();
+        let trip = g.review(&hidden, jev, &step, &at(), None).1.unwrap();
+        assert_eq!((trip.rule, trip.action), ("browser.commit", Action::Ask));
+        assert!(trip.why.contains("Click \"Post\""), "{}", trip.why);
+
+        let mut free = Guard::default();
+        free.set_browser(Approvals {
+            act: Ask::Never,
+            ..Approvals::default()
+        });
+        assert!(free.review(&hidden, jev, &step, &at(), None).1.is_none());
+        assert_eq!(free.jev_commits(), crate::connector::jev::Commits::Free);
+        assert_eq!(g.jev_commits(), crate::connector::jev::Commits::Ask);
     }
 
     #[test]

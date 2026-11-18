@@ -89,12 +89,14 @@ pub fn registered() -> Vec<ToolSpec> {
     ];
     all.extend(crate::typesafe::specs());
     all.push(crate::connector::spec());
+    all.push(crate::connector::jev::spec());
     all
 }
 
 /// Tools that only work while TypeSafe is connected: they are not offered, or run, without it.
+/// TypeSafe's own, and Jev, which asks it at each step.
 pub fn needs_typesafe(name: &str) -> bool {
-    crate::typesafe::is_tool(name)
+    crate::typesafe::is_tool(name) || name == crate::connector::jev::NAME
 }
 
 fn file_tool(name: &'static str, description: &'static str, schema: Value) -> ToolSpec {
@@ -185,14 +187,25 @@ pub fn is_builtin(name: &str) -> bool {
 /// chosen name that is no longer registered is ignored, and so are TypeSafe's while TypeSafe is
 /// not connected (`typesafe`).
 pub fn offered(chosen: &[String], typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolSpec> {
-    registered()
+    let mut all: Vec<ToolSpec> = registered()
         .into_iter()
         .chain(mcp.iter().cloned())
         .filter(|t| {
             is_builtin(&t.name)
                 || (chosen.contains(&t.name) && (typesafe || !needs_typesafe(&t.name)))
         })
-        .collect()
+        .collect();
+    // An agent given both browser tools is told to prefer Jev for whole tasks.
+    if all.iter().any(|t| t.name == crate::connector::jev::NAME)
+        && let Some(browser) = all.iter_mut().find(|t| t.name == crate::connector::NAME)
+    {
+        browser.description = format!(
+            "{}{}",
+            crate::connector::jev::PREFERENCE,
+            browser.description
+        );
+    }
+    all
 }
 
 /// A tool that runs in the background and ends later: a command, a workflow, a page fetched from
@@ -236,6 +249,7 @@ pub fn summary(name: &str, args: &str) -> String {
         crate::mcp::tool::NAME => crate::mcp::tool::summary(args),
         crate::agent_tool::NAME => crate::agent_tool::summary(args),
         crate::web::NAME => crate::web::summary(args),
+        crate::connector::jev::NAME => crate::connector::jev::summary(args),
         n if needs_typesafe(n) => crate::typesafe::summary(args),
         crate::connector::NAME => crate::connector::summary(args),
         _ => args.to_owned(),
@@ -276,6 +290,13 @@ pub struct Shown {
 /// How the tool called `name` is shown. An MCP tool is labelled from its server's name for it and
 /// grouped under the server; a name nothing knows shows as itself.
 pub fn shown(name: &str, servers: &[crate::mcp::Server]) -> Shown {
+    if name == crate::connector::jev::NAME {
+        return Shown {
+            label: "Browse with Jev".to_owned(),
+            about: "Hands a whole browsing task to TypeSafe's Jev, which clicks and types in your browser tabs step by step, through the Oido Browser Connector. Needs TypeSafe connected.".to_owned(),
+            group: "Browser".to_owned(),
+        };
+    }
     if crate::connector::is_tool(name) {
         return Shown {
             label: "Use your browser".to_owned(),
@@ -587,6 +608,40 @@ mod tests {
         assert_eq!(humanize("get-URL"), "Get URL");
         assert_eq!(humanize("search"), "Search");
         assert_eq!(shown("mystery", &[]).label, "mystery");
+    }
+
+    #[test]
+    fn jev_is_chosen_like_a_typesafe_tool_and_with_the_browser_is_preferred() {
+        let names = |chosen: &[&str], on| -> Vec<String> {
+            let chosen: Vec<String> = chosen.iter().map(|s| (*s).to_owned()).collect();
+            offered(&chosen, on, &[])
+                .into_iter()
+                .map(|t| t.name)
+                .filter(|n| !is_builtin(n))
+                .collect()
+        };
+        let (browser, jev) = (crate::connector::NAME, crate::connector::jev::NAME);
+        assert_eq!(names(&[browser, jev], true), [browser, jev]);
+        assert_eq!(names(&[browser, jev], false), [browser]);
+        assert_eq!(
+            names(&[jev], true),
+            [jev],
+            "Jev alone, without the browser tool"
+        );
+        assert_eq!(names(&[browser], true), [browser], "not added unchosen");
+        let preferred = |chosen: &[&str]| {
+            let chosen: Vec<String> = chosen.iter().map(|s| (*s).to_owned()).collect();
+            offered(&chosen, true, &[])
+                .iter()
+                .any(|t| t.name == browser && t.description.starts_with("browser_jev IS AVAILABLE"))
+        };
+        assert!(preferred(&[browser, jev]) && !preferred(&[browser]));
+        assert!(is_job(jev) && knows(jev) && !is_builtin(jev) && needs_typesafe(jev));
+        assert_eq!(shown(jev, &[]).group, "Browser");
+        assert!(
+            !crate::guard::taint::acts(jev),
+            "its waits are the browser setting's"
+        );
     }
 
     #[test]

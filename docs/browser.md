@@ -78,3 +78,4 @@ take turns. Refs belong to the chat whose read made them.
 - Batches (`actions`), screenshots into the chat, upload from the working folder.
 - A setup card with a link to the store listing.
 - TypeSafe send checks before consequential submits, when TypeSafe is connected.
+- Jev (`browser_jev`, TypeSafe's action model, driving whole tasks): see docs/browser-jev.md.
