@@ -1004,6 +1004,33 @@ fn card(
                 .child(text(label).font(k.ty.small).color(c.text_muted)),
         );
     }
+    if n.kind == SWITCH {
+        let on = n.all;
+        let flip = at.clone();
+        let label = "Run every case that matches, not only the first";
+        out = out.child(
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(
+                    row()
+                        .center_y()
+                        .gap(8.0)
+                        .child(
+                            Switch::new(on)
+                                .label(label)
+                                .hide_label()
+                                .on_toggle(move |s: &mut App| s.editor_toggle_all(&flip))
+                                .build(k),
+                        )
+                        .child(text(label).font(k.ty.small).color(c.text_muted)),
+                )
+                .children(help_line(
+                    "Each case is compared with the value above. To test different conditions, switch on true and write a condition in each case, such as score > 50.",
+                    k,
+                )),
+        );
+    }
     for (b, block) in n.blocks.iter().enumerate() {
         out = out.child(inside(s, ed, at, b, block, with_steps, k, layer));
     }

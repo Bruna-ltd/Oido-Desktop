@@ -112,6 +112,10 @@ pub struct Input {
     pub default: Option<Value>,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// One case of a `switch`: the steps run when its value equals the one switched on.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Case {
@@ -161,6 +165,9 @@ pub struct Step {
     pub cases: Vec<Case>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default: Vec<Step>,
+    /// switch: run every case that matches, in order, not only the first.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub all: bool,
     // for_each
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<String>,
@@ -218,7 +225,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 27] = [
+        let fields: [(&str, bool); 28] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -229,6 +236,7 @@ impl Step {
             ("on", self.on.is_some()),
             ("cases", !self.cases.is_empty()),
             ("default", !self.default.is_empty()),
+            ("all", self.all),
             ("over", self.over.is_some()),
             ("as", self.item.is_some()),
             ("on_error", self.on_error.is_some()),
@@ -261,7 +269,7 @@ fn takes(kind: &str) -> &'static [&'static str] {
         GENERATE => &["instruction"],
         DECIDE => &["question", "options", "input"],
         IF => &["cond", "then", "else"],
-        SWITCH => &["on", "cases", "default"],
+        SWITCH => &["on", "cases", "default", "all"],
         FOR_EACH => &["over", "as", "on_error", "steps"],
         WHILE => &["cond", "max", "steps"],
         SET => &["values"],

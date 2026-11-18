@@ -77,7 +77,7 @@ parse unchanged). New kinds and fields, all optional:
 | kind | fields | meaning |
 |---|---|---|
 | `if` | `cond`, `then`, `else` | run one child list |
-| `switch` | `on`, `cases: [{when, steps}]`, `default` | first matching case; `default` if none |
+| `switch` | `on`, `cases: [{when, steps}]`, `default`, `all` | first matching case, or every matching case in order when `all` is true; `default` only if none match |
 | `for_each` | `over`, `as`, `steps`, `on_error` | binds a list of per-item results |
 | `while` | `cond`, `steps`, `max` | repeats while true, at most `max` times |
 | `parallel` | `branches: [{name, steps}]`, `on_error` | binds a map name → result |
@@ -211,7 +211,8 @@ is the one non-deterministic tool step and is marked as such.
   the body bound (nothing else changes between rounds). A loop still true after `max` rounds fails
   the run rather than stopping quietly.
 - `index` counts from 0; the run log's round numbers count from 1.
-- `switch` compares by equality only (a whole number equals the same number written with a point).
+- `switch` compares by equality only (a whole number equals the same number written with a point). To test a different condition in each case, switch on `true` and write a condition in each `when`; with `all` set every case that holds runs, as with n8n's "send data to all matching outputs".
+- The editor's condition operators are is, is not, contains, does not contain, starts with, ends with, matches the pattern, is empty, is not empty, is more than, is at least, is less than, is at most. "Matches the pattern" is a regular expression (`text.matches("^a+")` in an expression), bounded in size.
 - A `set` step's values each see what was there before it, not one another.
 - The editor checks on adding, removing or moving a step, on Save, and on its Check button, not on
   every keystroke. Tool arguments are one JSON box. A chat draft is saved first, then edited.

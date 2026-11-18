@@ -341,6 +341,8 @@ pub struct Node {
     pub tool: String,
     /// For a loop: carry on when a round fails.
     pub go_on: bool,
+    /// For a switch: run every case that matches, not only the first.
+    pub all: bool,
     /// One per [`specs`] of the kind.
     pub fields: Vec<TextEdit>,
     pub blocks: Vec<Block>,
@@ -602,6 +604,7 @@ impl Node {
                 String::new()
             },
             go_on: false,
+            all: false,
             fields: specs(kind).iter().map(|_| TextEdit::new("")).collect(),
             blocks,
             when: matches!(kind, IF | WHILE).then(Comparison::default),
@@ -694,6 +697,7 @@ impl Node {
                 n.blocks[1].steps = s.otherwise.iter().map(Node::from_step).collect();
             }
             SWITCH => {
+                n.all = s.all;
                 n.set_field("on", text(&s.on));
                 n.blocks = s
                     .cases
@@ -823,6 +827,7 @@ impl Node {
             }
             SWITCH => {
                 s.on = get("on");
+                s.all = self.all;
                 for b in &self.blocks {
                     if b.part == Part::Default {
                         s.default = steps(b, bad, at);
@@ -2338,6 +2343,19 @@ mod tests {
             e.names(&here, None),
             ["inputs.folder", "command", "files", "text"]
         );
+    }
+
+    #[test]
+    fn a_switch_remembers_whether_it_runs_every_case_that_matches() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], SWITCH);
+        assert!(!e.steps[0].all);
+        e.steps[0].all = true;
+        let step = e.steps[0].to_step("1", &mut Vec::new());
+        assert!(step.all);
+        assert!(Node::from_step(&step).all);
+        e.steps[0].all = false;
+        assert!(!e.steps[0].to_step("1", &mut Vec::new()).all);
     }
 
     #[test]

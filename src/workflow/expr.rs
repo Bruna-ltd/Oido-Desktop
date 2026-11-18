@@ -22,6 +22,8 @@ const MAX_EXPR_DEPTH: usize = 64;
 const MAX_TEXT: usize = 1_000_000;
 const MAX_ARRAY: usize = 100_000;
 const MAX_MAP: usize = 10_000;
+/// How big a compiled regular expression may be, in bytes.
+const MAX_PATTERN: usize = 100_000;
 /// The clock is looked at this often, in operations.
 const CLOCK_EVERY: u64 = 1024;
 
@@ -49,6 +51,20 @@ fn base() -> Engine {
         Ok(text) => Dynamic::from(text.trim().to_owned()),
         Err(_) => v,
     });
+    // Whether text fits a regular expression, which is how "matches the pattern" is written. The
+    // pattern is bounded in size, and one that is not a pattern is an error to report.
+    engine.register_fn(
+        "matches",
+        |text: rhai::ImmutableString,
+         pattern: rhai::ImmutableString|
+         -> Result<bool, Box<EvalAltResult>> {
+            regex::RegexBuilder::new(&pattern)
+                .size_limit(MAX_PATTERN)
+                .build()
+                .map(|re| re.is_match(&text))
+                .map_err(|e| format!("{pattern:?} is not a pattern: {e}").into())
+        },
+    );
     engine
 }
 
@@ -362,6 +378,22 @@ mod tests {
         assert_eq!(
             e.eval(&s, "out.stdout.trimmed().contains(\"hi\")").unwrap(),
             json!(true)
+        );
+    }
+
+    #[test]
+    fn matches_tests_text_against_a_pattern_and_a_bad_pattern_is_an_error() {
+        let e = ev();
+        let s = Scope::from([("n".to_owned(), json!("order-1042"))]);
+        assert_eq!(
+            e.eval(&s, r#"n.matches("^order-\\d+$")"#).unwrap(),
+            json!(true)
+        );
+        assert_eq!(e.eval(&s, r#"n.matches("^x")"#).unwrap(), json!(false));
+        assert!(
+            e.eval(&s, r#"n.matches("(")"#)
+                .unwrap_err()
+                .contains("not a pattern")
         );
     }
 }

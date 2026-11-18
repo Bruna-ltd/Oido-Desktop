@@ -607,6 +607,12 @@ impl App {
             .map(|t| t.schema)
     }
 
+    pub fn editor_toggle_all(&mut self, at: &Loc) {
+        if let Some(n) = self.wf_editor.as_mut().and_then(|e| e.node_mut(at)) {
+            n.all = !n.all;
+        }
+    }
+
     pub fn editor_toggle_go_on(&mut self, at: &Loc) {
         if let Some(n) = self.wf_editor.as_mut().and_then(|e| e.node_mut(at)) {
             n.go_on = !n.go_on;

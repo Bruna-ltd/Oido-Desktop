@@ -691,7 +691,7 @@ impl Run<'_, '_> {
         step: &Step,
         scope: &Scope,
         said: &impl Fn(&mut Self, String),
-    ) -> Result<String, Halt> {
+    ) -> Result<Vec<String>, Halt> {
         let wrong = |run: &Self, why: String| run.fail(step, why);
         if step.kind == IF {
             let cond = step.cond.as_deref().unwrap_or_default();
@@ -700,24 +700,39 @@ impl Run<'_, '_> {
                 .eval_bool(scope, cond)
                 .map_err(|e| wrong(self, e))?;
             said(self, if yes { "then" } else { "otherwise" }.to_owned());
-            return Ok(if yes { "then" } else { "else" }.to_owned());
+            return Ok(vec![if yes { "then" } else { "else" }.to_owned()]);
         }
         let on = self
             .eval
             .eval(scope, step.on.as_deref().unwrap_or_default())
             .map_err(|e| wrong(self, e))?;
+        let mut hits = Vec::new();
         for (n, case) in step.cases.iter().enumerate() {
             let when = self
                 .eval
                 .eval(scope, &case.when)
                 .map_err(|e| wrong(self, e))?;
             if same(&on, &when) {
-                said(self, format!("case {}", n + 1));
-                return Ok(case_branch(n));
+                hits.push(n);
+                if !step.all {
+                    break;
+                }
             }
         }
-        said(self, "otherwise".to_owned());
-        Ok("default".to_owned())
+        if hits.is_empty() {
+            said(self, "otherwise".to_owned());
+            return Ok(vec!["default".to_owned()]);
+        }
+        let numbers: Vec<String> = hits.iter().map(|n| (n + 1).to_string()).collect();
+        said(
+            self,
+            format!(
+                "{} {}",
+                if numbers.len() > 1 { "cases" } else { "case" },
+                numbers.join(", ")
+            ),
+        );
+        Ok(hits.into_iter().map(case_branch).collect())
     }
 
     fn container(
@@ -733,28 +748,40 @@ impl Run<'_, '_> {
         let back = self.resume.pop_front();
         match step.kind.as_str() {
             IF | SWITCH => {
-                let name = match back {
-                    Some(Frame::Branch { name }) => name,
+                // The lists to run, the first now and the rest after it. A resumed run is in the
+                // middle of one.
+                let (mut name, mut rest) = match back {
+                    Some(Frame::Branch { name, rest }) => (name, rest),
                     Some(_) => return Err(self.changed()),
-                    None => self.choose(step, scope, &said)?,
+                    None => {
+                        let mut names = self.choose(step, scope, &said)?;
+                        let first = names.remove(0);
+                        (first, names)
+                    }
                 };
-                let body = match (step.kind.as_str(), name.as_str()) {
-                    (IF, "then") => &step.then,
-                    (IF, "else") => &step.otherwise,
-                    (SWITCH, "default") => &step.default,
-                    (SWITCH, case) => case
-                        .strip_prefix("case")
-                        .and_then(|n| n.parse::<usize>().ok())
-                        .and_then(|n| step.cases.get(n))
-                        .map(|c| &c.steps)
-                        .ok_or_else(|| self.changed())?,
-                    _ => return Err(self.changed()),
-                };
-                let done = self.inside(body, &branch(at, &name), scope);
-                if matches!(done, Err(Halt::Waiting { .. })) {
-                    self.frames.push(Frame::Branch { name });
+                loop {
+                    let body = match (step.kind.as_str(), name.as_str()) {
+                        (IF, "then") => &step.then,
+                        (IF, "else") => &step.otherwise,
+                        (SWITCH, "default") => &step.default,
+                        (SWITCH, case) => case
+                            .strip_prefix("case")
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .and_then(|n| step.cases.get(n))
+                            .map(|c| &c.steps)
+                            .ok_or_else(|| self.changed())?,
+                        _ => return Err(self.changed()),
+                    };
+                    let done = self.inside(body, &branch(at, &name), scope);
+                    if matches!(done, Err(Halt::Waiting { .. })) {
+                        self.frames.push(Frame::Branch { name, rest });
+                        return done;
+                    }
+                    if done.is_err() || rest.is_empty() {
+                        return done;
+                    }
+                    name = rest.remove(0);
                 }
-                done
             }
             FOR_EACH => {
                 let (items, first, mut results, mut failed) = match back {
@@ -1634,6 +1661,33 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_set_to_all_runs_every_case_that_matches_in_order_and_default_only_when_none_does() {
+        // Switching on true, each case is a condition of its own.
+        let d = def(json!({
+            "inputs": {"n": {"type": "number"}},
+            "steps": [{"id": "s", "kind": "switch", "on": "true", "all": true,
+                "cases": [
+                    {"when": "inputs.n > 1", "steps": [sh("a", "A")]},
+                    {"when": "inputs.n > 100", "steps": [sh("b", "B")]},
+                    {"when": "inputs.n > 5", "steps": [sh("c", "C"), sh("c2", "C2")]}],
+                "default": [sh("d", "D")]}]
+        }));
+        let (out, ran) = run_shell(&d, json!({"n": 7}));
+        assert_eq!(ran, ["A", "C", "C2"]);
+        assert_eq!(out.steps[0].output, "cases 1, 3");
+        assert_eq!(run_shell(&d, json!({"n": 0})).1, ["D"]);
+        let (out, ran) = run_shell(&d, json!({"n": 2}));
+        assert_eq!(
+            (ran, out.steps[0].output.as_str()),
+            (vec!["A".to_owned()], "case 1")
+        );
+        // Not set to all, the first match is the only one.
+        let mut first = d.clone();
+        first.steps[0].all = false;
+        assert_eq!(run_shell(&first, json!({"n": 7})).1, ["A"]);
+    }
+
+    #[test]
     fn a_for_each_goes_over_a_list_binding_each_item_and_collects_the_results() {
         let d = def(json!({
             "inputs": {"names": {"type": "string", "default": "x"}},
@@ -2342,6 +2396,23 @@ mod tests {
         let lines: Vec<_> = done.steps.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(lines, ["a", "ok", "b"], "one line each, none repeated");
         assert_eq!(done.steps[1].output, "{\"approved\":true}");
+    }
+
+    #[test]
+    fn a_run_paused_in_one_case_of_an_all_matching_switch_goes_on_with_the_cases_after_it() {
+        let d = def(
+            json!({"steps": [{"id": "s", "kind": "switch", "on": "true", "all": true,
+            "cases": [
+                {"when": "true", "steps": [sh("a", "echo one"), ask("ok", "Go on?")]},
+                {"when": "true", "steps": [sh("b", "echo two")]}]}]}),
+        );
+        let bench = Bench::new(&[]);
+        let mut out = bench.run(&d);
+        assert!(matches!(&out.ending, Ending::Waiting { step, .. } if step == "ok"));
+        assert_eq!(bench.said(), ["echo one"]);
+        let done = bench.answer(&d, &mut out, Decision::Go);
+        assert_eq!(done.ending, Ending::Succeeded, "{:?}", done.ending);
+        assert_eq!(bench.said(), ["echo one", "echo two"]);
     }
 
     #[test]
