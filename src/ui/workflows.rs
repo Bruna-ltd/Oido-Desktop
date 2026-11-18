@@ -2,7 +2,9 @@
 //! the runs went. A workflow is made in a chat (Save as workflow) and shown there as a draft first.
 
 use rune::{Color, El, ScrollSpec, col, el, row, text, text_input};
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit};
+use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, SegmentedControl};
+
+use crate::workflow::Sort;
 
 use crate::app::{App, now};
 use crate::workflow::definition::outline;
@@ -16,11 +18,23 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     if s.workflows.is_empty() {
         return empty(s, k);
     }
-    row()
+    if s.wf_open.is_none() {
+        return index(s, k);
+    }
+    col()
         .key("workflows")
         .w_full()
         .h_full()
-        .child(list(s, k))
+        .child(
+            row().px(20.0).pt(12.0).child(
+                Button::new("← Workflows")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.close_workflow())
+                    .build(k)
+                    .key("wf-back"),
+            ),
+        )
         .child(detail(s, k))
 }
 
@@ -77,60 +91,189 @@ fn empty(s: &App, k: &Kit) -> El {
         .children(notice(s, k))
 }
 
-fn list(s: &App, k: &Kit) -> El {
+/// The page of workflows: a title and the way to make one, a search and an order, then a card
+/// for each, in a column of its own width.
+fn index(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let shown = s.wf_sort.of(&s.workflows, &s.wf_search.text);
+    let style = rune::TextStyle {
+        line_height: 20.0,
+        ..k.ty.body
+    };
+    let search = row()
+        .w(220.0)
+        .px(12.0)
+        .py(6.0)
+        .radius(k.radius.md)
+        .border(
+            1.0,
+            if s.wf_search.focused {
+                c.border_strong
+            } else {
+                c.border_base
+            },
+        )
+        .child(
+            text_input(&s.wf_search, style)
+                .key("wf-search")
+                .w_full()
+                .color(c.text_base)
+                .placeholder("Search".to_owned(), c.text_faint)
+                .caret(c.text_base, k.selection())
+                .label("Search workflows".to_owned())
+                .on_edit(|s: &mut App| &mut s.wf_search),
+        );
+    let labels: Vec<&str> = Sort::ALL.iter().map(|o| o.label()).collect();
+    let order = SegmentedControl::new(&labels, Sort::ALL.iter().position(|o| *o == s.wf_sort))
+        .label("Sort by")
+        .on_pick(|s: &mut App, i, _| s.wf_sort = Sort::ALL[i.min(Sort::ALL.len() - 1)])
+        .build(k)
+        .key("wf-sort");
+    let mut cards = col().w_full().gap(8.0);
+    if shown.is_empty() {
+        cards = cards.child(
+            text("No workflows match.")
+                .font(k.ty.small)
+                .color(c.text_muted),
+        );
+    }
+    cards = cards.children(shown.iter().map(|w| item(s, w, k)));
+    let total = if shown.len() == s.workflows.len() {
+        format!("Total {}", s.workflows.len())
+    } else {
+        format!("{} of {}", shown.len(), s.workflows.len())
+    };
     col()
-        .key("workflow-list")
-        .w(320.0)
+        .key("workflows")
+        .w_full()
         .h_full()
         .min_h(0.0)
-        .padding(12.0)
-        .gap(4.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        .child(new_button(k))
-        .child(examples_button(k))
-        .children(notice(s, k))
-        .children(s.workflows.iter().map(|w| item(s, w, k)))
+        .child(
+            col()
+                .key("workflow-list")
+                .w_full()
+                .max_w(820.0)
+                .self_center()
+                .padding(24.0)
+                .gap(16.0)
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(8.0)
+                        .child(
+                            col()
+                                .gap(2.0)
+                                .child(
+                                    text("Workflows")
+                                        .font(k.ty.body_medium)
+                                        .color(c.text_base),
+                                )
+                                .child(
+                                    text("Steps an agent runs again, by hand, on a schedule or when asked")
+                                        .font(k.ty.small)
+                                        .color(c.text_muted),
+                                ),
+                        )
+                        .child(el().grow(1.0))
+                        .child(examples_button(k))
+                        .child(
+                            Button::new("New workflow")
+                                .variant(ButtonVariant::Submit)
+                                .control_size(ControlSize::Small)
+                                .on_press(|s: &mut App| s.new_workflow())
+                                .build(k)
+                                .key("wf-new"),
+                        ),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .center_y()
+                        .gap(8.0)
+                        .child(search)
+                        .child(el().grow(1.0))
+                        .child(order),
+                )
+                .children(notice(s, k))
+                .child(cards)
+                .child(
+                    row()
+                        .w_full()
+                        .justify_end()
+                        .child(text(total).font(k.ty.small).color(c.text_muted)),
+                ),
+        )
 }
 
+/// One workflow as a card: its name, how long ago it was made and published, who runs it and how
+/// many steps it has, and whether it is live.
 fn item(s: &App, w: &Saved, k: &Kit) -> El {
     let c = &k.c;
-    let selected = s.wf_open.as_deref() == Some(w.id.as_str());
     let agent = s
         .roster
         .agent_ref(&w.agent_id)
         .map_or("", |a| a.name.as_str());
     let id = w.id.clone();
-    let e = col()
+    let mut meta = Vec::new();
+    if let Some(p) = &w.published {
+        meta.push(format!("Published {}", ago(now() - p.at)));
+    }
+    meta.push(format!("Created {}", ago(now() - w.created_at)));
+    if !agent.is_empty() {
+        meta.push(agent.to_owned());
+    }
+    meta.push(format!(
+        "{} steps",
+        crate::workflow::editor::step_count(&w.definition)
+    ));
+    let state = match (w.live(), w.has_unpublished_changes()) {
+        (None, _) => ("Draft", BadgeVariant::Neutral),
+        (Some(_), true) => ("Unpublished changes", BadgeVariant::Accent),
+        (Some(_), false) => ("Published", BadgeVariant::Subtle),
+    };
+    let mut tags = row().center_y().gap(8.0);
+    if w.live().is_some_and(|d| !d.trigger.is_manual()) {
+        tags = tags.child(
+            Badge::new("Schedule")
+                .variant(BadgeVariant::Neutral)
+                .build(k),
+        );
+    }
+    tags = tags.child(Badge::new(state.0).variant(state.1).build(k));
+    let e = row()
         .key(format!("wf-{}", w.id))
         .w_full()
-        .px(12.0)
-        .py(10.0)
-        .gap(4.0)
+        .px(16.0)
+        .py(12.0)
+        .gap(12.0)
+        .center_y()
         .radius(k.radius.md)
-        .fill(if selected {
-            c.layer_02
-        } else {
-            Color::TRANSPARENT
-        })
+        .border(1.0, c.border_base)
+        .fill(c.layer_01)
         .on_press(move |s: &mut App| s.select_workflow(&id))
         .child(
-            text(w.name.clone())
-                .font(k.ty.ui_medium)
-                .color(c.text_base)
-                .truncate(),
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(
+                    text(w.name.clone())
+                        .font(k.ty.ui_medium)
+                        .color(c.text_base)
+                        .truncate(),
+                )
+                .child(
+                    text(meta.join(" · "))
+                        .font(k.ty.small)
+                        .color(c.text_muted)
+                        .truncate(),
+                ),
         )
-        .child(
-            text(format!(
-                "{agent} · {} steps{}",
-                crate::workflow::editor::step_count(&w.definition),
-                if w.live().is_none() { " · draft" } else { "" }
-            ))
-            .font(k.ty.small)
-            .color(c.text_muted)
-            .truncate(),
-        );
+        .child(tags);
     k.interactive(e)
 }
 
@@ -147,7 +290,8 @@ fn ago(secs: i64) -> String {
         ..60 => "just now".to_owned(),
         60..3600 => format!("{} min ago", secs / 60),
         3600..86400 => format!("{} h ago", secs / 3600),
-        _ => format!("{} d ago", secs / 86400),
+        86400..5184000 => format!("{} d ago", secs / 86400),
+        _ => format!("{} mo ago", secs / 2592000),
     }
 }
 

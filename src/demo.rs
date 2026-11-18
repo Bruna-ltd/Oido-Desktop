@@ -1334,6 +1334,13 @@ pub static SCENES: &[Scene] = &[
         ];
         s.route = Route::Workflows;
     }),
+    ("workflow-list", |s| {
+        if let Some((_, f)) = SCENES.iter().find(|(n, _)| *n == "workflows") {
+            f(s);
+        }
+        s.wf_open = None;
+        s.wf_runs.clear();
+    }),
     ("workflow-nested", |s| nested_workflow(s)),
     ("workflow-editor", |s| {
         s.wf_graph.shown = crate::flow_graph::View::Cards;

@@ -128,6 +128,9 @@ pub struct App {
     pub wf_inputs: Vec<(String, TextEdit)>,
     pub wf_jobs: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub wf_notice: Option<String>,
+    /// The Workflows page's search box and how its list is ordered.
+    pub wf_search: rune::TextEdit,
+    pub wf_sort: crate::workflow::Sort,
     pub wf_confirm: bool,
     /// The workflow being made or changed, and which of its pop-up lists is open.
     pub wf_editor: Option<crate::workflow::editor::Editor>,
@@ -334,6 +337,8 @@ impl App {
             wf_inputs: Vec::new(),
             wf_jobs: std::collections::HashMap::new(),
             wf_notice: None,
+            wf_search: rune::TextEdit::new(""),
+            wf_sort: crate::workflow::Sort::default(),
             wf_confirm: false,
             wf_editor: None,
             wf_test: crate::flow_editor::TestRun::default(),

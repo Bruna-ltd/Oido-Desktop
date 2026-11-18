@@ -1278,6 +1278,13 @@ impl App {
         self.reload_workflows();
     }
 
+    /// Back from one workflow to the list.
+    pub fn close_workflow(&mut self) {
+        self.wf_open = None;
+        self.wf_notice = None;
+        self.wf_confirm = false;
+    }
+
     pub fn cancel_delete_workflow(&mut self) {
         self.wf_confirm = false;
     }
