@@ -482,7 +482,13 @@ impl App {
             (None, None) => return Err("give a `prompt` or a `workflow` to run".to_owned()),
         };
         if let Some(wf) = self.workflows.iter().find(|w| w.id == wf_id) {
-            crate::workflow::engine::bind_inputs(&wf.definition, &inputs)?;
+            let live = wf.live().ok_or_else(|| {
+                format!(
+                    "the workflow {:?} is not published, so it cannot run",
+                    wf.name
+                )
+            })?;
+            crate::workflow::engine::bind_inputs(live, &inputs)?;
         }
         Ok(Target::Workflow { id: wf_id, inputs })
     }
@@ -1119,9 +1125,12 @@ mod tests {
                     ..Step::default()
                 }],
                 success: String::new(),
+                trigger: Default::default(),
             },
             created_at: now(),
-        };
+            published: None,
+        }
+        .published_as_is();
         app.save("w", |db| db.insert_workflow(&wf));
         app.workflows.push(wf.clone());
         let inputs = json!({"word": "pong"}).as_object().unwrap().clone();
@@ -1267,6 +1276,7 @@ mod tests {
             goal: String::new(),
             definition: Default::default(),
             created_at: 0,
+            published: None,
         };
         app.workflows.push(wf);
         let told = call(

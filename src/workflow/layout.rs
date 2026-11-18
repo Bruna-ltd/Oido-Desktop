@@ -657,6 +657,7 @@ mod tests {
             goal: String::new(),
             definition: serde_json::from_value(json!({"steps": steps})).unwrap(),
             created_at: 0,
+            published: None,
         };
         Editor::from_saved(&w)
     }

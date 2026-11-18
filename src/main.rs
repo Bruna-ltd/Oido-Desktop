@@ -40,6 +40,7 @@ mod picker;
 mod pricing;
 mod prompt;
 mod providers;
+mod publish;
 mod run;
 mod runs;
 mod schedule;

@@ -7,12 +7,13 @@ use std::collections::BTreeMap;
 use rune::TextEdit;
 use serde_json::Value;
 
-use super::Saved;
 use super::cond::{self, Op};
 use super::definition::{
     Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input,
-    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, WAIT, WHILE, each_step, plain, validate,
+    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, Trigger, WAIT, WHILE, each_step, plain,
+    validate,
 };
+use super::{Published, Saved};
 
 /// How a text box is checked and what can be put into it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -927,6 +928,9 @@ pub struct Editor {
     pub success: TextEdit,
     pub inputs: Vec<InputRow>,
     pub steps: Vec<Node>,
+    pub trigger: Trigger,
+    /// The live copy, kept so saving a draft does not lose it.
+    published: Option<Published>,
     /// What is wrong, as of the last check.
     pub problems: Vec<String>,
     /// The steps as they were before each change to their structure, newest last, with what the
@@ -948,6 +952,8 @@ impl Editor {
             success: TextEdit::new(""),
             inputs: Vec::new(),
             steps: Vec::new(),
+            trigger: Trigger::Manual,
+            published: None,
             problems: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -981,6 +987,8 @@ impl Editor {
                 })
                 .collect(),
             steps: d.steps.iter().map(Node::from_step).collect(),
+            trigger: d.trigger.clone(),
+            published: w.published.clone(),
             problems: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1038,6 +1046,7 @@ impl Editor {
             inputs,
             steps,
             success: self.success.text.trim().to_owned(),
+            trigger: self.trigger.clone(),
         };
         if let Err(more) = validate(&def) {
             bad.extend(more);
@@ -1077,6 +1086,7 @@ impl Editor {
             goal: self.goal.text.trim().to_owned(),
             definition,
             created_at,
+            published: self.published.clone(),
         })
     }
 
@@ -1676,6 +1686,7 @@ mod tests {
             goal: "Does it.".into(),
             definition: serde_json::from_value(v).unwrap(),
             created_at: 5,
+            published: None,
         }
     }
 

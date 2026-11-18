@@ -34,6 +34,9 @@ pub struct Schedule {
     /// The next fire; `None` once a "once" schedule has fired.
     pub next_at: Option<i64>,
     pub created_at: i64,
+    /// Made by publishing a workflow whose trigger is a schedule, and changed only by publishing
+    /// it again.
+    pub from_trigger: bool,
 }
 
 impl Schedule {
@@ -56,6 +59,7 @@ impl Schedule {
             enabled: true,
             next_at: None,
             created_at: now,
+            from_trigger: false,
         };
         s.change(name, now, tz)?;
         Ok(s)

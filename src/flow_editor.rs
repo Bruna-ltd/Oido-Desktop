@@ -91,6 +91,11 @@ impl App {
                 agent_id: agent_id.clone(),
                 name: e.name.to_owned(),
                 goal: e.goal.to_owned(),
+                // The examples are safe to run, and meant to be tried, so they start live.
+                published: Some(crate::workflow::Published {
+                    definition: e.definition.clone(),
+                    at: now(),
+                }),
                 definition: e.definition,
                 created_at: now(),
             };
@@ -630,6 +635,16 @@ mod tests {
         again.load_workflows();
         assert_eq!(again.workflows.len(), 1);
         assert_eq!(again.workflows[0].definition, app.workflows[0].definition);
+
+        // Saved is not live: nothing runs it for real until it is published.
+        assert!(app.workflows[0].live().is_none());
+        app.publish_workflow(&id).unwrap();
+        let mut again = db.open();
+        again.load_workflows();
+        assert_eq!(
+            again.workflows[0].live(),
+            Some(&app.workflows[0].definition)
+        );
 
         app.run_open_workflow();
         let run = &app.wf_runs[0];

@@ -18,8 +18,9 @@ pub mod trace;
 use definition::Definition;
 use engine::StepLog;
 
-/// A saved workflow. It belongs to the agent that learned it.
-#[derive(Clone, PartialEq, Debug)]
+/// A saved workflow. It belongs to the agent that learned it. `definition` is the draft: what the
+/// editor changes and a test run uses. Only `published` runs for real (a schedule, an agent).
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct Saved {
     pub id: String,
     pub agent_id: String,
@@ -27,6 +28,36 @@ pub struct Saved {
     pub goal: String,
     pub definition: Definition,
     pub created_at: i64,
+    pub published: Option<Published>,
+}
+
+/// The copy of a workflow that is live, and when it went live.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Published {
+    pub definition: Definition,
+    pub at: i64,
+}
+
+impl Saved {
+    /// What runs for real: the published copy, or nothing if it was never published.
+    pub fn live(&self) -> Option<&Definition> {
+        self.published.as_ref().map(|p| &p.definition)
+    }
+
+    /// This workflow with its draft published as it is, for tests that run one.
+    #[cfg(test)]
+    pub fn published_as_is(mut self) -> Saved {
+        self.published = Some(Published {
+            definition: self.definition.clone(),
+            at: 0,
+        });
+        self
+    }
+
+    /// The draft has changed since it was published (or was never published).
+    pub fn has_unpublished_changes(&self) -> bool {
+        self.live() != Some(&self.definition)
+    }
 }
 
 /// A workflow just learned from a chat and not saved yet. Nothing runs from a draft.

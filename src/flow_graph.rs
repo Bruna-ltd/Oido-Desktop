@@ -483,6 +483,7 @@ mod tests {
             ]}))
             .unwrap(),
             created_at: 0,
+            published: None,
         };
         app.wf_editor = Some(Editor::from_saved(&w));
         app

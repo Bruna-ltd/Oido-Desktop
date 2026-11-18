@@ -1256,6 +1256,7 @@ pub static SCENES: &[Scene] = &[
             .into(),
             steps: vec![list, write],
             success: "A changelog was written.".into(),
+            trigger: Default::default(),
         };
         let w = Saved {
             id: "w1".into(),
@@ -1264,6 +1265,7 @@ pub static SCENES: &[Scene] = &[
             goal: "Turns the week's commits into a changelog.".into(),
             definition: def,
             created_at: app::now(),
+            published: None,
         };
         let other = Saved {
             id: "w2".into(),
@@ -1943,6 +1945,7 @@ fn nested_workflow(s: &mut App) {
             }))
             .unwrap_or_default(),
             created_at: app::now(),
+            published: None,
         };
     s.wf_runs = vec![RunRecord {
         id: "r1".into(),

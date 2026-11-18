@@ -22,7 +22,7 @@ use crate::workflow::compile::{self, Trace};
 use crate::workflow::definition::{Definition, STEP_TOOLS};
 use crate::workflow::engine::{self, Ending, Env, Outcome, ToolOutcome, Usage};
 use crate::workflow::pause::{Decision, Snapshot};
-use crate::workflow::{Draft, Pause, RunRecord, RunStatus, Saved};
+use crate::workflow::{Draft, Pause, Published, RunRecord, RunStatus, Saved};
 
 /// What is happening to a chat's draft, when something is.
 #[derive(Clone, PartialEq, Debug)]
@@ -465,11 +465,19 @@ impl App {
                         crate::workflow::definition::MAX_FLOW_DEPTH
                     ));
                 }
+                let live = wf
+                    .live()
+                    .ok_or_else(|| format!("The workflow {name:?} is not published."))?;
                 if !out.iter().any(|w| w.id == wf.id) {
-                    out.push(wf.clone());
+                    // What a run needs of a workflow it calls is its live copy, so that is what
+                    // `definition` holds here.
+                    out.push(Saved {
+                        definition: live.clone(),
+                        ..wf.clone()
+                    });
                 }
                 chain.push(wf.id.clone());
-                visit(app, agent_id, &wf.definition, chain, out)?;
+                visit(app, agent_id, live, chain, out)?;
                 chain.pop();
             }
             Ok(())
@@ -616,6 +624,11 @@ impl App {
             agent_id: draft.agent_id.clone(),
             name,
             goal: draft.goal.clone(),
+            // The user chose to save it from the chat it was taught in: it goes live as it is.
+            published: Some(Published {
+                definition: draft.definition.clone(),
+                at: now(),
+            }),
             definition: draft.definition,
             created_at: now(),
         };
@@ -691,12 +704,18 @@ impl App {
     where
         D: FnOnce(&mut App, &RunRecord, Finish) + Send + 'static,
     {
-        let inputs = engine::bind_inputs(&wf.definition, given)?;
+        let def = wf.live().ok_or_else(|| {
+            format!(
+                "The workflow {:?} is not published. Publish it in the editor first.",
+                wf.name
+            )
+        })?;
+        let inputs = engine::bind_inputs(def, given)?;
         let at = match chat {
             Some(sid) => crate::guard::ask::Where::Chat(sid.to_owned()),
             None => crate::guard::ask::Where::Workflow(wf.id.clone()),
         };
-        let prep = self.prep_run(&wf.definition, Some(&wf.id), agent_id, at, &wf.name)?;
+        let prep = self.prep_run(def, Some(&wf.id), agent_id, at, &wf.name)?;
         let record = RunRecord {
             id: new_id(),
             workflow_id: wf.id.clone(),
@@ -714,7 +733,7 @@ impl App {
             pause: None,
         };
         self.save("the workflow run", |db| db.start_workflow_run(&record));
-        let (name, def) = (wf.name.clone(), wf.definition.clone());
+        let (name, def) = (wf.name.clone(), def.clone());
         let model = ModelRef::new(&prep.provider, &prep.model);
         let agent_name = self
             .roster
@@ -724,7 +743,7 @@ impl App {
         let agent_id = agent_id.to_owned();
         self.spawn_flow(
             prep,
-            wf.definition.clone(),
+            def.clone(),
             Go::Fresh(inputs),
             cancel,
             None,
@@ -1265,9 +1284,12 @@ mod tests {
                 inputs: serde_json::from_value(inputs).unwrap(),
                 steps,
                 success: String::new(),
+                trigger: Default::default(),
             },
             created_at: now(),
-        };
+            published: None,
+        }
+        .published_as_is();
         app.save("w", |db| db.insert_workflow(&w));
         app.workflows.push(w.clone());
         w
@@ -1500,9 +1522,11 @@ mod tests {
             bind: Some("b".into()),
             ..Step::default()
         };
-        app.workflows
-            .iter_mut()
-            .find(|w| w.id == inner.id)
+        let inner_wf = app.workflows.iter_mut().find(|w| w.id == inner.id).unwrap();
+        inner_wf.definition.steps.push(calls_outer.clone());
+        inner_wf
+            .published
+            .as_mut()
             .unwrap()
             .definition
             .steps

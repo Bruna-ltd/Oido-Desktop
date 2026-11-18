@@ -245,6 +245,7 @@ mod tests {
                 ..Definition::default()
             },
             created_at: 0,
+            published: None,
         }
     }
 

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{expr, template};
+use crate::schedule::timing::Timing;
 
 pub const TOOL: &str = "tool";
 pub const GENERATE: &str = "generate";
@@ -75,6 +76,29 @@ pub struct Definition {
     /// What shows a run did its job, in plain words.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub success: String,
+    /// What starts a published copy of this workflow. The engine never reads it.
+    #[serde(default, skip_serializing_if = "Trigger::is_manual")]
+    pub trigger: Trigger,
+}
+
+/// What starts a workflow on its own. A manual one waits for you or an agent.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    #[default]
+    Manual,
+    /// Runs on a timing, with these values for its inputs, while the app is open.
+    Schedule {
+        timing: Timing,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        inputs: Map<String, Value>,
+    },
+}
+
+impl Trigger {
+    pub fn is_manual(&self) -> bool {
+        matches!(self, Trigger::Manual)
+    }
 }
 
 /// A value a run starts with. One with no default is required.
