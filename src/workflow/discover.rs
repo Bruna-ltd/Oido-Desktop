@@ -67,6 +67,7 @@ pub fn read(reply: &str, result: &Value) -> Result<Vec<Field>, String> {
         out.push(Field {
             name: name.to_owned(),
             kind,
+            of: inside(value, 0),
         });
         if out.len() == MAX_FIELDS {
             break;
@@ -76,6 +77,34 @@ pub fn read(reply: &str, result: &Value) -> Result<Vec<Field>, String> {
         return Err("The model named no field that the result has.".to_owned());
     }
     Ok(out)
+}
+
+/// The fields inside a value: those of an object, or of the first object in a list. Read from the
+/// value itself, a few levels down.
+fn inside(value: &Value, depth: usize) -> Vec<Field> {
+    let object = match value {
+        Value::Object(o) => Some(o),
+        Value::Array(a) => a.iter().find_map(Value::as_object),
+        _ => None,
+    };
+    let Some(object) = object.filter(|_| depth < 3) else {
+        return Vec::new();
+    };
+    object
+        .iter()
+        .filter(|(name, _)| plain_name(name))
+        .take(MAX_FIELDS)
+        .map(|(name, v)| Field {
+            name: name.clone(),
+            kind: match v {
+                Value::Number(_) => FieldKind::Number,
+                Value::Bool(_) => FieldKind::YesNo,
+                Value::Array(_) => FieldKind::List,
+                _ => FieldKind::Text,
+            },
+            of: inside(v, depth + 1),
+        })
+        .collect()
 }
 
 /// A name an expression can use after a dot.
@@ -127,6 +156,11 @@ mod tests {
             ]
         );
         assert!(read("no idea", &result).is_err());
+        // A list of objects shows what its items hold, from the value.
+        let mail = json!({"messages": [{"from": "a", "subject": "b", "n": 1}]});
+        let got = read(r#"[{"name":"messages"}]"#, &mail).unwrap();
+        let inner: Vec<&str> = got[0].of.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(inner, ["from", "n", "subject"]);
         assert!(
             read("[{\"name\":\"zzz\"}]", &result)
                 .unwrap_err()

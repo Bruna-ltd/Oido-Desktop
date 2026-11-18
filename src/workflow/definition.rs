@@ -149,6 +149,9 @@ pub struct Field {
     pub name: String,
     #[serde(default)]
     pub kind: FieldKind,
+    /// What it holds inside, when it is an object or a list of objects (found from the real value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub of: Vec<Field>,
 }
 
 /// One case of a `switch`: the steps run when its value equals the one switched on.
@@ -397,6 +400,20 @@ struct Check<'a> {
 }
 
 impl Check<'_> {
+    /// What to say when the box for `field` is empty.
+    fn missing(field: &str) -> String {
+        match field {
+            "over" => "it needs the list to repeat over".to_owned(),
+            "cond" => "it needs a condition".to_owned(),
+            "on" => "it needs the value to choose by".to_owned(),
+            "when" => "a case needs the value it is for".to_owned(),
+            other => match other.strip_prefix("value ") {
+                Some(name) => format!("{name} needs a value"),
+                None => format!("it needs a {other}"),
+            },
+        }
+    }
+
     /// Names an expression may use here: the inputs, what is bound so far, and `extra`.
     fn names<'v>(vis: &'v [String], extra: &[&'v str]) -> Vec<&'v str> {
         std::iter::once("inputs")
@@ -407,7 +424,7 @@ impl Check<'_> {
 
     fn expression(&mut self, at: &str, field: &str, src: Option<&str>, names: &[&str]) {
         match src {
-            None | Some("") => self.bad.push(format!("{at}: a {field} is needed")),
+            None | Some("") => self.bad.push(format!("{at}: {}", Self::missing(field))),
             Some(src) => {
                 if let Err(why) = expr::check(names, src) {
                     self.bad.push(format!("{at}: {field} {src:?}: {why}"));
@@ -1146,6 +1163,7 @@ pub fn plain(s: &Step) -> String {
 
 /// One line of a workflow laid out as it nests: how deep, where it is (the path a run's step
 /// log uses, or a branch's), and what to say.
+#[cfg(test)]
 #[derive(Clone, PartialEq, Debug)]
 pub struct Row {
     pub depth: usize,
@@ -1154,6 +1172,7 @@ pub struct Row {
 }
 
 /// The steps as an outline, with a line for each branch of an `if` or `switch`.
+#[cfg(test)]
 pub fn outline(steps: &[Step]) -> Vec<Row> {
     fn walk(steps: &[Step], block: &str, depth: usize, out: &mut Vec<Row>) {
         for (i, s) in steps.iter().enumerate() {

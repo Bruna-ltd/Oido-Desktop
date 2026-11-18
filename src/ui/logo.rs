@@ -147,11 +147,32 @@ pub fn tile(url: &str, k: &Kit) -> Option<El> {
 
 /// A tile drawn from `logo`, which is known by `name` (an extension's, say).
 pub fn of(name: &'static str, logo: Logo, k: &Kit) -> El {
+    sized(name, logo, SIDE, k)
+}
+
+/// The picture of the server whose tool is `tool` (`mcp__server__name`): an extension's, or a
+/// preset's. `None` for a built-in tool or a server with no picture of its own.
+pub fn of_tool(tool: &str, side: f32, k: &Kit) -> Option<El> {
+    let server = tool.strip_prefix(crate::mcp::PREFIX)?.split("__").next()?;
+    let (name, logo) = crate::extensions::ALL
+        .iter()
+        .find(|e| crate::extensions::id_of(**e) == server)
+        .map(|e| (e.title(), e.logo()))
+        .or_else(|| {
+            crate::mcp::catalog::PRESETS
+                .iter()
+                .find(|p| crate::mcp::slug(p.name) == server)
+                .map(|p| (p.name, p.logo))
+        })?;
+    Some(sized(name, logo, side, k))
+}
+
+fn sized(name: &'static str, logo: Logo, side: f32, k: &Kit) -> El {
     LOGOS.with(|l| {
         let mut l = l.borrow_mut();
         let image = l.image(name, logo);
         row()
-            .size(SIDE, SIDE)
+            .size(side, side)
             .radius(10.0)
             .border(1.0, k.c.border_muted)
             .pixels(image.pixels())

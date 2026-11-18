@@ -33,6 +33,15 @@ pub enum Teach {
 
 /// The request that led to the work in a chat, and the tool calls that did it, since the last
 /// divider. Calls still waiting for a result, and the workflow tools themselves, are left out.
+/// What a server answered with: an object or a list when it is JSON, so a later step can use
+/// its fields; else the words.
+pub(crate) fn structured(text: &str) -> Value {
+    match serde_json::from_str::<Value>(text.trim()) {
+        Ok(v @ (Value::Object(_) | Value::Array(_))) => v,
+        _ => Value::String(text.to_owned()),
+    }
+}
+
 pub fn trace_of(messages: &[Message]) -> (String, Vec<Trace>) {
     let start = messages
         .iter()
@@ -214,18 +223,35 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
             return done;
         }
         if let Some(m) = p.mcp.iter().find(|m| m.name == name) {
+            // An extension's tool with fields answers with them; a server's answer that is JSON
+            // is read as JSON, so later steps can use its fields.
             let done = match (&m.account, crate::extensions::find(&m.target.id)) {
-                (Some(account), Some(ext)) => {
-                    crate::extensions::google::call(ext, &m.tool, args, account.clone(), cancel)
+                (Some(account), Some(ext)) => crate::extensions::google::call_value(
+                    ext,
+                    &m.tool,
+                    args,
+                    account.clone(),
+                    cancel,
+                ),
+                _ => {
+                    let done = crate::mcp::client::call_tool(
+                        m.target.clone(),
+                        &m.tool,
+                        args.clone(),
+                        cancel,
+                    );
+                    crate::mcp::client::Outcome {
+                        result: done.result.map(|text| structured(&text)),
+                        tokens: done.tokens,
+                    }
                 }
-                _ => crate::mcp::client::call_tool(m.target.clone(), &m.tool, args.clone(), cancel),
             };
             if let (Some(tokens), Ok(mut kept)) = (done.tokens, renewed.lock()) {
                 kept.push((m.target.id.clone(), tokens));
             }
             return match done.result {
-                Ok(text) => ToolOutcome {
-                    value: Value::String(text),
+                Ok(value) => ToolOutcome {
+                    value,
                     ..ToolOutcome::default()
                 },
                 Err(why) => ToolOutcome {
@@ -1231,10 +1257,6 @@ impl App {
         }
     }
 
-    pub fn select_wf_run(&mut self, i: usize) {
-        self.wf_run = i;
-    }
-
     /// Runs the open workflow with the inputs typed on the page.
     pub fn run_open_workflow(&mut self) {
         let Some(wf) = self.open_workflow().cloned() else {
@@ -1291,13 +1313,6 @@ impl App {
         self.save("the workflow", |db| db.delete_workflow(&id));
         self.wf_confirm = false;
         self.reload_workflows();
-    }
-
-    /// Back from one workflow to the list.
-    pub fn close_workflow(&mut self) {
-        self.wf_open = None;
-        self.wf_notice = None;
-        self.wf_confirm = false;
     }
 
     pub fn cancel_delete_workflow(&mut self) {
@@ -2113,5 +2128,56 @@ mod tests {
         let second = seen.recv().unwrap();
         assert!(second.contains("typesafe is not connected"), "{second}");
         assert!(app.commands.is_empty() && !app.busy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_test_everything_example_runs_every_step_to_the_end() {
+        let db = TempDb::new();
+        // The model is asked twice: to decide (it answers with one of the options) and to write.
+        let (mut app, _seen) = app_with_server(
+            &db,
+            vec![
+                (200, EVENTS, text_stream("yes")),
+                (200, EVENTS, text_stream("The test workflow ran.")),
+            ],
+        );
+        app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        app.add_examples();
+        let id = app
+            .workflows
+            .iter()
+            .find(|w| w.name == "Example: test everything")
+            .map(|w| w.id.clone())
+            .expect("the example was added");
+        app.publish_workflow(&id).unwrap();
+        // The workflow it runs has to be live too.
+        let greet = app
+            .workflows
+            .iter()
+            .find(|w| w.name == "Example: greet")
+            .map(|w| w.id.clone())
+            .unwrap();
+        app.publish_workflow(&greet).unwrap();
+        app.publish_workflow(&id).unwrap();
+        app.select_workflow(&id);
+        app.run_open_workflow();
+        let run = &app.wf_runs[0];
+        assert_eq!(
+            run.status,
+            RunStatus::Succeeded,
+            "{} at {}",
+            run.error,
+            run.failed_step
+        );
+        let ran: std::collections::BTreeSet<&str> =
+            run.steps.iter().map(|l| l.kind.as_str()).collect();
+        for kind in [
+            "tool", "set", "code", "if", "switch", "for_each", "while", "parallel", "try", "flow",
+            "wait", "decide", "generate",
+        ] {
+            assert!(ran.contains(kind), "no {kind} step ran: {ran:?}");
+        }
+        assert_eq!(run.output, "The test workflow ran.");
     }
 }

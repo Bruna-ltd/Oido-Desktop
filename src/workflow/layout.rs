@@ -2,6 +2,10 @@
 //! Pure: it reads the editor's tree and gives rectangles and wires, so it is tested without a
 //! screen. The screen is `ui/workflow_graph.rs`.
 //!
+//! The drawing is worked out as steps flowing down one spine and then turned on its side, so the
+//! workflow reads left to right as n8n's does: everything below is in the down-flowing frame (a
+//! box's `w` is its height on the screen), and [`layout`] gives the turned one.
+//!
 //! Steps flow down one spine. A step that holds lists of steps is a frame around them: the lists
 //! sit side by side as columns, each a spine of its own, with a label above it (`Then`,
 //! `Otherwise`, a branch's name). Wires join neighbours only, so nothing can loop back: a loop is a
@@ -10,30 +14,34 @@
 use super::definition::{DECIDE, GENERATE, plain};
 use super::editor::{Editor, Loc, Node, Part, Place};
 
-pub const NODE_W: f32 = 240.0;
-pub const NODE_H: f32 = 56.0;
+/// A step's square, as n8n draws a node; its words go under it, past the square's edge.
+pub const NODE_W: f32 = 96.0;
+pub const NODE_H: f32 = 96.0;
 /// Between a step and the next in a spine.
-pub const GAP: f32 = 32.0;
-/// Inside a frame, around its columns.
-pub const PAD: f32 = 16.0;
-/// A frame's title bar.
-pub const HEAD: f32 = 28.0;
-/// Between a frame's columns.
-pub const COL_GAP: f32 = 24.0;
-/// Above a column: its label and the space before its first step.
-pub const LABEL_H: f32 = 24.0;
-/// The chip that names a column.
-pub const CHIP_H: f32 = 20.0;
-/// Under a frame's columns: room for the join line and an add button on it.
-pub const FOOT: f32 = 28.0;
-/// How far under a list's last step the button that adds one after it sits.
-const END_GAP: f32 = 14.0;
+pub const GAP: f32 = 64.0;
+/// Inside a frame, around its columns: room for its title on one side and the words under the
+/// steps on the other.
+pub const PAD: f32 = 44.0;
+/// A frame's edge where the flow comes in.
+pub const HEAD: f32 = 8.0;
+/// Between a frame's columns, which are rows on the screen: a square and the words under it.
+pub const COL_GAP: f32 = 72.0;
+/// Before a column: its label and the space before its first step.
+pub const LABEL_H: f32 = 112.0;
+/// The chip that names a column: how long it is along the flow.
+pub const CHIP_H: f32 = 88.0;
+/// How thick the chip is.
+pub const CHIP_W: f32 = 22.0;
+/// Past a frame's columns: room for the join line and an add button on it.
+pub const FOOT: f32 = 40.0;
+/// How far past a list's last step the button that adds one after it sits.
+const END_GAP: f32 = 32.0;
 /// An empty list's slot.
-pub const EMPTY_H: f32 = 36.0;
+pub const EMPTY_H: f32 = 96.0;
 /// Around the whole drawing.
-pub const MARGIN: f32 = 24.0;
-pub const START_W: f32 = 88.0;
-pub const START_H: f32 = 28.0;
+pub const MARGIN: f32 = 48.0;
+pub const START_W: f32 = 96.0;
+pub const START_H: f32 = 96.0;
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Rect {
@@ -96,6 +104,8 @@ pub struct Item {
     pub loc: Loc,
     pub form: Form,
     pub kind: String,
+    /// The tool a tool step calls; empty for any other.
+    pub tool: String,
     /// The step's id, as typed.
     pub id: String,
     /// What the step does, in a line.
@@ -155,6 +165,8 @@ pub struct Drop {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Layout {
+    /// Turned on its side: the flow runs left to right.
+    flip: bool,
     pub start: Rect,
     pub items: Vec<Item>,
     pub labels: Vec<Label>,
@@ -165,7 +177,72 @@ pub struct Layout {
     pub height: f32,
 }
 
+impl Rect {
+    fn turned(self) -> Rect {
+        Rect {
+            x: self.y,
+            y: self.x,
+            w: self.h,
+            h: self.w,
+        }
+    }
+}
+
+fn turn(p: [f32; 2]) -> [f32; 2] {
+    [p[1], p[0]]
+}
+
 impl Layout {
+    /// The same drawing turned on its side (or back).
+    fn turned(&self) -> Layout {
+        Layout {
+            flip: !self.flip,
+            start: self.start.turned(),
+            items: self
+                .items
+                .iter()
+                .map(|i| Item {
+                    rect: i.rect.turned(),
+                    ..i.clone()
+                })
+                .collect(),
+            labels: self
+                .labels
+                .iter()
+                .map(|l| Label {
+                    rect: l.rect.turned(),
+                    ..l.clone()
+                })
+                .collect(),
+            wires: self
+                .wires
+                .iter()
+                .map(|w| Wire {
+                    from: turn(w.from),
+                    to: turn(w.to),
+                })
+                .collect(),
+            lists: self
+                .lists
+                .iter()
+                .map(|r| ListRegion {
+                    rect: r.rect.turned(),
+                    ..r.clone()
+                })
+                .collect(),
+            gaps: self
+                .gaps
+                .iter()
+                .map(|g| Gap {
+                    at: turn(g.at),
+                    ..g.clone()
+                })
+                .collect(),
+            width: self.height,
+            height: self.width,
+        }
+    }
+
     pub fn find(&self, loc: &Loc) -> Option<&Item> {
         self.items
             .iter()
@@ -187,6 +264,13 @@ impl Layout {
     /// Where the step at `from` would land if dropped at `p`: in the innermost list under the
     /// point that is not inside the step itself, at the position among its steps the point is at.
     pub fn drop_target(&self, from: &Loc, p: [f32; 2]) -> Option<Drop> {
+        if self.flip {
+            let found = self.turned().drop_target(from, turn(p))?;
+            return Some(Drop {
+                marker: found.marker.turned(),
+                ..found
+            });
+        }
         let depth = from.place.len();
         let region = self
             .lists
@@ -355,6 +439,7 @@ impl Pen {
                 },
                 form: Form::Empty,
                 kind: String::new(),
+                tool: String::new(),
                 id: String::new(),
                 title: "Nothing here yet".to_owned(),
                 detail: String::new(),
@@ -409,6 +494,7 @@ impl Pen {
                     Form::Frame
                 },
                 kind: node.kind.clone(),
+                tool: node.tool.clone(),
                 id: node.id.text.trim().to_owned(),
                 title,
                 detail,
@@ -466,9 +552,9 @@ impl Pen {
             let centre = x + w / 2.0;
             if let Some(text) = label_of(node, b) {
                 let chip = Rect {
-                    x: centre - NODE_W / 2.0 + 20.0,
+                    x: centre - CHIP_W / 2.0,
                     y: top - LABEL_H,
-                    w: NODE_W - 40.0,
+                    w: CHIP_W,
                     h: CHIP_H,
                 };
                 self.out.labels.push(Label { text, rect: chip });
@@ -502,8 +588,13 @@ impl Pen {
     }
 }
 
-/// The drawing of the editor's steps.
+/// The drawing of the editor's steps, flowing left to right.
 pub fn layout(ed: &Editor) -> Layout {
+    down(ed).turned()
+}
+
+/// The drawing with the steps flowing down.
+fn down(ed: &Editor) -> Layout {
     let (spine, height) = measure_list(&ed.steps);
     let width = spine.max(START_W);
     let mut pen = Pen {
@@ -547,6 +638,27 @@ pub enum Dir {
     Down,
     Left,
     Right,
+}
+
+/// The steps a step is in and the step itself, each as the words the drawing shows for it,
+/// outermost first: where it is, to say so when it fails.
+pub fn trail(ed: &Editor, at: &Loc) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut list = &ed.steps;
+    for &(step, block) in &at.place {
+        let Some(node) = list.get(step) else {
+            return out;
+        };
+        out.push(words(node).0);
+        let Some(inner) = node.blocks.get(block) else {
+            return out;
+        };
+        list = &inner.steps;
+    }
+    if let Some(node) = list.get(at.index) {
+        out.push(words(node).0);
+    }
+    out
 }
 
 fn list_at<'a>(ed: &'a Editor, place: &Place) -> Option<&'a Vec<Node>> {
@@ -690,7 +802,7 @@ mod tests {
 
     #[test]
     fn a_plain_list_is_one_spine_with_a_wire_between_each() {
-        let l = layout(&editor(json!([sh("a"), sh("b"), sh("c")])));
+        let l = down(&editor(json!([sh("a"), sh("b"), sh("c")])));
         let boxes: Vec<_> = l.items.iter().map(|i| i.rect).collect();
         assert_eq!(boxes.len(), 3);
         for (n, r) in boxes.iter().enumerate() {
@@ -719,7 +831,7 @@ mod tests {
 
     #[test]
     fn a_branching_step_is_a_frame_with_its_lists_side_by_side_and_named() {
-        let l = layout(&editor(json!([
+        let l = down(&editor(json!([
             {"id": "i", "kind": "if", "cond": "true", "then": [sh("t1"), sh("t2")], "else": [sh("e")]},
             sh("after")
         ])));
@@ -740,7 +852,7 @@ mod tests {
 
     #[test]
     fn a_loop_is_a_frame_with_one_list_and_no_label_and_an_empty_list_has_a_slot() {
-        let l = layout(&editor(json!([
+        let l = down(&editor(json!([
             {"id": "e", "kind": "for_each", "over": "[1]", "steps": [sh("x")]},
             {"id": "i", "kind": "if", "cond": "true", "then": [sh("t")], "else": []}
         ])));
@@ -755,7 +867,7 @@ mod tests {
     #[test]
     fn nothing_overlaps_and_every_step_is_inside_the_frame_it_belongs_to() {
         let e = rich();
-        let l = layout(&e);
+        let l = down(&e);
         for (n, a) in l.items.iter().enumerate() {
             assert!(a.rect.x >= 0.0 && a.rect.y >= 0.0, "{a:?}");
             assert!(
@@ -776,16 +888,12 @@ mod tests {
                 assert!(!chip.rect.overlaps(&item.rect), "{chip:?} over {item:?}");
             }
         }
-        assert_eq!(
-            layout(&e),
-            l,
-            "the same steps are always drawn the same way"
-        );
+        assert_eq!(down(&e), l, "the same steps are always drawn the same way");
     }
 
     #[test]
     fn a_step_that_calls_a_model_is_marked_and_nothing_else_is() {
-        let l = layout(&editor(json!([
+        let l = down(&editor(json!([
             sh("a"),
             {"id": "g", "kind": "generate", "instruction": "x"},
             {"id": "d", "kind": "decide", "question": "q", "options": ["a", "b"], "input": "x", "bind": "r"},
@@ -836,7 +944,7 @@ mod tests {
 
     #[test]
     fn a_button_to_add_a_step_sits_on_each_wire_of_the_top_list_and_after_the_last_in_a_frame() {
-        let l = layout(&editor(json!([sh("a"), sh("b"), sh("c")])));
+        let l = down(&editor(json!([sh("a"), sh("b"), sh("c")])));
         let mut top: Vec<usize> = l.gaps.iter().map(|g| g.index).collect();
         top.sort_unstable();
         assert_eq!(
@@ -852,7 +960,7 @@ mod tests {
         assert!((between.at[1] - (a.bottom() + b.y) / 2.0).abs() < 0.01);
         // In a frame's column: after the last step, and between two, but not before the first,
         // where the column's label is.
-        let l = layout(&editor(json!([
+        let l = down(&editor(json!([
             {"id": "i", "kind": "if", "cond": "true", "then": [sh("t1"), sh("t2")], "else": []}
         ])));
         let then: Vec<usize> = l
@@ -870,7 +978,7 @@ mod tests {
 
     #[test]
     fn the_step_under_a_point_is_the_innermost_box() {
-        let l = layout(&editor(json!([
+        let l = down(&editor(json!([
             sh("a"),
             {"id": "i", "kind": "if", "cond": "true", "then": [sh("t")], "else": []}
         ])));
@@ -888,7 +996,7 @@ mod tests {
 
     #[test]
     fn a_dragged_step_lands_in_the_list_under_the_pointer_at_the_place_between_its_steps() {
-        let l = layout(&editor(json!([
+        let l = down(&editor(json!([
             sh("a"), sh("b"), sh("c"),
             {"id": "i", "kind": "if", "cond": "true", "then": [sh("t1")], "else": []}
         ])));
@@ -937,7 +1045,7 @@ mod tests {
 
     #[test]
     fn a_frame_dragged_over_its_own_columns_lands_outside_it_and_never_inside_itself() {
-        let l = layout(&editor(json!([
+        let l = down(&editor(json!([
             sh("a"),
             {"id": "i", "kind": "if", "cond": "true", "then": [sh("t1")], "else": [sh("e1")]},
             sh("z")
@@ -953,5 +1061,15 @@ mod tests {
                 item.loc
             );
         }
+    }
+
+    #[test]
+    fn a_trail_names_each_step_a_step_is_in_and_then_the_step() {
+        let e = rich();
+        let trail = trail(&e, &at(&[(1, 0), (0, 0)], 0));
+        assert_eq!(trail.len(), 3, "{trail:?}");
+        assert!(trail[2].contains("inner"), "{trail:?}");
+        assert_eq!(super::trail(&e, &at(&[], 0)).len(), 1);
+        assert!(super::trail(&e, &at(&[(9, 0)], 0)).is_empty());
     }
 }

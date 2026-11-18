@@ -29,6 +29,8 @@ mod sidebar;
 pub(crate) mod usage;
 mod workflow_editor;
 mod workflow_graph;
+mod workflow_logs;
+mod workflow_picker;
 mod workflows;
 
 use std::time::Duration;

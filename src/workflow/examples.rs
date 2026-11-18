@@ -138,6 +138,60 @@ pub fn all() -> Vec<Example> {
                 "success": "All three were greeted."
             })),
         },
+        Example {
+            name: "Example: test everything",
+            goal: "One workflow with every kind of step but a team member's: commands, a value, a script, a check, a switch, two loops, steps side by side, a retry, another workflow, a pause, and two that use a model. Run it to see them all work.",
+            definition: def(json!({
+                "inputs": {"name": {"type": "string", "default": "tester", "description": "Who to greet"}},
+                "steps": [
+                    sh("hello", "echo hello {{inputs.name}}", Some("hello")),
+                    {"id": "facts", "kind": "set", "bind": "facts",
+                     "values": {"count": "3", "greeting": "hello.stdout.trimmed()"}},
+                    {"id": "double", "kind": "code", "bind": "total", "script": "facts.count * 2"},
+                    {"id": "size", "kind": "if", "cond": "total > 5", "bind": "size",
+                     "then": [sh("big", "echo big", None)],
+                     "else": [sh("small", "echo small", None)]},
+                    {"id": "which", "kind": "switch", "on": "total", "bind": "which",
+                     "cases": [{"when": "6", "steps": [sh("six", "echo six", None)]}],
+                     "default": [sh("other", "echo other", None)]},
+                    {"id": "letters", "kind": "for_each", "over": "[\"a\", \"b\", \"c\"]", "as": "letter",
+                     "on_error": "continue", "bind": "said",
+                     "steps": [sh("say", "echo {{letter}}", None)]},
+                    {"id": "beats", "kind": "while", "cond": "beat.stdout.trimmed() != \"n2\"", "bind": "beats",
+                     "steps": [sh("tick", "echo n{{index}}", Some("beat"))]},
+                    {"id": "side", "kind": "parallel", "bind": "both", "branches": [
+                        {"name": "left", "steps": [sh("l", "echo left", None)]},
+                        {"name": "right", "steps": [sh("r", "echo right", None)]}
+                    ]},
+                    {"id": "guard", "kind": "try", "retries": 1, "backoff_ms": 200, "bind": "safe",
+                     "steps": [sh("fail", "echo nothing here >&2; exit 1", None)],
+                     "catch": [{"id": "recover", "kind": "set", "bind": "note",
+                                "values": {"note": "\"recovered: \" + error"}}]},
+                    {"id": "greet", "kind": "flow", "workflow": "Example: greet",
+                     "inputs": {"who": "{{inputs.name}}"}, "bind": "greeted"},
+                    {"id": "pause", "kind": "wait", "seconds": 1},
+                    {"id": "judge", "kind": "decide", "question": "Does this greet someone?",
+                     "options": ["yes", "no"], "input": "{{hello.stdout}}", "bind": "verdict"},
+                    {"id": "sum", "kind": "generate",
+                     "instruction": "Say in one sentence that the test workflow ran. The greeting was: {{hello.stdout}}"}
+                ],
+                "success": "Every step ran."
+            })),
+        },
+        Example {
+            name: "Example: unread mail",
+            goal: "Searches your Gmail for unread mail and says each message's sender and subject. It only reads: needs Gmail turned on in Extensions. Use Discover fields on the search step to see what each message has.",
+            definition: def(json!({
+                "steps": [
+                    {"id": "find", "kind": "tool", "tool": "mcp__gmail__search",
+                     "args": {"query": "is:unread", "max_results": 5}, "bind": "mail"},
+                    {"id": "each", "kind": "for_each", "over": "mail.messages", "as": "message",
+                     "on_error": "continue", "bind": "seen",
+                     "steps": [sh("say", "echo \"{{message.from}}: {{message.subject}}\"", None)]}
+                ],
+                "success": "Every unread message was listed."
+            })),
+        },
     ]
 }
 
@@ -163,13 +217,21 @@ mod tests {
             });
         }
         for kind in [
-            "tool", "generate", "decide", "if", "switch", "for_each", "set", "try", "flow", "code",
-            "wait", "parallel",
+            "tool", "generate", "decide", "if", "switch", "for_each", "while", "set", "try",
+            "flow", "code", "wait", "parallel",
         ] {
             assert!(kinds.contains(kind), "no example has a {kind} step");
         }
-        // `while` and `delegate` need a loop that ends on something and a team: the builder's
-        // own Add step list is the way to try them.
+        // `delegate` needs a team: the builder's own Add step list is the way to try it.
+        let everything = all
+            .iter()
+            .find(|e| e.name == "Example: test everything")
+            .expect("one example has every kind of step");
+        let mut in_it = std::collections::BTreeSet::new();
+        each_step(&everything.definition.steps, &mut |s| {
+            in_it.insert(s.kind.clone());
+        });
+        assert_eq!(in_it.len(), 13, "{in_it:?}");
     }
 
     #[test]
@@ -195,7 +257,9 @@ mod tests {
     fn an_example_runs_nothing_that_changes_the_computer() {
         for e in all() {
             each_step(&e.definition.steps, &mut |s| {
-                if s.kind == "tool" && s.tool.as_deref() != Some("shell") {
+                if s.kind == "tool"
+                    && !matches!(s.tool.as_deref(), Some("shell" | "mcp__gmail__search"))
+                {
                     panic!("{}: {:?} is not a plain shell command", e.name, s.tool);
                 }
                 let cmd = s

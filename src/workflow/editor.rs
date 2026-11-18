@@ -847,6 +847,7 @@ impl Node {
                     .map(|r| Field {
                         name: r.name.text.trim().to_owned(),
                         kind: r.kind,
+                        of: Vec::new(),
                     })
                     .collect();
             }
@@ -960,6 +961,46 @@ pub struct InputRow {
     pub kind: &'static str,
     pub description: TextEdit,
     pub default: TextEdit,
+}
+
+/// Leaves `node` holding only the way down to the step at `index` of the list `place` names, and
+/// that step last in its list.
+fn cut_after(node: &mut Node, place: &[(usize, usize)], index: usize) {
+    let Some(&(_, block)) = place.first() else {
+        return;
+    };
+    for (b, other) in node.blocks.iter_mut().enumerate() {
+        if b != block {
+            other.steps.clear();
+        }
+    }
+    let Some(list) = node.blocks.get_mut(block).map(|b| &mut b.steps) else {
+        return;
+    };
+    match place.get(1) {
+        Some(&(next, _)) => {
+            list.truncate(next + 1);
+            if let Some(inner) = list.get_mut(next) {
+                cut_after(inner, &place[1..], index);
+            }
+        }
+        None => list.truncate(index + 1),
+    }
+}
+
+/// What a new workflow is called until it is renamed: "My workflow", then "My workflow 2", "My
+/// workflow 3" and so on, the first that is not already a name (capitals aside).
+pub fn new_workflow_name<'a>(taken: impl IntoIterator<Item = &'a str>) -> String {
+    const BASE: &str = "My workflow";
+    let taken: Vec<String> = taken.into_iter().map(|n| n.trim().to_lowercase()).collect();
+    let free = |name: &str| !taken.contains(&name.to_lowercase());
+    if free(BASE) {
+        return BASE.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{BASE} {n}"))
+        .find(|name| free(name))
+        .unwrap_or_else(|| BASE.to_owned())
 }
 
 pub const INPUT_KINDS: [&str; 3] = ["string", "number", "boolean"];
@@ -1103,6 +1144,13 @@ impl TriggerEdit {
 const HISTORY: usize = 200;
 
 impl Editor {
+    /// A new workflow with the name it starts with: [`new_workflow_name`] among the names taken.
+    pub fn blank_named<'a>(agent_id: &str, taken: impl IntoIterator<Item = &'a str>) -> Editor {
+        let mut ed = Editor::blank(agent_id);
+        ed.name = TextEdit::new(new_workflow_name(taken));
+        ed
+    }
+
     pub fn blank(agent_id: &str) -> Editor {
         Editor {
             workflow: None,
@@ -1158,6 +1206,64 @@ impl Editor {
     /// The definition the boxes say, and every problem with it: what could not be read, then what
     /// [`validate`] finds.
     pub fn definition(&self) -> Result<Definition, Vec<String>> {
+        self.build(&self.steps)
+    }
+
+    /// The workflow as it stands, finished or not, to keep as a draft: what is typed that cannot
+    /// be read is left out, and what is wrong with it is not reported here.
+    pub fn draft(&self, id: &str, created_at: i64) -> Saved {
+        let (definition, _) = self.build_lenient(&self.steps);
+        Saved {
+            id: id.to_owned(),
+            agent_id: self.agent_id.clone(),
+            name: match self.name.text.trim() {
+                "" => "Untitled workflow".to_owned(),
+                name => name.to_owned(),
+            },
+            goal: self.goal.text.trim().to_owned(),
+            definition,
+            created_at,
+            published: self.published.clone(),
+        }
+    }
+
+    /// The step whose results are the ones this step starts from: the one before it in its list,
+    /// or if it is the first, the one before the step it is in, and so on outwards.
+    pub fn step_before(&self, at: &Loc) -> Option<Loc> {
+        if at.index > 0 {
+            return Some(Loc {
+                place: at.place.clone(),
+                index: at.index - 1,
+            });
+        }
+        let (&(holder, _), outer) = at.place.split_last()?;
+        self.step_before(&Loc {
+            place: outer.to_vec(),
+            index: holder,
+        })
+    }
+
+    /// The workflow as far as the step at `at`, for running that far: the steps after it, and
+    /// inside a step that holds it, the steps after it and the other lists, are left out, so a
+    /// step still to be finished somewhere else cannot stop it. Only what is kept is checked.
+    pub fn definition_through(&self, at: &Loc) -> Result<Definition, Vec<String>> {
+        let top = at.place.first().map_or(at.index, |(step, _)| *step);
+        let mut steps: Vec<Node> = self.steps.iter().take(top + 1).cloned().collect();
+        if let Some(node) = steps.get_mut(top) {
+            cut_after(node, &at.place, at.index);
+        }
+        self.build(&steps)
+    }
+
+    fn build(&self, nodes: &[Node]) -> Result<Definition, Vec<String>> {
+        match self.build_lenient(nodes) {
+            (def, bad) if bad.is_empty() => Ok(def),
+            (_, bad) => Err(bad),
+        }
+    }
+
+    /// The workflow and everything wrong with it, together.
+    fn build_lenient(&self, nodes: &[Node]) -> (Definition, Vec<String>) {
         let mut bad = Vec::new();
         let mut inputs = BTreeMap::new();
         for row in &self.inputs {
@@ -1197,8 +1303,7 @@ impl Editor {
             }
         }
         let trigger = self.trigger.read(&inputs, &mut bad);
-        let steps = self
-            .steps
+        let steps = nodes
             .iter()
             .enumerate()
             .map(|(i, n)| n.to_step(&(i + 1).to_string(), &mut bad))
@@ -1212,7 +1317,7 @@ impl Editor {
         if let Err(more) = validate(&def) {
             bad.extend(more);
         }
-        if bad.is_empty() { Ok(def) } else { Err(bad) }
+        (def, bad)
     }
 
     /// The live copy changed (published or taken down) while the editor was open.
@@ -1581,7 +1686,6 @@ impl Editor {
 
     /// What a box can name: the inputs as `inputs.name`, what the steps before bind, and inside a
     /// loop its item and `index`. A `while` condition also sees what its body binds.
-    #[cfg(test)]
     pub fn names(&self, at: &Loc, key: Option<&str>) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for seen in self.scope(at, key) {
@@ -1681,6 +1785,137 @@ impl Editor {
         out
     }
 
+    /// What the name being typed at the caret could become: the names a box can use, and after a
+    /// dot the fields of what is before it (`mail.` offers `messages`, `message.` offers what one
+    /// message holds). `refs` says where names may be typed: in `{{ }}` for text, anywhere in an
+    /// expression.
+    pub fn completions(
+        &self,
+        at: &Loc,
+        key: Option<&str>,
+        refs: Refs,
+        text: &str,
+        caret: usize,
+    ) -> Option<Completion> {
+        let head = text.get(..caret)?;
+        let name_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
+        let from = head
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !name_char(*c))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let typed = &head[from..];
+        if !typed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            return None;
+        }
+        let open = match refs {
+            Refs::None => false,
+            Refs::Bare => true,
+            Refs::Braces => {
+                let before = &head[..from];
+                let opened = before.rfind("{{");
+                opened.is_some() && opened > before.rfind("}}")
+            }
+        };
+        if !open {
+            return None;
+        }
+        let lower = typed.to_lowercase();
+        let mut options: Vec<String> = self
+            .names(at, key)
+            .into_iter()
+            .filter(|n| n.to_lowercase().starts_with(&lower))
+            .collect();
+        if let Some((base, _)) = typed.rsplit_once('.') {
+            let path: Vec<&str> = base.split('.').collect();
+            options.extend(
+                self.fields_at_path(at, key, &path)
+                    .into_iter()
+                    .map(|f| format!("{base}.{}", f.name))
+                    .filter(|n| n.to_lowercase().starts_with(&lower)),
+            );
+        }
+        let mut unique: Vec<String> = Vec::new();
+        for o in options {
+            if o != typed && !unique.contains(&o) {
+                unique.push(o);
+            }
+        }
+        let mut options = unique;
+        options.truncate(COMPLETIONS);
+        (!options.is_empty()).then_some(Completion { from, options })
+    }
+
+    /// The fields of what `path` names, as a box at `at` sees it: a step's result by the name it
+    /// keeps it under, or a loop's item, then deeper into what each field holds.
+    fn fields_at_path(&self, at: &Loc, key: Option<&str>, path: &[&str]) -> Vec<Field> {
+        let Some((root, rest)) = path.split_first() else {
+            return Vec::new();
+        };
+        let seen = self.scope(at, key);
+        let mut fields = if seen
+            .iter()
+            .any(|s| matches!(s, Seen::Item(n) if n == root))
+        {
+            self.item_fields(at, root)
+        } else {
+            seen.iter()
+                .rev()
+                .filter_map(|s| match s {
+                    Seen::Step(loc) => self.node(loc),
+                    _ => None,
+                })
+                .find(|n| n.bind.text.trim() == *root)
+                .map(node_fields)
+                .unwrap_or_default()
+        };
+        for name in rest {
+            fields = fields
+                .into_iter()
+                .find(|f| f.name == *name)
+                .map(|f| f.of)
+                .unwrap_or_default();
+        }
+        fields
+    }
+
+    /// What one item of the loop that names its item `name` holds, from what the list it goes over
+    /// was found to hold.
+    fn item_fields(&self, at: &Loc, name: &str) -> Vec<Field> {
+        let mut list = &self.steps;
+        let mut place = Place::new();
+        let mut found = None;
+        for &(step, block) in &at.place {
+            let Some(node) = list.get(step) else {
+                break;
+            };
+            if node.kind == FOR_EACH && node.item_name() == name {
+                found = Some(Loc {
+                    place: place.clone(),
+                    index: step,
+                });
+            }
+            let Some(b) = node.blocks.get(block) else {
+                break;
+            };
+            list = &b.steps;
+            place.push((step, block));
+        }
+        let Some(loop_at) = found else {
+            return Vec::new();
+        };
+        let over = self
+            .node(&loop_at)
+            .and_then(|n| n.field_at("over"))
+            .map(|t| t.text.trim().to_owned())
+            .unwrap_or_default();
+        if over.is_empty() || !over.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+            return Vec::new();
+        }
+        let path: Vec<&str> = over.split('.').collect();
+        self.fields_at_path(&loop_at, Some("over"), &path)
+    }
+
     /// The name a [`Found`] stands for, if it has one now.
     pub fn named(&self, source: &Source) -> Option<String> {
         match source {
@@ -1764,6 +1999,46 @@ impl Editor {
 }
 
 /// What a box at some place can reach, as the scope walk finds it.
+/// What is typed at the caret, and how it could be finished.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Completion {
+    /// Where the name being typed starts (a byte offset); the caret is where it ends.
+    pub from: usize,
+    pub options: Vec<String>,
+}
+
+/// How many ways to finish a name are offered.
+const COMPLETIONS: usize = 8;
+
+/// The fields a step's result is known to have: a shell's two, what an AI step answers in, or what
+/// was found by looking at a real result.
+fn node_fields(node: &Node) -> Vec<Field> {
+    if node.kind == TOOL && node.tool == crate::tools::SHELL {
+        let field = |name: &str, kind| Field {
+            name: name.to_owned(),
+            kind,
+            of: Vec::new(),
+        };
+        return vec![
+            field("stdout", FieldKind::Text),
+            field("exit_code", FieldKind::Number),
+        ];
+    }
+    if node.kind == GENERATE && !node.reply.is_empty() {
+        return node
+            .reply
+            .iter()
+            .filter(|r| !r.name.text.trim().is_empty())
+            .map(|r| Field {
+                name: r.name.text.trim().to_owned(),
+                kind: r.kind,
+                of: Vec::new(),
+            })
+            .collect();
+    }
+    node.found.clone()
+}
+
 enum Seen {
     Input(String),
     Step(Loc),
@@ -1918,6 +2193,60 @@ mod tests {
             ],
             "success": "All done."
         })
+    }
+
+    #[test]
+    fn a_name_being_typed_is_finished_with_the_fields_of_what_it_reaches_into() {
+        let e = Editor::from_saved(&saved(json!({
+            "inputs": {"who": {"type": "string"}},
+            "steps": [
+                {"id": "find", "kind": "tool", "tool": "mcp__gmail__search", "bind": "mail",
+                 "found": [{"name": "messages", "kind": "list",
+                            "of": [{"name": "from"}, {"name": "subject"}, {"name": "snippet"}]}]},
+                {"id": "each", "kind": "for_each", "over": "mail.messages", "as": "message",
+                 "steps": [{"id": "say", "kind": "tool", "tool": "shell",
+                            "args": {"command": "echo"}}]},
+                {"id": "ls", "kind": "tool", "tool": "shell", "bind": "files",
+                 "args": {"command": "ls"}},
+                {"id": "end", "kind": "tool", "tool": "shell", "args": {"command": "echo"}}
+            ]
+        })));
+        let inside = at(&[(1, 0)], 0);
+        let finish = |at: &Loc, refs, typed: &str| {
+            e.completions(at, None, refs, typed, typed.len())
+                .map(|c| (c.from, c.options))
+        };
+        // In a loop's step: the item's fields, from what the list it goes over holds.
+        assert_eq!(
+            finish(&inside, Refs::Braces, "echo {{message.s"),
+            Some((7, vec!["message.subject".into(), "message.snippet".into()]))
+        );
+        // A step's result, a field's own fields, a shell's two, and the inputs.
+        assert_eq!(
+            finish(&inside, Refs::Braces, "{{mail.")
+                .map(|c| c.1),
+            Some(vec!["mail.messages".into()])
+        );
+        assert_eq!(
+            finish(&inside, Refs::Bare, "mail.messages.fr").map(|c| c.1),
+            Some(vec!["mail.messages.from".into()])
+        );
+        assert_eq!(
+            finish(&at(&[], 3), Refs::Braces, "{{files.").map(|c| c.1),
+            Some(vec!["files.stdout".into(), "files.exit_code".into()])
+        );
+        assert_eq!(
+            finish(&inside, Refs::Bare, "inp").map(|c| c.1),
+            Some(vec!["inputs.who".into()])
+        );
+        // Not offered: outside `{{ }}` in text, in plain text, after a finished name, or for what
+        // is not yet made.
+        assert_eq!(finish(&inside, Refs::Braces, "echo mail.m"), None);
+        assert_eq!(finish(&inside, Refs::Braces, "{{mail.messages}} m"), None);
+        assert_eq!(finish(&inside, Refs::None, "mail.m"), None);
+        assert_eq!(finish(&inside, Refs::Bare, "message.subject"), None);
+        assert_eq!(finish(&at(&[], 0), Refs::Bare, "files.s"), None);
+        assert_eq!(finish(&inside, Refs::Bare, "1.5"), None);
     }
 
     #[test]
@@ -2419,6 +2748,7 @@ mod tests {
         e.steps[1].found = vec![Field {
             name: "stdout".into(),
             kind: FieldKind::Text,
+            of: Vec::new(),
         }];
         e.add(&vec![], GENERATE);
         let here = at(&[], 2);
@@ -2599,5 +2929,89 @@ mod tests {
         let step = e.steps[0].to_step("1", &mut Vec::new());
         assert_eq!(step.tool.as_deref(), Some(crate::tools::DELEGATE));
         assert_eq!(Node::from_step(&step).label(), "Ask an agent");
+    }
+
+    #[test]
+    fn a_new_workflow_is_named_with_the_next_number_not_taken_and_the_name_can_be_changed() {
+        assert_eq!(new_workflow_name([]), "My workflow");
+        assert_eq!(new_workflow_name(["Tidy downloads"]), "My workflow");
+        assert_eq!(new_workflow_name(["My workflow"]), "My workflow 2");
+        assert_eq!(
+            new_workflow_name(["my WORKFLOW", "My workflow 2"]),
+            "My workflow 3"
+        );
+        assert_eq!(
+            new_workflow_name(["My workflow", "My workflow 3"]),
+            "My workflow 2"
+        );
+        let mut e = Editor::blank_named("a1", ["My workflow"]);
+        assert_eq!(e.name.text, "My workflow 2");
+        e.name = TextEdit::new("Weekly report");
+        assert_eq!(e.name.text, "Weekly report");
+    }
+
+    #[test]
+    fn running_as_far_as_a_step_leaves_out_and_does_not_check_what_comes_after() {
+        let e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls"}},
+            {"id": "each", "kind": "for_each", "over": "[1, 2]", "steps": [
+                {"id": "ok", "kind": "tool", "tool": "shell", "args": {"command": "echo"}},
+                {"id": "later", "kind": "tool"}
+            ]},
+            {"id": "last", "kind": "tool"}
+        ]})));
+        assert!(
+            e.definition().is_err(),
+            "the whole workflow is not finished"
+        );
+        let at = |place: Vec<(usize, usize)>, index| Loc { place, index };
+        let first = e.definition_through(&at(Vec::new(), 0)).unwrap();
+        assert_eq!(first.steps.len(), 1);
+        // A step inside a loop: the loop, with the step last in it and nothing after it.
+        let inner = e.definition_through(&at(vec![(1, 0)], 0)).unwrap();
+        assert_eq!(inner.steps.len(), 2);
+        assert_eq!(inner.steps[1].steps.len(), 1);
+        assert_eq!(inner.steps[1].steps[0].id, "ok");
+        // A step that is not finished is said so, by what is wrong with it.
+        let bad = e.definition_through(&at(vec![(1, 0)], 1)).unwrap_err();
+        assert!(bad.iter().any(|p| p.contains("needs a tool")), "{bad:?}");
+    }
+
+    #[test]
+    fn a_draft_keeps_a_workflow_that_is_not_fit_to_run_and_a_step_starts_from_the_one_before() {
+        let e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls"}},
+            {"id": "each", "kind": "for_each", "over": "[1]", "steps": [
+                {"id": "first", "kind": "tool"},
+                {"id": "second", "kind": "tool"}
+            ]},
+            {"id": "last", "kind": "tool"}
+        ]})));
+        assert!(e.definition().is_err());
+        let kept = e.draft("w9", 5);
+        assert_eq!((kept.id.as_str(), kept.created_at), ("w9", 5));
+        assert_eq!(kept.definition.steps.len(), 3, "nothing is dropped");
+        assert_eq!(kept.definition.steps[1].steps.len(), 2);
+        let at = |place: Vec<(usize, usize)>, index| Loc { place, index };
+        assert_eq!(e.step_before(&at(vec![], 2)), Some(at(vec![], 1)));
+        assert_eq!(
+            e.step_before(&at(vec![(1, 0)], 1)),
+            Some(at(vec![(1, 0)], 0))
+        );
+        // The first step in a loop starts from what is before the loop; the first of all has none.
+        assert_eq!(e.step_before(&at(vec![(1, 0)], 0)), Some(at(vec![], 0)));
+        assert_eq!(e.step_before(&at(vec![], 0)), None);
+    }
+
+    #[test]
+    fn an_empty_box_says_what_it_is_for() {
+        let e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "each", "kind": "for_each", "steps": []},
+            {"id": "if", "kind": "if"}
+        ]})));
+        let bad = e.definition().unwrap_err().join("\n");
+        assert!(bad.contains("it needs the list to repeat over"), "{bad}");
+        assert!(bad.contains("it needs a condition"), "{bad}");
+        assert!(!bad.contains("a over"), "{bad}");
     }
 }

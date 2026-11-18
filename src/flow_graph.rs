@@ -10,24 +10,14 @@ use crate::workflow::layout::{self, Dir, Drop};
 use crate::workflow::{Pause, RunStatus};
 
 /// Zoom stays where text can still be read: the smallest type on a node is 11 pt.
-pub const ZOOM_MIN: f32 = 0.7;
-pub const ZOOM_MAX: f32 = 1.4;
+pub const ZOOM_MIN: f32 = 0.25;
+pub const ZOOM_MAX: f32 = 2.0;
 /// Below this a node drops its second line instead of shrinking it further.
-pub const ZOOM_COMPACT: f32 = 0.85;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum View {
-    /// Every step as a form, one under the other.
-    Cards,
-    /// The steps as boxes and wires, with the selected one's form beside them.
-    #[default]
-    Graph,
-}
+pub const ZOOM_COMPACT: f32 = 0.6;
 
 /// The graph view's state. The camera is two [`Live`] values, so a pan or a pinch moves the
 /// drawing without running the view again.
 pub struct GraphView {
-    pub shown: View,
     pub selected: Option<Loc>,
     /// The Trigger node is selected, and its form shows.
     pub on_trigger: bool,
@@ -79,7 +69,6 @@ const DRAG_FROM: f32 = 3.0;
 impl Default for GraphView {
     fn default() -> Self {
         GraphView {
-            shown: View::default(),
             selected: None,
             on_trigger: false,
             pan: [0.0, 0.0],
@@ -110,16 +99,10 @@ impl GraphView {
 }
 
 impl App {
-    pub fn set_view(&mut self, view: View) {
-        if view == View::Graph && self.wf_graph.shown != View::Graph {
-            self.wf_graph.needs_fit = true;
-        }
-        self.wf_graph.shown = view;
-        self.wf_menu = None;
-    }
-
     /// Selects a step, or nothing.
     pub fn select_step(&mut self, at: Option<Loc>) {
+        // What was typed in the step being left is kept.
+        self.autosave();
         self.wf_graph.selected = at;
         self.wf_graph.on_trigger = false;
         self.wf_menu = None;
@@ -264,6 +247,12 @@ impl App {
         (before < ZOOM_COMPACT) != (zoom < ZOOM_COMPACT)
     }
 
+    /// Zooms about the middle of the view, for the zoom buttons.
+    pub fn zoom_graph_centre(&mut self, delta: f32) {
+        let v = self.wf_graph.viewport;
+        self.zoom_graph(v[2] / 2.0, v[3] / 2.0, delta);
+    }
+
     /// A drag in the drawing: on a step it moves the step (or copies it, with Option held); on
     /// the background it pans.
     pub fn drag_graph(&mut self, d: &Drag, tx: &mut Tx) {
@@ -341,6 +330,7 @@ impl App {
             ed.check();
             self.wf_graph.selected = Some(at);
         }
+        self.autosave();
     }
 
     /// Where a step added from the Add step button goes: after the selected one, else at the end
@@ -357,7 +347,31 @@ impl App {
 
     /// Opens the list of steps to add at the position the Add step button would use.
     pub fn open_add_menu(&mut self) {
-        self.wf_menu = Some(crate::workflow::editor::Menu::AddStep);
+        self.open_picker(crate::workflow::editor::Menu::AddStep);
+    }
+
+    /// Opens the panel of steps to add at the place `menu` names, or closes it if that is the one
+    /// open. The search starts empty.
+    pub fn open_picker(&mut self, menu: crate::workflow::editor::Menu) {
+        self.wf_pick = rune::TextEdit::new("");
+        self.toggle_menu(&menu);
+    }
+
+    /// Whether the panel of steps to add is open: the place it adds at.
+    pub fn picker_place(&self) -> Option<(Place, usize)> {
+        use crate::workflow::editor::Menu;
+        match self.wf_menu.as_ref()? {
+            Menu::AddAt(place, index) => Some((place.clone(), *index)),
+            Menu::AddStep => Some(self.add_position()),
+            _ => None,
+        }
+    }
+
+    /// A kind of step was chosen in the panel: adds it at the place the panel is open for.
+    pub fn pick_kind(&mut self, label: &str) {
+        if let Some((place, index)) = self.picker_place() {
+            self.editor_add_at(&place, index, label);
+        }
     }
 
     /// Adds a step of the kind with this label at a position, selects it, and closes the menu.
@@ -370,6 +384,7 @@ impl App {
             self.wf_graph.selected = Some(at);
         }
         self.wf_menu = None;
+        self.autosave();
     }
 
     /// Deletes the selected step.
@@ -393,6 +408,7 @@ impl App {
             .into_iter()
             .find(|l| layout::layout(ed).find(l).is_some())
         });
+        self.autosave();
     }
 
     /// Moves the selected step up or down among its list, and keeps it selected.
@@ -410,6 +426,7 @@ impl App {
         ed.shift(&at, by);
         ed.check();
         self.wf_graph.selected = Some(Loc { index: to, ..at });
+        self.autosave();
     }
 
     /// Puts a copy of the selected step right after it, and selects the copy.
@@ -427,6 +444,7 @@ impl App {
             ed.check();
             self.wf_graph.selected = Some(copy);
         }
+        self.autosave();
     }
 
     /// Takes back the last change to the steps.
@@ -435,6 +453,7 @@ impl App {
             ed.undo();
             ed.check();
         }
+        self.autosave();
     }
 
     pub fn redo_editor(&mut self) {
@@ -442,6 +461,7 @@ impl App {
             ed.redo();
             ed.check();
         }
+        self.autosave();
     }
 
     /// Makes the drawing as big as fits the view, up to full size and down to where text can
@@ -583,7 +603,7 @@ mod tests {
             "a small drawing is centred at full size"
         );
         // One wider than the view is shrunk to fit, but not past where text can be read.
-        app.wf_graph.viewport = [0.0, 0.0, 200.0, 800.0];
+        app.wf_graph.viewport = [0.0, 0.0, 100.0, 100.0];
         app.fit_graph();
         assert_eq!(app.wf_graph.zoom, ZOOM_MIN);
         assert!(!app.wf_graph.needs_fit);
@@ -607,7 +627,7 @@ mod tests {
         let t = lay.find(&at(&[(1, 0)], 0)).unwrap().rect;
         // Drag `a` into the then list, after `t`.
         let drop = lay
-            .drop_target(&at(&[], 0), [t.centre_x(), t.bottom() + 3.0])
+            .drop_target(&at(&[], 0), [t.x + t.w + 3.0, t.y + t.h / 2.0])
             .unwrap();
         app.drop_step(&at(&[], 0), &drop, false);
         assert_eq!(

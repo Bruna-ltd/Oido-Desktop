@@ -264,9 +264,38 @@ pub fn call(
     ext: &dyn Extension,
     tool: &str,
     args: &Value,
-    mut account: Account,
+    account: Account,
     cancel: &AtomicBool,
 ) -> Outcome<String> {
+    let done = run(account, cancel, |api| ext.call(tool, args, api));
+    Outcome {
+        result: done.result.map(cut),
+        tokens: done.tokens,
+    }
+}
+
+/// Like [`call`], for a workflow step: a tool that has fields answers with them, and any other
+/// with its words.
+pub fn call_value(
+    ext: &dyn Extension,
+    tool: &str,
+    args: &Value,
+    account: Account,
+    cancel: &AtomicBool,
+) -> Outcome<Value> {
+    run(account, cancel, |api| match ext.data(tool, args, api) {
+        Some(found) => found,
+        None => ext
+            .call(tool, args, api)
+            .map(|text| Value::String(cut(text))),
+    })
+}
+
+fn run<T>(
+    mut account: Account,
+    cancel: &AtomicBool,
+    ask: impl Fn(&Api) -> Result<T, Failure>,
+) -> Outcome<T> {
     let mut renewed = None;
     let mut force = false;
     for attempt in 0..2 {
@@ -290,7 +319,7 @@ pub fn call(
             token: &tokens.access_token,
             cancel,
         };
-        match ext.call(tool, args, &api) {
+        match ask(&api) {
             Err(Failure::Unauthorized) if attempt == 0 && tokens.refresh_token.is_some() => {
                 force = true;
             }
@@ -306,9 +335,9 @@ pub fn call(
                     tokens: renewed,
                 };
             }
-            Ok(text) => {
+            Ok(found) => {
                 return Outcome {
-                    result: Ok(cut(text)),
+                    result: Ok(found),
                     tokens: renewed,
                 };
             }

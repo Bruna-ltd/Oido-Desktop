@@ -141,6 +141,12 @@ pub struct App {
     /// The editor's graph view: which view shows, what is selected, the camera.
     pub wf_graph: crate::flow_graph::GraphView,
     pub wf_menu: Option<crate::workflow::editor::Menu>,
+    /// What is typed in the search of the panel that lists the steps to add.
+    pub wf_pick: rune::TextEdit,
+    /// The Logs panel under the graph is open, and which of its rows was pressed last.
+    pub wf_logs_open: bool,
+    pub wf_suggest: crate::flow_editor::Suggest,
+    pub wf_log_pick: Option<usize>,
     /// Stands in for a box that is no longer there when something is typed into it.
     pub wf_stray: TextEdit,
     /// Stands in for the trigger's timing when no editor is open.
@@ -347,6 +353,10 @@ impl App {
             wf_test: crate::flow_editor::TestRun::default(),
             wf_graph: crate::flow_graph::GraphView::default(),
             wf_menu: None,
+            wf_pick: rune::TextEdit::new(""),
+            wf_logs_open: true,
+            wf_suggest: Default::default(),
+            wf_log_pick: None,
             wf_stray: TextEdit::new(""),
             wf_stray_timing: crate::schedules::form::TimingForm::new(),
             wf_advanced: false,
