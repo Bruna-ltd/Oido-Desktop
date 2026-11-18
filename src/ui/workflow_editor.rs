@@ -948,6 +948,10 @@ fn card(
         // choose.
         if n.tool != crate::tools::DELEGATE {
             out = out.child(tool_field(s, at, n, &key, k, layer));
+            if !n.tool.is_empty() {
+                let about = crate::tools::shown(&n.tool, &s.mcp.servers).about;
+                out = out.children(help_line(&about, k));
+            }
         }
         for p in tool_params(s, ed, at, n, &key, k, layer) {
             out = out.child(p);
@@ -1101,6 +1105,7 @@ fn tool_params(
                 key: name.clone(),
                 label: name.clone(),
                 about: String::new(),
+                help: String::new(),
                 kind: p.kind,
                 required: false,
                 options: Vec::new(),
@@ -1129,6 +1134,7 @@ fn tool_params(
                 .w_full()
                 .gap(4.0)
                 .child(text(label).font(k.ty.small).color(c.text_muted))
+                .children(help_line(&p.help, k))
                 .child(row().child(pick(
                     box_key,
                     Menu::Param(at.clone(), p.key.clone()),
@@ -1143,7 +1149,7 @@ fn tool_params(
                 )))
         } else if p.kind == ArgKind::Flag {
             let on = typed.trim() == "true";
-            row()
+            let switch = row()
                 .center_y()
                 .gap(8.0)
                 .child(
@@ -1160,7 +1166,12 @@ fn tool_params(
                         })
                         .build(k),
                 )
-                .child(text(label).font(k.ty.small).color(c.text_muted))
+                .child(text(label).font(k.ty.small).color(c.text_muted));
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(switch)
+                .children(help_line(&p.help, k))
         } else {
             let target = Target::Param(at.clone(), p.key.clone(), kind);
             let names = if kind == ArgKind::Text {
@@ -1168,22 +1179,36 @@ fn tool_params(
             } else {
                 None
             };
-            col().w_full().child(field(
-                &label,
-                given.map_or(&blank, |g| &g.edit),
-                &box_key,
-                &p.about,
-                p.lines,
-                names,
-                k,
-                move |s: &mut App| {
-                    s.editor_text(&Target::Param(at_for.clone(), name.clone(), kind))
-                },
-            ))
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(field(
+                    &label,
+                    given.map_or(&blank, |g| &g.edit),
+                    &box_key,
+                    &p.about,
+                    p.lines,
+                    names,
+                    k,
+                    move |s: &mut App| {
+                        s.editor_text(&Target::Param(at_for.clone(), name.clone(), kind))
+                    },
+                ))
+                .children(help_line(&p.help, k))
         };
         out.push(item);
     }
     out
+}
+
+/// What a tool's argument is for, in small type under its name; nothing when it says nothing.
+fn help_line(help: &str, k: &Kit) -> Option<El> {
+    (!help.is_empty()).then(|| {
+        text(help.to_owned())
+            .font(k.ty.small)
+            .color(k.c.text_faint)
+            .wrap()
+    })
 }
 
 /// The picker of what a box can use, when the box reads results: "Output of: `ls`", not the name

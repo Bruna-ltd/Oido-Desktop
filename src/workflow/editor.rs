@@ -434,6 +434,8 @@ pub struct ParamSpec {
     pub label: String,
     /// What it is for, from the tool's own description.
     pub about: String,
+    /// The same, in full: shown under the box's name so what to type is plain.
+    pub help: String,
     pub kind: ArgKind,
     pub required: bool,
     /// The values it may be, if the tool lists them.
@@ -472,6 +474,17 @@ pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let help = p
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let help = match help.char_indices().nth(240) {
+                Some((i, _)) => format!("{}…", help[..i].trim_end()),
+                None => help,
+            };
             let about = p
                 .get("description")
                 .and_then(Value::as_str)
@@ -501,6 +514,7 @@ pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
                 key: key.clone(),
                 label,
                 about,
+                help,
                 kind,
                 required: required.contains(&key.as_str()),
                 options: if kind == ArgKind::Text {
@@ -2256,6 +2270,9 @@ mod tests {
             ("Path", true)
         );
         assert_eq!(of("reason").about, "Why.");
+        // The full description is kept for the form, on one line.
+        assert_eq!(of("reason").help, "Why. More.");
+        assert_eq!(of("limit").help, "");
         assert_eq!(of("limit").kind, ArgKind::Whole);
         assert_eq!(of("all").kind, ArgKind::Flag);
         assert_eq!((of("tags").kind, of("tags").lines), (ArgKind::Json, 3));
