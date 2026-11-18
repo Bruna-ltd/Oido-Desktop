@@ -130,6 +130,8 @@ pub struct App {
     pub wf_notice: Option<String>,
     /// The Workflows page's search box and how its list is ordered.
     pub wf_search: rune::TextEdit,
+    /// The editor's "Discover fields": the model chosen for it and how it is going.
+    pub wf_mapper: crate::flow_editor::Mapper,
     pub wf_sort: crate::workflow::Sort,
     pub wf_confirm: bool,
     /// The workflow being made or changed, and which of its pop-up lists is open.
@@ -338,6 +340,7 @@ impl App {
             wf_jobs: std::collections::HashMap::new(),
             wf_notice: None,
             wf_search: rune::TextEdit::new(""),
+            wf_mapper: crate::flow_editor::Mapper::default(),
             wf_sort: crate::workflow::Sort::default(),
             wf_confirm: false,
             wf_editor: None,

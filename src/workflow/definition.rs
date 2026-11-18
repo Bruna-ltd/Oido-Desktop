@@ -204,6 +204,10 @@ pub struct Step {
     /// object of these fields, checked, so later steps can use `name.field`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reply: Vec<Field>,
+    /// The fields this step's result was found to have, by a model looking at a real one. Only
+    /// the editor reads it, to offer them by name; the engine never does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<Field>,
     /// switch: run every case that matches, in order, not only the first.
     #[serde(default, skip_serializing_if = "is_false")]
     pub all: bool,

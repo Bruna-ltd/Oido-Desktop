@@ -6,6 +6,7 @@
 pub mod compile;
 pub mod cond;
 pub mod definition;
+pub mod discover;
 pub mod editor;
 pub mod engine;
 pub mod examples;

@@ -111,7 +111,12 @@ type Ran = (
     Vec<crate::delegate::Taken>,
 );
 
-fn ask(p: &Prep, cancel: &AtomicBool, system: &str, message: &str) -> Result<Completion, String> {
+pub(crate) fn ask(
+    p: &Prep,
+    cancel: &AtomicBool,
+    system: &str,
+    message: &str,
+) -> Result<Completion, String> {
     let request = Request {
         model: p.model.clone(),
         system: Some(system.to_owned()),
@@ -349,11 +354,21 @@ impl App {
     // ---- what a model call or a run needs
 
     pub(crate) fn prepare_model(&self, agent_id: &str) -> Result<Prep, String> {
+        self.prepare_model_with(agent_id, None)
+    }
+
+    /// The same, on `chosen` when there is one, not the agent's own model.
+    pub(crate) fn prepare_model_with(
+        &self,
+        agent_id: &str,
+        chosen: Option<&crate::models::ModelRef>,
+    ) -> Result<Prep, String> {
         let agent = self
             .roster
             .agent_ref(agent_id)
             .ok_or("That agent is gone.")?;
-        let ModelStatus::Ready(model) = self.providers.status(agent.model.as_ref()) else {
+        let ModelStatus::Ready(model) = self.providers.status(chosen.or(agent.model.as_ref()))
+        else {
             return Err(format!(
                 "{} has no model that can answer. Choose one first.",
                 agent.name

@@ -325,7 +325,7 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                             .key("wfg-settings"),
                     ),
                 )
-                .child(step_actions(s, &at, k))
+                .child(step_actions(s, ed, &at, node, k, layer))
                 .child(card(s, ed, &at, node, len, false, k, layer))
                 .children(workflow_graph::run_panel(s, ed, &at, k));
         }
@@ -339,7 +339,7 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
 
 /// Runs the selected step for real, after the results of the ones before it, so what it made can
 /// be seen under it and the next step can use it.
-fn step_actions(s: &App, at: &Loc, k: &Kit) -> El {
+fn step_actions(s: &App, ed: &Editor, at: &Loc, node: &Node, k: &Kit, layer: &mut Vec<El>) -> El {
     let t = &s.wf_test;
     let nested = !at.place.is_empty();
     let go = at.clone();
@@ -380,6 +380,80 @@ fn step_actions(s: &App, at: &Loc, k: &Kit) -> El {
             text(why.clone())
                 .font(k.ty.small)
                 .color(k.c.warning.icon)
+                .wrap(),
+        );
+    }
+    out.child(discover(s, ed, at, node, k, layer))
+}
+
+/// Finding the fields of a step's result: a model of the person's choice looks at the result the
+/// step made when it was tried, and what it finds is offered by name after the step.
+fn discover(s: &App, _ed: &Editor, at: &Loc, node: &Node, k: &Kit, layer: &mut Vec<El>) -> El {
+    use super::model_picker::ModelPicker;
+    let c = &k.c;
+    let m = &s.wf_mapper;
+    let go = at.clone();
+    let picker = ModelPicker::new("wf-mapper-model", s.providers.groups())
+        .current(
+            m.model.clone(),
+            m.model.as_ref().map(|x| s.providers.model_name(x)),
+        )
+        .placeholder("Same model as the agent".to_owned())
+        .label("Model that looks at the result")
+        .clearable(true)
+        .on_open(|s: &mut App| s.models_opened())
+        .build(
+            k,
+            layer,
+            &m.picker,
+            |s: &mut App| &mut s.wf_mapper.picker,
+            |s: &mut App, v| s.wf_mapper.model = v,
+        )
+        .key("wf-mapper-model");
+    let mut out = col()
+        .w_full()
+        .gap(6.0)
+        .child(
+            text("Fields of the result")
+                .font(k.ty.small_medium)
+                .color(c.text_muted),
+        )
+        .child(picker)
+        .child(
+            row().child(
+                small(
+                    if m.running {
+                        "Looking…"
+                    } else {
+                        "Discover fields"
+                    },
+                    ButtonVariant::Outline,
+                )
+                .disabled(m.running)
+                .on_press(move |s: &mut App| s.discover_fields(&go))
+                .build(k)
+                .key("wfg-step-discover")
+                .help("Execute the step, then a model looks at what it made and lists its fields, which later boxes offer by name"),
+            ),
+        );
+    if !node.found.is_empty() {
+        let list: Vec<String> = node
+            .found
+            .iter()
+            .map(|f| format!("{} ({})", f.name, f.kind.label()))
+            .collect();
+        out = out.child(
+            text(format!("Found: {}", list.join(", ")))
+                .font(k.ty.small)
+                .color(c.text_faint)
+                .wrap(),
+        );
+    }
+    if let Some(why) = &m.notice {
+        out = out.child(
+            text(why.clone())
+                .font(k.ty.small)
+                .color(c.text_muted)
                 .wrap(),
         );
     }

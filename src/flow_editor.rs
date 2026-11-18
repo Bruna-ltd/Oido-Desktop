@@ -37,6 +37,16 @@ pub struct TestRun {
     pub memos: Option<StepMemos>,
 }
 
+/// The model that finds the fields of a step's result, and how the last try went.
+#[derive(Default)]
+pub struct Mapper {
+    /// None: the workflow's agent's own.
+    pub model: Option<crate::models::ModelRef>,
+    pub picker: crate::picker::PickerState,
+    pub running: bool,
+    pub notice: Option<String>,
+}
+
 /// The results of the top-level steps tried so far, each with the step as it was then.
 pub struct StepMemos {
     inputs: Value,
@@ -605,6 +615,73 @@ impl App {
             .into_iter()
             .find(|t| t.name == tool)
             .map(|t| t.schema)
+    }
+
+    /// Has a model look at the result the step at `at` made when it was tried, and keep the fields
+    /// it finds on the step, so boxes after it can offer them by name. The model is the one
+    /// chosen for it, or else the workflow's agent's.
+    pub fn discover_fields(&mut self, at: &Loc) {
+        if self.wf_test.running.is_some() || self.wf_mapper.running {
+            return;
+        }
+        let Some(ed) = &self.wf_editor else { return };
+        let say = |app: &mut App, why: &str| app.wf_mapper.notice = Some(why.to_owned());
+        self.wf_mapper.notice = None;
+        if !at.place.is_empty() {
+            return say(
+                self,
+                "Pick a step in the main list: its result is what is looked at.",
+            );
+        }
+        let result = self
+            .wf_test
+            .memos
+            .as_ref()
+            .and_then(|m| m.steps.get(at.index))
+            .and_then(|(_, memo)| memo.bound.as_ref())
+            .map(|(_, v)| v.clone());
+        let Some(result) = result else {
+            return say(
+                self,
+                "Execute the step first, with a name for its result under Advanced. A model looks at what it made.",
+            );
+        };
+        let message = match crate::workflow::discover::message(&result) {
+            Ok(m) => m,
+            Err(why) => return say(self, &why),
+        };
+        let agent_id = ed.agent_id.clone();
+        let prep = match self.prepare_model_with(&agent_id, self.wf_mapper.model.as_ref()) {
+            Ok(p) => p,
+            Err(why) => return say(self, &why),
+        };
+        self.wf_mapper.running = true;
+        let at = at.clone();
+        self.spawn(
+            move || {
+                let cancel = AtomicBool::new(false);
+                crate::flows::ask(&prep, &cancel, crate::workflow::discover::SYSTEM, &message)
+                    .and_then(|c| crate::workflow::discover::read(&c.text, &result))
+            },
+            move |app, found| {
+                app.wf_mapper.running = false;
+                match found {
+                    Ok(fields) => {
+                        let n = fields.len();
+                        if let Some(node) = app.wf_editor.as_mut().and_then(|e| e.node_mut(&at)) {
+                            node.found = fields;
+                            app.wf_mapper.notice = Some(format!(
+                                "Found {n} field{}. They are offered under Use a result.",
+                                if n == 1 { "" } else { "s" }
+                            ));
+                        } else {
+                            app.wf_mapper.notice = Some("That step is gone.".to_owned());
+                        }
+                    }
+                    Err(why) => app.wf_mapper.notice = Some(why),
+                }
+            },
+        );
     }
 
     pub fn editor_add_reply(&mut self, at: &Loc) {

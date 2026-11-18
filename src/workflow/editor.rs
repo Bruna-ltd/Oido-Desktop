@@ -345,6 +345,8 @@ pub struct Node {
     pub all: bool,
     /// For an AI step: the fields to answer with; none means plain text.
     pub reply: Vec<ReplyRow>,
+    /// The fields the result of the step was found to have, whatever the kind of step.
+    pub found: Vec<Field>,
     /// One per [`specs`] of the kind.
     pub fields: Vec<TextEdit>,
     pub blocks: Vec<Block>,
@@ -615,6 +617,7 @@ impl Node {
             go_on: false,
             all: false,
             reply: Vec::new(),
+            found: Vec::new(),
             fields: specs(kind).iter().map(|_| TextEdit::new("")).collect(),
             blocks,
             when: matches!(kind, IF | WHILE).then(Comparison::default),
@@ -684,6 +687,7 @@ impl Node {
     pub fn from_step(s: &Step) -> Node {
         let mut n = Node::new(&s.kind, s.id.clone());
         n.bind = TextEdit::new(s.bind.clone().unwrap_or_default());
+        n.found = s.found.clone();
         let text = |o: &Option<String>| o.clone().unwrap_or_default();
         match s.kind.as_str() {
             TOOL => {
@@ -817,6 +821,7 @@ impl Node {
             id: self.id.text.trim().to_owned(),
             kind: self.kind.clone(),
             bind: opt(&self.bind).map(|b| b.trim().to_owned()),
+            found: self.found.clone(),
             ..Step::default()
         };
         match self.kind.as_str() {
@@ -1638,7 +1643,26 @@ impl Editor {
                             label: format!("{what_it_is}: {what}"),
                             source: Source::Step {
                                 at: loc.clone(),
-                                suffix,
+                                suffix: (*suffix).to_owned(),
+                            },
+                        });
+                    }
+                    // What the step answers with, or was found to hold, by name.
+                    let fields: Vec<&str> = if node.kind == GENERATE && !node.reply.is_empty() {
+                        node.reply
+                            .iter()
+                            .map(|r| r.name.text.trim())
+                            .filter(|n| !n.is_empty())
+                            .collect()
+                    } else {
+                        node.found.iter().map(|f| f.name.as_str()).collect()
+                    };
+                    for name in fields {
+                        out.push(Found {
+                            label: format!("Field {name} of: {what}"),
+                            source: Source::Step {
+                                at: loc.clone(),
+                                suffix: format!(".{name}"),
                             },
                         });
                     }
@@ -1761,7 +1785,7 @@ pub enum Source {
     /// A name that is there already: an input, a loop's item, the name a step keeps its result as.
     Name(String),
     /// The result of a step, or a part of it (`.stdout`).
-    Step { at: Loc, suffix: &'static str },
+    Step { at: Loc, suffix: String },
 }
 
 /// A name for the result of `node`, from what it is, that none in `taken` is.
@@ -2381,6 +2405,47 @@ mod tests {
             e.names(&here, None),
             ["inputs.folder", "command", "files", "text"]
         );
+    }
+
+    #[test]
+    fn the_fields_a_step_answers_with_or_was_found_to_hold_are_offered_by_name_after_it() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], GENERATE);
+        e.add(&vec![], TOOL);
+        e.steps[0].reply = vec![ReplyRow {
+            name: TextEdit::new("score"),
+            kind: FieldKind::Number,
+        }];
+        e.steps[1].found = vec![Field {
+            name: "stdout".into(),
+            kind: FieldKind::Text,
+        }];
+        e.add(&vec![], GENERATE);
+        let here = at(&[], 2);
+        let labels: Vec<String> = e
+            .results(&here, None)
+            .into_iter()
+            .map(|f| f.label)
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.starts_with("Field score of: ")),
+            "{labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.starts_with("Field stdout of: ")),
+            "{labels:?}"
+        );
+        // What was found is kept in the saved step and comes back.
+        let step = e.steps[1].to_step("2", &mut Vec::new());
+        assert_eq!(step.found.len(), 1);
+        assert_eq!(Node::from_step(&step).found[0].name, "stdout");
+        // Using one names the result and reaches into it.
+        let found = e
+            .results(&here, None)
+            .into_iter()
+            .find(|f| f.label.starts_with("Field score of: "))
+            .unwrap();
+        assert!(e.resolve(&found.source).unwrap().ends_with(".score"));
     }
 
     #[test]
