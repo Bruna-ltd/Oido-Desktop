@@ -98,6 +98,9 @@ pub(crate) struct McpTool {
     /// The name the server knows it by.
     pub tool: String,
     pub target: crate::mcp::client::Target,
+    /// The Google sign-in, for a built-in extension: it is called through its own code, not
+    /// reached as a server.
+    pub account: Option<crate::extensions::google::Account>,
 }
 
 /// What a run gave back: how it went, and the sign-in tokens MCP servers renewed on the way, to be
@@ -206,8 +209,12 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
             return done;
         }
         if let Some(m) = p.mcp.iter().find(|m| m.name == name) {
-            let done =
-                crate::mcp::client::call_tool(m.target.clone(), &m.tool, args.clone(), cancel);
+            let done = match (&m.account, crate::extensions::find(&m.target.id)) {
+                (Some(account), Some(ext)) => {
+                    crate::extensions::google::call(ext, &m.tool, args, account.clone(), cancel)
+                }
+                _ => crate::mcp::client::call_tool(m.target.clone(), &m.tool, args.clone(), cancel),
+            };
             if let (Some(tokens), Ok(mut kept)) = (done.tokens, renewed.lock()) {
                 kept.push((m.target.id.clone(), tokens));
             }
@@ -406,10 +413,30 @@ impl App {
                     server.name
                 ));
             }
+            let account = if server.is_extension() {
+                match self
+                    .store
+                    .as_ref()
+                    .map(|db| db.extension_account(crate::extensions::google::PROVIDER))
+                {
+                    Some(Ok(Some(a))) => Some(a),
+                    Some(Err(e)) => {
+                        return Err(format!("The saved Google account could not be read: {e}"));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "This workflow uses {name}, but there is no Google account. Add one on the Extensions page."
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
             prep.mcp.push(McpTool {
                 name: name.clone(),
                 tool: tool.name.clone(),
                 target: self.mcp_target_for(&server.id)?,
+                account,
             });
         }
         let team = self.team_named(def, &prep.flows);
@@ -813,7 +840,11 @@ impl App {
             move || work(&def, go, &prep, &cancel, watch.as_ref()),
             move |app, (outcome, renewed, handed)| {
                 for (server, tokens) in renewed {
-                    app.mcp_keep_tokens(&server, tokens, false);
+                    if crate::extensions::find(&server).is_some() {
+                        app.ext_keep_tokens(tokens);
+                    } else {
+                        app.mcp_keep_tokens(&server, tokens, false);
+                    }
                 }
                 for taken in handed {
                     app.record_taken(taken);
@@ -1493,6 +1524,46 @@ mod tests {
             .unwrap();
         assert!(why.contains("no MCP server offers"), "{why}");
         let _ = std::fs::remove_file(script);
+    }
+
+    #[test]
+    fn a_step_reaches_an_extension_through_its_account_not_as_a_server() {
+        let db = TempDb::new();
+        let (mut app, _seen) = app_with_server(&db, vec![]);
+        app.ext.settings.insert(
+            "gmail".into(),
+            crate::store::Setting {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        app.rebuild_extension_servers();
+        let call = Step {
+            id: "find".into(),
+            kind: "tool".into(),
+            tool: Some("mcp__gmail__search".into()),
+            args: json!({"query": "is:unread"}).as_object().cloned(),
+            bind: Some("mail".into()),
+            ..Step::default()
+        };
+        let w = save_workflow(&mut app, vec![call], json!({}));
+        // No Google account: said before the run, in words about the account.
+        let why = app
+            .prepare_flow(&w.agent_id, Some(&w.id), &w.definition)
+            .err()
+            .unwrap();
+        assert!(why.contains("no Google account"), "{why}");
+        // With one, the call is carried by its sign-in, not by the server client.
+        let account = crate::extensions::google::Account::default();
+        app.store
+            .as_ref()
+            .unwrap()
+            .save_extension_account(crate::extensions::google::PROVIDER, &account)
+            .unwrap();
+        let prep = app
+            .prepare_flow(&w.agent_id, Some(&w.id), &w.definition)
+            .unwrap();
+        assert!(prep.mcp[0].account.is_some());
     }
 
     #[cfg(unix)]

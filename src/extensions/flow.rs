@@ -65,7 +65,7 @@ impl AccountView {
 }
 
 pub struct Extensions {
-    settings: BTreeMap<String, Setting>,
+    pub(crate) settings: BTreeMap<String, Setting>,
     pub account: AccountView,
     /// The client id and secret being typed.
     pub client_id: TextEdit,
@@ -353,7 +353,7 @@ impl App {
     }
 
     /// Saves a sign-in that was renewed during a call.
-    fn ext_keep_tokens(&mut self, tokens: oauth::Tokens) {
+    pub(crate) fn ext_keep_tokens(&mut self, tokens: oauth::Tokens) {
         let Some(db) = &self.store else { return };
         match db.extension_account(google::PROVIDER) {
             Ok(Some(mut account)) => {
