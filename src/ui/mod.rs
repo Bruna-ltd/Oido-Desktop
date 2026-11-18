@@ -45,6 +45,12 @@ pub fn wait_for_logos(urls: &[&str]) {
     logo::wait_all(urls);
 }
 
+/// Waits for the providers' logos to decode, for a headless picture of the page.
+#[cfg(debug_assertions)]
+pub fn wait_for_provider_logos(ids: &[&str]) {
+    logo::wait_providers(ids);
+}
+
 /// Waits for the extensions' logos to decode, for a headless picture of the screen.
 #[cfg(debug_assertions)]
 pub fn wait_for_extension_logos() {

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rune::color::hex;
 use rune::{El, ImageCache, row};
 use rune_kit::Kit;
 
@@ -25,29 +26,48 @@ thread_local! {
 #[derive(Default)]
 struct Logos {
     cache: Option<ImageCache>,
-    loaded: HashMap<&'static str, Loaded>,
+    loaded: HashMap<usize, Loaded>,
+}
+
+/// The decoder: a logo that finishes decoding asks the window for another frame.
+fn new_cache() -> ImageCache {
+    ImageCache::new(Arc::new(|| {
+        if let Some(app) = crate::app::handle() {
+            app.update(|_, _| {});
+        }
+    }))
 }
 
 impl Logos {
     fn image(&mut self, name: &'static str, logo: Logo) -> &Loaded {
-        if !self.loaded.contains_key(name) {
-            let cache = self.cache.get_or_insert_with(|| {
-                // A logo that finishes decoding asks the window for another frame.
-                ImageCache::new(Arc::new(|| {
-                    if let Some(app) = crate::app::handle() {
-                        app.update(|_, _| {});
-                    }
-                }))
-            });
+        let key = name.as_ptr() as usize;
+        if !self.loaded.contains_key(&key) {
+            let cache = self.cache.get_or_insert_with(new_cache);
             let image = match logo {
                 Logo::Image(bytes) => cache.load(bytes),
                 Logo::Mark { color, path } => {
                     cache.svg(mark(color, path).into_bytes(), SIDE, SCALE)
                 }
             };
-            self.loaded.insert(name, image);
+            self.loaded.insert(key, image);
         }
-        &self.loaded[name]
+        &self.loaded[&key]
+    }
+}
+
+impl Logos {
+    /// A provider's logo, an SVG (drawn at the size it shows at) or a PNG, decoded once.
+    fn art(&mut self, bytes: &'static [u8]) -> &Loaded {
+        let cache = self.cache.get_or_insert_with(new_cache);
+        self.loaded
+            .entry(bytes.as_ptr() as usize)
+            .or_insert_with(|| {
+                if bytes.starts_with(b"\x89PNG") {
+                    cache.load(bytes)
+                } else {
+                    cache.svg(bytes, GLYPH, SCALE)
+                }
+            })
     }
 }
 
@@ -55,6 +75,67 @@ impl Logos {
 fn mark(color: &str, path: &str) -> String {
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#fff"/><g transform="translate(4.5 4.5) scale(0.625)"><path fill="{color}" d="{path}"/></g></svg>"##
+    )
+}
+
+/// Inside a provider's tile, the logo is drawn this big.
+const GLYPH: f32 = 22.0;
+
+/// A provider's logo: its SVG or PNG, and the tile it sits on (`None`: the provider's own colour).
+fn provider_art(id: &str) -> Option<(&'static [u8], Option<&'static str>)> {
+    Some(match id {
+        "openai" => (include_bytes!("../../assets/providers/openai.svg"), None),
+        "codex" => (
+            include_bytes!("../../assets/providers/codex.svg"),
+            Some("#ffffff"),
+        ),
+        "anthropic" => (include_bytes!("../../assets/providers/anthropic.svg"), None),
+        "gemini" => (
+            include_bytes!("../../assets/providers/gemini.svg"),
+            Some("#ffffff"),
+        ),
+        "openrouter" => (
+            include_bytes!("../../assets/providers/openrouter.svg"),
+            None,
+        ),
+        "nvidia" => (
+            include_bytes!("../../assets/providers/nvidia.svg"),
+            Some("#000000"),
+        ),
+        "deepseek" => (
+            include_bytes!("../../assets/providers/deepseek.svg"),
+            Some("#ffffff"),
+        ),
+        "mistral" => (
+            include_bytes!("../../assets/providers/mistral.svg"),
+            Some("#ffffff"),
+        ),
+        "kimi" => (
+            include_bytes!("../../assets/providers/kimi.svg"),
+            Some("#000000"),
+        ),
+        "qwen" => (include_bytes!("../../assets/providers/qwen.svg"), None),
+        "typesafe" => (
+            include_bytes!("../../assets/providers/typesafe.png"),
+            Some("#ffffff"),
+        ),
+        _ => return None,
+    })
+}
+
+/// The tile of the provider `id`, whose own colour is `color`, with its logo on it; `None` for a
+/// provider with no logo, which gets its initial instead.
+pub fn provider(id: &str, color: &str, k: &Kit) -> Option<El> {
+    let (svg, tile) = provider_art(id)?;
+    let image = LOGOS.with(|l| l.borrow_mut().art(svg).pixels().clone());
+    Some(
+        row()
+            .size(SIDE, SIDE)
+            .radius(10.0)
+            .center()
+            .fill(hex(tile.unwrap_or(color)).unwrap_or(k.c.layer_03))
+            .border(1.0, k.c.border_muted)
+            .child(row().size(GLYPH, GLYPH).pixels(&image)),
     )
 }
 
@@ -97,6 +178,17 @@ pub fn wait_all(urls: &[&str]) {
             if let Some((name, logo)) = logo_for(url) {
                 let _ = l.image(name, logo).wait();
             }
+        }
+    });
+}
+
+/// Waits for the providers' logos, so a headless picture of the page has them.
+#[cfg(debug_assertions)]
+pub fn wait_providers(ids: &[&str]) {
+    LOGOS.with(|l| {
+        let mut l = l.borrow_mut();
+        for (svg, _) in ids.iter().filter_map(|id| provider_art(id)) {
+            let _ = l.art(svg).wait();
         }
     });
 }

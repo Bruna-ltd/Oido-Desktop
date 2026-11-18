@@ -1601,7 +1601,17 @@ pub static SCENES: &[Scene] = &[
         load_samples(s);
         s.roster.confirm = Some(Target::agent("forge"));
     }),
-    ("providers", |s| s.route = Route::Providers),
+    ("providers-open", |s| {
+        s.route = Route::Providers;
+        s.providers.open = Some("anthropic".into());
+        let ids: Vec<&str> = s.providers.list.iter().map(|p| p.id.as_str()).collect();
+        crate::ui::wait_for_provider_logos(&ids);
+    }),
+    ("providers", |s| {
+        s.route = Route::Providers;
+        let ids: Vec<&str> = s.providers.list.iter().map(|p| p.id.as_str()).collect();
+        crate::ui::wait_for_provider_logos(&ids);
+    }),
     ("provider-form", |s| {
         s.route = Route::Providers;
         s.providers.toggle("openai");
