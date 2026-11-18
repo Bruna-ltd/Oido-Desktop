@@ -1344,6 +1344,18 @@ pub static SCENES: &[Scene] = &[
         }
     }),
     ("workflow-graph", |s| graph_scene(s)),
+    ("workflow-trigger", |s| {
+        graph_scene(s);
+        // Live as an older copy, with a schedule asked for in the draft.
+        if let Some(w) = s.workflows.first_mut() {
+            w.published = Some(crate::workflow::Published {
+                definition: Default::default(),
+                at: app::now() - 3600,
+            });
+        }
+        s.editor_set_schedule(true);
+        s.select_trigger();
+    }),
     ("workflow-drag", |s| {
         use crate::flow_graph::StepDrag;
         use crate::workflow::editor::Loc;

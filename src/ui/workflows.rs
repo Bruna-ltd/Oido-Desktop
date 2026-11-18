@@ -123,8 +123,9 @@ fn item(s: &App, w: &Saved, k: &Kit) -> El {
         )
         .child(
             text(format!(
-                "{agent} · {} steps",
-                crate::workflow::editor::step_count(&w.definition)
+                "{agent} · {} steps{}",
+                crate::workflow::editor::step_count(&w.definition),
+                if w.live().is_none() { " · draft" } else { "" }
             ))
             .font(k.ty.small)
             .color(c.text_muted)
@@ -175,6 +176,15 @@ fn detail(s: &App, k: &Kit) -> El {
                 .font(k.ty.body_medium)
                 .color(c.text_base),
         );
+    // Only the published copy runs for real; the page's Run button runs that one.
+    let state = match (w.live(), w.has_unpublished_changes()) {
+        (None, _) => {
+            "Draft: not published, so agents and schedules cannot run it. Publish it in the editor."
+        }
+        (Some(_), true) => "Published. The draft has changes that are not published yet.",
+        (Some(_), false) => "Published.",
+    };
+    out = out.child(text(state).font(k.ty.small).color(c.text_muted).wrap());
     if !w.goal.is_empty() {
         out = out.child(
             text(w.goal.clone())

@@ -14,6 +14,7 @@ use super::definition::{
     validate,
 };
 use super::{Published, Saved};
+use crate::schedules::form::TimingForm;
 
 /// How a text box is checked and what can be put into it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -928,7 +929,7 @@ pub struct Editor {
     pub success: TextEdit,
     pub inputs: Vec<InputRow>,
     pub steps: Vec<Node>,
-    pub trigger: Trigger,
+    pub trigger: TriggerEdit,
     /// The live copy, kept so saving a draft does not lose it.
     published: Option<Published>,
     /// What is wrong, as of the last check.
@@ -937,6 +938,74 @@ pub struct Editor {
     /// change was. Typing in a box is not one: it has the box's own undo.
     undo: Vec<(String, Vec<Node>)>,
     redo: Vec<(String, Vec<Node>)>,
+}
+
+/// What starts the workflow, as typed: manual, or a schedule with a value for each input.
+#[derive(Debug)]
+pub struct TriggerEdit {
+    pub schedule: bool,
+    pub timing: TimingForm,
+    /// A value per input, by the input's name; an input with no box typed in gets its default.
+    pub inputs: BTreeMap<String, TextEdit>,
+}
+
+impl TriggerEdit {
+    pub fn manual() -> TriggerEdit {
+        TriggerEdit {
+            schedule: false,
+            timing: TimingForm::new(),
+            inputs: BTreeMap::new(),
+        }
+    }
+
+    pub fn of(t: &Trigger) -> TriggerEdit {
+        match t {
+            Trigger::Manual => TriggerEdit::manual(),
+            Trigger::Schedule { timing, inputs } => TriggerEdit {
+                schedule: true,
+                timing: TimingForm::of(timing, &chrono::Local),
+                inputs: inputs
+                    .iter()
+                    .map(|(name, v)| (name.clone(), TextEdit::new(super::template::as_text(v))))
+                    .collect(),
+            },
+        }
+    }
+
+    /// Switches between manual and a schedule. A new "every" schedule starts counting now, so
+    /// reading it again gives the same timing.
+    pub fn set_schedule(&mut self, on: bool, now: i64) {
+        self.schedule = on;
+        if on && self.timing.every_start.is_none() {
+            self.timing.every_start = Some(now);
+        }
+    }
+
+    /// The trigger as typed. What is wrong with it goes in `bad`.
+    fn read(&self, inputs: &BTreeMap<String, Input>, bad: &mut Vec<String>) -> Trigger {
+        if !self.schedule {
+            return Trigger::Manual;
+        }
+        let now = crate::app::now();
+        let timing = match self.timing.read(now, &chrono::Local) {
+            Ok(t) => t,
+            Err(why) => {
+                bad.push(format!("trigger: {why}"));
+                return Trigger::Manual;
+            }
+        };
+        let given = inputs
+            .keys()
+            .filter_map(|name| {
+                let text = self.inputs.get(name)?.text.trim().to_owned();
+                (!text.is_empty()).then(|| (name.clone(), Value::String(text)))
+            })
+            .collect();
+        Trigger::Schedule {
+            timing,
+            inputs: given,
+        }
+    }
 }
 
 /// How many changes can be taken back.
@@ -952,7 +1021,7 @@ impl Editor {
             success: TextEdit::new(""),
             inputs: Vec::new(),
             steps: Vec::new(),
-            trigger: Trigger::Manual,
+            trigger: TriggerEdit::manual(),
             published: None,
             problems: Vec::new(),
             undo: Vec::new(),
@@ -987,7 +1056,7 @@ impl Editor {
                 })
                 .collect(),
             steps: d.steps.iter().map(Node::from_step).collect(),
-            trigger: d.trigger.clone(),
+            trigger: TriggerEdit::of(&d.trigger),
             published: w.published.clone(),
             problems: Vec::new(),
             undo: Vec::new(),
@@ -1036,6 +1105,7 @@ impl Editor {
                 bad.push(format!("input {name:?} is there twice"));
             }
         }
+        let trigger = self.trigger.read(&inputs, &mut bad);
         let steps = self
             .steps
             .iter()
@@ -1046,12 +1116,17 @@ impl Editor {
             inputs,
             steps,
             success: self.success.text.trim().to_owned(),
-            trigger: self.trigger.clone(),
+            trigger,
         };
         if let Err(more) = validate(&def) {
             bad.extend(more);
         }
         if bad.is_empty() { Ok(def) } else { Err(bad) }
+    }
+
+    /// The live copy changed (published or taken down) while the editor was open.
+    pub fn set_published(&mut self, published: Option<Published>) {
+        self.published = published;
     }
 
     /// Looks again at what is typed and keeps what is wrong with it.
@@ -2250,5 +2325,52 @@ mod tests {
         e.text_mut(&Target::Field(here.clone(), 0)).unwrap().text = "x.trimmed() != \"\"".into();
         assert!(e.condition_in_parts(&here));
         assert_eq!(e.steps[0].when.as_ref().unwrap().op, Op::IsNotEmpty);
+    }
+
+    #[test]
+    fn a_schedule_trigger_is_typed_checked_and_comes_back_as_it_was_saved() {
+        let mut e = Editor::from_saved(&saved(every_kind()));
+        assert!(!e.trigger.schedule);
+        assert_eq!(e.definition().unwrap().trigger, Trigger::Manual);
+
+        // Choosing a schedule makes it daily at 09:00 until the boxes say otherwise.
+        e.trigger.set_schedule(true, 1_000);
+        e.trigger.timing.at = TextEdit::new("07:30");
+        e.trigger
+            .inputs
+            .insert("folder".into(), TextEdit::new(" inbox "));
+        // A value for something that is not an input, or left empty, is not kept.
+        e.trigger.inputs.insert("gone".into(), TextEdit::new("x"));
+        e.trigger.inputs.insert("n".into(), TextEdit::new(" "));
+        let def = e.definition().unwrap();
+        let Trigger::Schedule { timing, inputs } = &def.trigger else {
+            panic!("not a schedule: {:?}", def.trigger);
+        };
+        assert_eq!(timing.describe(&chrono::Utc), "every day at 07:30");
+        assert_eq!(
+            inputs,
+            json!({"folder": "inbox"}).as_object().unwrap(),
+            "only the workflow's own inputs, as typed"
+        );
+
+        // Saved and opened again, it is the same boxes and reads the same.
+        let mut w = saved(every_kind());
+        w.definition = def.clone();
+        let again = Editor::from_saved(&w);
+        assert!(again.trigger.schedule);
+        assert_eq!(again.definition().unwrap().trigger, def.trigger);
+
+        // An "every" schedule keeps its grid: reading twice gives one timing.
+        e.trigger.timing.when = crate::schedules::form::When::Every;
+        e.trigger.timing.every = TextEdit::new("15");
+        let (a, b) = (e.definition().unwrap(), e.definition().unwrap());
+        assert_eq!(a.trigger, b.trigger);
+
+        // What cannot be read is said, and back to manual there is nothing to say.
+        e.trigger.timing.every = TextEdit::new("soon");
+        let why = e.definition().unwrap_err().join(" ");
+        assert!(why.contains("trigger") && why.contains("minutes"), "{why}");
+        e.trigger.set_schedule(false, 1_000);
+        assert_eq!(e.definition().unwrap().trigger, Trigger::Manual);
     }
 }

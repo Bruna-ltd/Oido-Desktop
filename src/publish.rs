@@ -118,6 +118,7 @@ fn is_for(s: &Schedule, id: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use serde_json::json;
 

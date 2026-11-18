@@ -80,7 +80,8 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     for label in &l.labels {
         world = world.child(chip(label, k));
     }
-    world = world.child(start(&l.start, k));
+    let chosen = g.on_trigger && selected.is_none();
+    world = world.child(start(&l.start, ed.trigger.schedule, chosen, k));
     for gap in l.gaps.iter().filter(|g| shows(s, g, selected.as_ref())) {
         world = world.child(add_button(s, gap, k, layer));
     }
@@ -127,7 +128,27 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
         })
         .on_press(|s: &mut App| s.select_step(None))
         .child(world)
+        .child(execute(s, k))
         .child(menu(s, k, layer))
+}
+
+/// Runs the workflow as it stands, for real, along the bottom of the drawing.
+fn execute(s: &App, k: &Kit) -> El {
+    let running = s.wf_test.running.is_some();
+    let button = Button::new(if running { "Stop" } else { "Execute workflow" })
+        .variant(ButtonVariant::Submit)
+        .control_size(ControlSize::Small)
+        .help("Runs the draft with its steps for real. Nothing is published or saved.");
+    let button = if running {
+        button.on_press(|s: &mut App| s.stop_test())
+    } else {
+        button.on_press(|s: &mut App| s.test_editor())
+    };
+    row()
+        .key("wfg-execute")
+        .pin(Some(0.0), None, Some(0.0), Some(16.0))
+        .justify_center()
+        .child(button.build(k))
 }
 
 /// A key in the drawing: arrows move the selection; Option and an arrow moves the step; Delete
@@ -553,13 +574,26 @@ fn chip(label: &Label, k: &Kit) -> El {
         )
 }
 
-fn start(r: &Rect, k: &Kit) -> El {
+/// The Trigger node: what starts the workflow. Pressing it opens its form.
+fn start(r: &Rect, schedule: bool, selected: bool, k: &Kit) -> El {
     let c = &k.c;
-    pinned(row().key("wfg-start"), r)
+    let what = if schedule { "Schedule" } else { "Manual" };
+    let e = pinned(row().key("wfg-start"), r)
         .radius(k.radius.md)
-        .fill(c.layer_03)
+        .fill(if selected { c.layer_03 } else { c.layer_02 })
+        .border(
+            if selected { 2.0 } else { 1.0 },
+            if selected { c.bg_accent } else { c.border_base },
+        )
         .center()
-        .child(text("Start").font(k.ty.small).color(c.text_base))
+        .role("button")
+        .label(format!(
+            "Trigger: {what}. Press to change what starts this workflow."
+        ))
+        .help("What starts this workflow")
+        .on_press(|s: &mut App| s.select_trigger())
+        .child(text(what).font(k.ty.small).color(c.text_base));
+    k.interactive(e)
 }
 
 /// A line above the drawing while a run is on it: which run, how far it got, and, if it waits for

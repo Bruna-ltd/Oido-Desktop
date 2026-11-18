@@ -264,12 +264,21 @@ impl App {
     /// Saves the workflow in the editor if it is good, and closes the editor; otherwise says what
     /// is wrong and stays open.
     pub fn save_editor(&mut self) {
-        let Some(ed) = &mut self.wf_editor else {
-            return;
-        };
+        if let Some(id) = self.persist_editor() {
+            self.wf_editor = None;
+            self.wf_menu = None;
+            self.reset_test();
+            self.select_workflow(&id);
+        }
+    }
+
+    /// Saves the draft and leaves the editor open. Returns the workflow's id, or `None` if it
+    /// is not fit to save (what is wrong is in the editor).
+    fn persist_editor(&mut self) -> Option<String> {
+        let ed = self.wf_editor.as_mut()?;
         ed.check();
         if !ed.problems.is_empty() {
-            return;
+            return None;
         }
         let existing = ed
             .workflow
@@ -277,15 +286,14 @@ impl App {
             .and_then(|id| self.workflows.iter().find(|w| &w.id == id));
         let created = existing.map_or_else(now, |w| w.created_at);
         let id = ed.workflow.clone().unwrap_or_else(new_id);
-        let Ok(saved) = ed.saved(&id, created) else {
-            return;
-        };
+        let saved = ed.saved(&id, created).ok()?;
         let is_new = existing.is_none();
+        // What the draft calls must at least exist; whether it is live is for publishing.
         if let Err(why) = self.flow_closure(&saved.agent_id, Some(&id), &saved.definition) {
             if let Some(ed) = &mut self.wf_editor {
                 ed.problems = vec![why];
             }
-            return;
+            return None;
         }
         self.save("the workflow", |db| {
             if is_new {
@@ -294,11 +302,79 @@ impl App {
                 db.update_workflow(&saved)
             }
         });
-        self.wf_editor = None;
-        self.wf_menu = None;
-        self.reset_test();
+        if let Some(ed) = &mut self.wf_editor {
+            ed.workflow = Some(id.clone());
+        }
         self.reload_workflows();
-        self.select_workflow(&id);
+        Some(id)
+    }
+
+    #[cfg(test)]
+    pub fn save_editor_keep_open_for_test(&mut self) {
+        self.persist_editor();
+    }
+
+    /// Saves the draft, then makes it the live copy, with the schedule its trigger asks for.
+    pub fn publish_editor(&mut self) {
+        let Some(id) = self.persist_editor() else {
+            return;
+        };
+        let result = self.publish_workflow(&id);
+        self.after_publication(&id, result, "Published.");
+    }
+
+    /// Takes the workflow down: nothing runs it for real, and its schedule stops.
+    pub fn unpublish_editor(&mut self) {
+        let Some(id) = self.wf_editor.as_ref().and_then(|e| e.workflow.clone()) else {
+            return;
+        };
+        let result = self.unpublish_workflow(&id);
+        self.after_publication(
+            &id,
+            result,
+            "Unpublished. Nothing runs it until it is published.",
+        );
+    }
+
+    /// Drops what changed since the last publish: the editor shows the live copy again.
+    pub fn revert_editor(&mut self) {
+        let Some(id) = self.wf_editor.as_ref().and_then(|e| e.workflow.clone()) else {
+            return;
+        };
+        match self.revert_workflow(&id) {
+            Ok(()) => {
+                if let Some(w) = self.workflows.iter().find(|w| w.id == id) {
+                    self.wf_editor = Some(Editor::from_saved(w));
+                }
+                self.wf_graph.selected = None;
+                self.wf_notice = Some("Back to the published version.".to_owned());
+            }
+            Err(why) => self.editor_says(why),
+        }
+    }
+
+    fn after_publication(&mut self, id: &str, result: Result<(), String>, done: &str) {
+        match result {
+            Ok(()) => {
+                let live = self
+                    .workflows
+                    .iter()
+                    .find(|w| w.id == id)
+                    .and_then(|w| w.published.clone());
+                if let Some(ed) = &mut self.wf_editor {
+                    ed.set_published(live);
+                    ed.problems.clear();
+                }
+                self.wf_notice = Some(done.to_owned());
+            }
+            Err(why) => self.editor_says(why),
+        }
+    }
+
+    fn editor_says(&mut self, why: String) {
+        if let Some(ed) = &mut self.wf_editor {
+            ed.problems = vec![why];
+        }
     }
 
     /// Looks again at what is typed.
@@ -320,6 +396,33 @@ impl App {
     pub fn editor_text(&mut self, which: &Target) -> &mut rune::TextEdit {
         match self.wf_editor.as_mut().and_then(|e| e.text_mut(which)) {
             Some(edit) => edit,
+            None => &mut self.wf_stray,
+        }
+    }
+
+    /// Chooses what starts the workflow: you (or an agent), or a schedule.
+    pub fn editor_set_schedule(&mut self, on: bool) {
+        if let Some(ed) = &mut self.wf_editor {
+            ed.trigger.set_schedule(on, now());
+        }
+    }
+
+    /// The trigger's timing boxes.
+    pub fn trigger_timing(&mut self) -> &mut crate::schedules::form::TimingForm {
+        match self.wf_editor.as_mut() {
+            Some(ed) => &mut ed.trigger.timing,
+            None => &mut self.wf_stray_timing,
+        }
+    }
+
+    /// The box for what a scheduled run is given for input `name`.
+    pub fn trigger_input(&mut self, name: &str) -> &mut rune::TextEdit {
+        match self.wf_editor.as_mut() {
+            Some(ed) => ed
+                .trigger
+                .inputs
+                .entry(name.to_owned())
+                .or_insert_with(|| TextEdit::new("")),
             None => &mut self.wf_stray,
         }
     }
@@ -825,5 +928,59 @@ mod tests {
         // Closing the editor forgets it.
         app.cancel_editor();
         assert!(app.wf_test.result.is_none() && app.wf_test.inputs.text.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publishing_from_the_editor_saves_the_draft_first_and_unpublish_and_revert_follow_it() {
+        let db = TempDb::new();
+        let mut app = on_the_page(&db);
+        app.new_workflow();
+        set(&mut app, &Target::Name, "Ping");
+        app.editor_add(&Vec::new(), "Use a tool");
+        set(
+            &mut app,
+            &Target::Param(top(0), "command".into(), ArgKind::Text),
+            "echo one",
+        );
+        // A schedule trigger, every hour.
+        app.editor_set_schedule(true);
+        let t = &mut app.wf_editor.as_mut().unwrap().trigger.timing;
+        t.when = crate::schedules::form::When::Every;
+        t.every = TextEdit::new("60");
+
+        app.publish_editor();
+        let ed = app.wf_editor.as_ref().unwrap();
+        assert!(ed.problems.is_empty(), "{:?}", ed.problems);
+        let id = ed.workflow.clone().unwrap();
+        assert!(app.workflows[0].live().is_some());
+        assert_eq!(app.schedules.len(), 1, "its trigger made a schedule");
+        assert!(app.schedules[0].from_trigger);
+
+        // More changes are a draft only; Revert brings the live copy back into the editor.
+        set(
+            &mut app,
+            &Target::Param(top(0), "command".into(), ArgKind::Text),
+            "echo two",
+        );
+        app.save_editor_keep_open_for_test();
+        assert!(app.workflows[0].has_unpublished_changes());
+        app.revert_editor();
+        assert!(!app.workflows[0].has_unpublished_changes());
+        assert_eq!(
+            app.wf_editor.as_ref().unwrap().workflow.as_deref(),
+            Some(id.as_str())
+        );
+        assert!(app.wf_editor.as_ref().unwrap().trigger.schedule);
+
+        app.unpublish_editor();
+        assert!(app.workflows[0].live().is_none());
+        assert!(app.schedules.is_empty());
+        // What is not fit to run is refused and said, and nothing goes live.
+        app.editor_set_schedule(true);
+        app.wf_editor.as_mut().unwrap().trigger.timing.every = TextEdit::new("soon");
+        app.publish_editor();
+        assert!(!app.wf_editor.as_ref().unwrap().problems.is_empty());
+        assert!(app.workflows[0].live().is_none());
     }
 }

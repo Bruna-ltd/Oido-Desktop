@@ -29,6 +29,8 @@ pub enum View {
 pub struct GraphView {
     pub shown: View,
     pub selected: Option<Loc>,
+    /// The Trigger node is selected, and its form shows.
+    pub on_trigger: bool,
     pub pan: [f32; 2],
     pub zoom: f32,
     pub live_pan: Live<[f32; 2]>,
@@ -79,6 +81,7 @@ impl Default for GraphView {
         GraphView {
             shown: View::default(),
             selected: None,
+            on_trigger: false,
             pan: [0.0, 0.0],
             zoom: 1.0,
             live_pan: Live::new([0.0, 0.0]),
@@ -118,6 +121,14 @@ impl App {
     /// Selects a step, or nothing.
     pub fn select_step(&mut self, at: Option<Loc>) {
         self.wf_graph.selected = at;
+        self.wf_graph.on_trigger = false;
+        self.wf_menu = None;
+    }
+
+    /// Selects the Trigger node.
+    pub fn select_trigger(&mut self) {
+        self.wf_graph.selected = None;
+        self.wf_graph.on_trigger = true;
         self.wf_menu = None;
     }
 

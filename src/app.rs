@@ -138,6 +138,8 @@ pub struct App {
     pub wf_menu: Option<crate::workflow::editor::Menu>,
     /// Stands in for a box that is no longer there when something is typed into it.
     pub wf_stray: TextEdit,
+    /// Stands in for the trigger's timing when no editor is open.
+    pub wf_stray_timing: crate::schedules::form::TimingForm,
     /// Whether the workflow editor shows each step's id, result name and raw boxes.
     pub wf_advanced: bool,
     /// The list of tools a workflow step can use, shared by every step's field: it is open for the
@@ -338,6 +340,7 @@ impl App {
             wf_graph: crate::flow_graph::GraphView::default(),
             wf_menu: None,
             wf_stray: TextEdit::new(""),
+            wf_stray_timing: crate::schedules::form::TimingForm::new(),
             wf_advanced: false,
             wf_tool_picker: Default::default(),
             wf_tool_closed: Default::default(),

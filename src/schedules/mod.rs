@@ -692,7 +692,8 @@ impl App {
 
     /// The open schedule, in the form.
     pub fn edit_schedule(&mut self) {
-        let Some(s) = self.open_schedule().cloned() else {
+        // One a workflow's trigger made is changed there.
+        let Some(s) = self.open_schedule().filter(|s| !s.from_trigger).cloned() else {
             return;
         };
         let source = Source::Edit(s.id.clone());
@@ -805,6 +806,9 @@ impl App {
 
     /// Asks first, then deletes the open schedule. Its fires' chats stay.
     pub fn delete_open_schedule(&mut self) {
+        if self.open_schedule().is_some_and(|s| s.from_trigger) {
+            return;
+        }
         if !self.schedule_page.confirm {
             self.schedule_page.confirm = true;
             return;
@@ -1429,8 +1433,8 @@ mod tests {
         app.select_schedule(&s.id);
         app.edit_schedule();
         let f = app.schedule_page.form_mut();
-        assert_eq!(f.every.text, "1");
-        f.every = rune::TextEdit::new("30");
+        assert_eq!(f.timing.every.text, "1");
+        f.timing.every = rune::TextEdit::new("30");
         app.save_schedule_form();
         let after = &app.schedules[0];
         assert_eq!(

@@ -43,8 +43,9 @@ Non-functional
 - **Survives the app closing** where it waits for you (approval), and says so where it cannot
   (everything else keeps today's "the app was closed" failure).
 
-Out of scope: schedule or channel triggers inside a flow, a free node canvas, flows shared between
-agents, flow versions and history.
+Out of scope: channel or webhook triggers, several triggers in one flow, a free node canvas, flows
+shared between agents, flow version history (there is one draft and one published copy, see
+ADR-9).
 
 ## Architecture
 
@@ -554,3 +555,30 @@ editor now hides that behind plain words, and the expert forms are one press awa
 
 Not done yet: the `switch` and `for each` boxes are still typed
 expressions, and a new workflow still starts blank.
+
+## Triggers and publishing (ADR-9)
+
+A workflow has a **draft** (what the editor changes and a test run uses) and a **published** copy
+(what runs for real). Publishing copies the draft over the published copy.
+
+- **Trigger** is a field of the definition, not a step: `Manual` (the default) or
+  `Schedule { timing, inputs }`, with the same timings as the Schedules page (`once`, `every`,
+  daily/weekly, cron). The engine never reads it. In the graph it is the node at the top, and
+  pressing it opens its form.
+- **Published runs everything live**: an agent's `run_workflow`, the page's Run button, a `flow`
+  step calling it, a schedule. A workflow that was never published, or was unpublished, answers
+  "not published". The editor's **Execute workflow** (test run) always runs the draft.
+- **Publishing a schedule trigger** writes one row in `schedules` (`from_trigger = 1`). Publishing
+  again updates that row, so its fires stay with it; a manual trigger, or unpublishing, removes it.
+  The Schedules page shows it, lets you pause it and run it now, and sends you to the workflow to
+  change it.
+- **Checks before going live**: the steps validate, every workflow it calls is itself published
+  with no cycle, a schedule's inputs bind (a required input has a value) and its timing still has a
+  next time. Nothing changes if one fails.
+- **Where each starts**: workflows that existed before, ones saved from a chat and the examples
+  start published. One made in the editor starts as a draft.
+- **Revert** puts the published copy back as the draft; **Unpublish** takes it down and keeps the
+  draft.
+- **Left out on purpose**: version history, a webhook or channel trigger, running the draft of a
+  workflow that another workflow calls (a call always runs the callee's published copy, so saving a
+  draft that calls an unpublished one is refused).

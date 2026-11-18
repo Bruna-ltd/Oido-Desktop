@@ -78,6 +78,58 @@ fn history(ed: &Editor, k: &Kit) -> El {
         .child(button("Redo", ed.redoes(), "wfe-redo").on_press(|s: &mut App| s.redo_editor()))
 }
 
+/// Where the workflow stands (draft, live, or live with changes since), and Publish, which makes
+/// what is saved the live copy. Unpublish and Revert show when there is a live copy to take down
+/// or go back to.
+fn publish_bar(s: &App, ed: &Editor, k: &Kit) -> El {
+    let c = &k.c;
+    let saved = ed
+        .workflow
+        .as_ref()
+        .and_then(|id| s.workflows.iter().find(|w| &w.id == id));
+    let live = saved.is_some_and(|w| w.live().is_some());
+    let changed = saved.is_none_or(|w| w.has_unpublished_changes());
+    let (state, quiet) = match (live, changed) {
+        (false, _) => ("Draft · not published", false),
+        (true, true) => ("Published · changes not published", false),
+        (true, false) => ("Published", true),
+    };
+    let ghost = |label: &str, key: &str| {
+        Button::new(label.to_owned())
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .build(k)
+            .key(key.to_owned())
+    };
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(text(state).font(k.ty.small).color(if quiet {
+            c.text_muted
+        } else {
+            c.warning.icon
+        }))
+        .children((live && changed).then(|| {
+            ghost("Revert", "wfe-revert")
+                .help("Drop the changes made since it was published")
+                .on_press(|s: &mut App| s.revert_editor())
+        }))
+        .children(live.then(|| {
+            ghost("Unpublish", "wfe-unpublish")
+                .help("Nothing runs it, and its schedule stops, until it is published again")
+                .on_press(|s: &mut App| s.unpublish_editor())
+        }))
+        .child(
+            Button::new("Publish")
+                .variant(ButtonVariant::Submit)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.publish_editor())
+                .build(k)
+                .key("wfe-publish")
+                .help("Save, then make this the version that agents and schedules run"),
+        )
+}
+
 /// Save, Check and Cancel.
 fn buttons(k: &Kit) -> El {
     row()
@@ -218,7 +270,14 @@ fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                 .on_press(|s: &mut App| s.fit_graph())
                 .build(k)
                 .key("wfg-fit"),
-        )
+        );
+    // Where it stands and what to do about it, on a row of its own so the header keeps its room.
+    let actions = row()
+        .w_full()
+        .center_y()
+        .gap(16.0)
+        .child(el().grow(1.0))
+        .child(publish_bar(s, ed, k))
         .child(buttons(k));
     col()
         .key("workflow-editor")
@@ -228,6 +287,7 @@ fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
         .padding(20.0)
         .gap(12.0)
         .child(header)
+        .child(actions)
         .children(workflow_graph::banner(s, ed, k))
         .child(
             row()
@@ -268,8 +328,80 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(card(s, ed, &at, node, len, false, k, layer))
                 .children(workflow_graph::run_panel(s, ed, &at, k));
         }
+        None if s.wf_graph.on_trigger => out = out.child(trigger_form(ed, k)),
         None => {
             out = out.child(basics(s, ed, k, layer)).child(tail(s, ed, k));
+        }
+    }
+    out
+}
+
+/// What starts the workflow: you or an agent, or a schedule. It takes effect when published.
+fn trigger_form(ed: &Editor, k: &Kit) -> El {
+    let c = &k.c;
+    let t = &ed.trigger;
+    let mut out = col()
+        .w_full()
+        .gap(14.0)
+        .child(
+            row().child(
+                small("Workflow settings", ButtonVariant::Ghost)
+                    .on_press(|s: &mut App| s.select_step(None))
+                    .build(k)
+                    .key("wfg-settings"),
+            ),
+        )
+        .child(text("Trigger").font(k.ty.ui_medium).color(c.text_base))
+        .child(
+            SegmentedControl::new(&["Manual", "Schedule"], Some(usize::from(t.schedule)))
+                .label("Trigger")
+                .fit()
+                .on_pick(|s: &mut App, i, _| s.editor_set_schedule(i == 1))
+                .build(k)
+                .key("wfe-trigger"),
+        )
+        .child(
+            text(if t.schedule {
+                "Runs by itself while Oido is open, once the workflow is published. A test run ignores the schedule."
+            } else {
+                "Starts when you or an agent run the published workflow."
+            })
+            .font(k.ty.small)
+            .color(c.text_muted)
+            .wrap(),
+        );
+    if t.schedule {
+        out = out.child(super::schedules::timing_fields(
+            &t.timing,
+            "trigger-",
+            k,
+            |s: &mut App| s.trigger_timing(),
+        ));
+        let names: Vec<String> = ed
+            .inputs
+            .iter()
+            .map(|r| r.name.text.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .collect();
+        if !names.is_empty() {
+            out = out.child(
+                text("What each run is given")
+                    .font(k.ty.small)
+                    .color(c.text_muted),
+            );
+        }
+        for name in names {
+            let blank = TextEdit::new("");
+            let edit = t.inputs.get(&name).unwrap_or(&blank);
+            let n = name.clone();
+            out = out.child(super::schedules::input(
+                &name,
+                edit,
+                &format!("trigger-input-{name}"),
+                "",
+                k,
+                move |s: &mut App| s.trigger_input(&n),
+            ));
         }
     }
     out
