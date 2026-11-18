@@ -2944,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "oido-desktop"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
