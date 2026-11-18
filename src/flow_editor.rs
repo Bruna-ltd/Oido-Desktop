@@ -15,9 +15,9 @@ use crate::models::ModelRef;
 use crate::store::Counted;
 use crate::usage::Source;
 use crate::workflow::cond::Op;
-use crate::workflow::definition::STEP_TOOLS;
+use crate::workflow::definition::{Definition, STEP_TOOLS, Step};
 use crate::workflow::editor::{ArgKind, Editor, Loc, Menu, Place, Target, kind_named};
-use crate::workflow::engine::{self, Outcome, StepLog};
+use crate::workflow::engine::{self, Memo, Outcome, StepLog};
 
 /// What a card raised by a test run of a workflow that is not saved yet is filed under.
 pub const TEST_CARD: &str = "workflow-test";
@@ -33,6 +33,36 @@ pub struct TestRun {
     pub notice: Option<String>,
     /// The log of the run as it stands while it goes, for the graph to show it so.
     pub live: Vec<StepLog>,
+    /// What the steps tried one at a time made, for the next one to start from.
+    pub memos: Option<StepMemos>,
+}
+
+/// The results of the top-level steps tried so far, each with the step as it was then.
+pub struct StepMemos {
+    inputs: Value,
+    steps: Vec<(Step, Memo)>,
+}
+
+impl StepMemos {
+    /// The results the steps before `last` can start from: those still the same step, up to the
+    /// first that was changed, for the same inputs.
+    fn before(&self, def: &Definition, inputs: &Value, last: usize) -> Vec<Memo> {
+        if self.inputs != *inputs {
+            return Vec::new();
+        }
+        self.steps
+            .iter()
+            .zip(&def.steps)
+            .take(last)
+            .take_while(|((was, _), now)| was == *now)
+            .map(|((_, memo), _)| memo.clone())
+            .collect()
+    }
+
+    /// How many steps have a result to start from.
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
 }
 
 impl TestRun {
@@ -164,6 +194,24 @@ impl App {
     /// Runs the workflow as it stands in the editor, for real, with the inputs given. Nothing is
     /// saved: not the workflow, and not the run.
     pub fn test_editor(&mut self) {
+        self.start_test(None);
+    }
+
+    /// Runs one step with the real results of the ones before it, so its output can be seen and
+    /// the next step can use it. A step inside another runs the top-level step that holds it.
+    pub fn run_step(&mut self, at: &Loc) {
+        let top = at.place.first().map_or(at.index, |(i, _)| *i);
+        self.start_test(Some(top));
+    }
+
+    /// Forgets what the steps made, so the next one runs everything before it again.
+    pub fn forget_step_results(&mut self) {
+        self.wf_test.memos = None;
+    }
+
+    /// `through` is the top-level step to run as far as, or `None` for the whole workflow. The
+    /// first steps are taken from what earlier tries made, if they are still the same.
+    fn start_test(&mut self, through: Option<usize>) {
         if self.wf_test.running.is_some() {
             return;
         }
@@ -203,6 +251,18 @@ impl App {
                 return;
             }
         };
+        let go = match through {
+            Some(last) => {
+                let done = self
+                    .wf_test
+                    .memos
+                    .as_ref()
+                    .map_or_else(Vec::new, |m| m.before(&def, &inputs, last));
+                Go::Through(inputs.clone(), last, done)
+            }
+            None => Go::Fresh(inputs.clone()),
+        };
+        let tried = (through.is_some()).then(|| (def.steps.clone(), inputs));
         let cancel = Arc::new(AtomicBool::new(false));
         self.wf_test.running = Some(Arc::clone(&cancel));
         let model = ModelRef::new(&prep.provider, &prep.model);
@@ -220,33 +280,32 @@ impl App {
             let flag = Arc::clone(&watched);
             crate::app::on_ui_thread(move |app| app.test_progress(&flag, lines));
         });
-        self.spawn_flow(
-            prep,
-            def,
-            Go::Fresh(inputs),
-            cancel,
-            Some(watch),
-            move |app, outcome| {
-                let who = Counted {
-                    model: &model,
-                    agent_id: &agent_id,
-                    agent_name: &agent_name,
-                    source: Source::Workflow,
-                };
-                app.count_flow_usage(began, outcome.usage, &who);
-                // Only if it is still the test the editor shows: the editor may have closed.
-                if app
-                    .wf_test
-                    .running
-                    .as_ref()
-                    .is_some_and(|f| Arc::ptr_eq(f, &flag))
-                {
-                    app.wf_test.running = None;
-                    app.wf_test.live.clear();
-                    app.wf_test.result = Some(outcome);
+        self.spawn_flow(prep, def, go, cancel, Some(watch), move |app, outcome| {
+            let who = Counted {
+                model: &model,
+                agent_id: &agent_id,
+                agent_name: &agent_name,
+                source: Source::Workflow,
+            };
+            app.count_flow_usage(began, outcome.usage, &who);
+            // Only if it is still the test the editor shows: the editor may have closed.
+            if app
+                .wf_test
+                .running
+                .as_ref()
+                .is_some_and(|f| Arc::ptr_eq(f, &flag))
+            {
+                app.wf_test.running = None;
+                app.wf_test.live.clear();
+                if let Some((steps, inputs)) = tried {
+                    app.wf_test.memos = Some(StepMemos {
+                        inputs,
+                        steps: steps.into_iter().zip(outcome.memos.clone()).collect(),
+                    });
                 }
-            },
-        );
+                app.wf_test.result = Some(outcome);
+            }
+        });
     }
 
     /// The log of the test run as it stands, if it is still the test the editor shows.
@@ -982,5 +1041,80 @@ mod tests {
         app.publish_editor();
         assert!(!app.wf_editor.as_ref().unwrap().problems.is_empty());
         assert!(app.workflows[0].live().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_step_run_alone_starts_from_the_results_of_the_ones_before_it_until_one_is_changed() {
+        let db = TempDb::new();
+        let mut app = on_the_page(&db);
+        app.new_workflow();
+        set(&mut app, &Target::Name, "Chain");
+        let command = |at: usize| Target::Param(top(at), "command".into(), ArgKind::Text);
+        for _ in 0..3 {
+            app.editor_add(&Vec::new(), "Use a tool");
+        }
+        // The first makes something different each time it runs, so a run again would show.
+        set(&mut app, &command(0), "date +%s%N");
+        set(&mut app, &Target::Bind(top(0)), "stamp");
+        set(&mut app, &command(1), "echo two-{{stamp.stdout}}");
+        set(&mut app, &Target::Bind(top(1)), "two");
+        set(&mut app, &command(2), "echo three-{{two.stdout}}");
+
+        let out = |app: &App| app.wf_test.result.as_ref().unwrap().clone();
+        app.run_step(&top(1));
+        let first = out(&app);
+        assert_eq!(first.ending, crate::workflow::engine::Ending::Succeeded);
+        assert_eq!(first.steps.len(), 2, "the step and the one before it");
+        let stamp = first.steps[0].output.clone();
+        assert!(
+            first.steps[1].output.contains("two-"),
+            "{:?} / {:?}",
+            first.steps[0].output,
+            first.steps[1].output
+        );
+
+        // The next step starts from them: the first is not run again, and the third reads the second.
+        app.run_step(&top(2));
+        let second = out(&app);
+        assert_eq!(second.steps.len(), 3);
+        assert_eq!(second.steps[0].output, stamp, "not run again");
+        assert!(
+            second.steps[2].output.contains("two-"),
+            "{}",
+            second.steps[2].output
+        );
+
+        // Changing the second keeps the first and runs the second again.
+        set(&mut app, &command(1), "echo changed-{{stamp.stdout}}");
+        app.run_step(&top(2));
+        let third = out(&app);
+        assert_eq!(
+            third.steps[0].output, stamp,
+            "the first is still remembered"
+        );
+        assert!(third.steps[1].output.contains("changed-"));
+        assert!(
+            third.steps[2].output.contains("changed-"),
+            "{}",
+            third.steps[2].output
+        );
+
+        // Changing the first makes everything run again.
+        set(&mut app, &command(0), "echo new-stamp");
+        app.run_step(&top(2));
+        assert!(out(&app).steps[0].output.contains("new-stamp"));
+
+        // Forgetting what was made starts from the top again; one that is not fit to run is said.
+        assert!(app.wf_test.memos.as_ref().is_some_and(|m| m.len() == 3));
+        app.forget_step_results();
+        assert!(app.wf_test.memos.is_none());
+        set(
+            &mut app,
+            &Target::Param(top(1), "timeout_secs".into(), ArgKind::Whole),
+            "soon",
+        );
+        app.run_step(&top(1));
+        assert!(app.wf_test.notice.is_some());
     }
 }

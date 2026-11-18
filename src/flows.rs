@@ -137,6 +137,8 @@ pub(crate) type Watch = Arc<dyn Fn(Vec<crate::workflow::engine::StepLog>) + Send
 pub(crate) enum Go {
     Fresh(Value),
     Resume(Snapshot, Decision),
+    /// Up to and including top-level step `last`, taking the first steps from their memos.
+    Through(Value, usize, Vec<engine::Memo>),
 }
 
 fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Option<&Watch>) -> Ran {
@@ -296,6 +298,7 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
     let outcome = match go {
         Go::Fresh(inputs) => engine::execute(def, &inputs, &env),
         Go::Resume(snapshot, decision) => engine::resume(def, snapshot, decision, &env),
+        Go::Through(inputs, last, done) => engine::execute_through(def, &inputs, last, &done, &env),
     };
     (
         outcome,

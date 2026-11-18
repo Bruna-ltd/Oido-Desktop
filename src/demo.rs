@@ -1460,6 +1460,7 @@ pub static SCENES: &[Scene] = &[
             steps,
             usage: Usage::default(),
             snapshot: None,
+            memos: Vec::new(),
         });
         if let Some(ed) = s.wf_editor.as_mut() {
             ed.problems = vec!["step 5.1 (\"send\"): a tool step needs a tool".into()];
@@ -1518,6 +1519,7 @@ pub static SCENES: &[Scene] = &[
             steps,
             usage: Usage::default(),
             snapshot: None,
+            memos: Vec::new(),
         });
     }),
     ("draft", |s| {

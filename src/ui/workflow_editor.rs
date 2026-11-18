@@ -325,6 +325,7 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                             .key("wfg-settings"),
                     ),
                 )
+                .child(step_actions(s, &at, k))
                 .child(card(s, ed, &at, node, len, false, k, layer))
                 .children(workflow_graph::run_panel(s, ed, &at, k));
         }
@@ -332,6 +333,55 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
         None => {
             out = out.child(basics(s, ed, k, layer)).child(tail(s, ed, k));
         }
+    }
+    out
+}
+
+/// Runs the selected step for real, after the results of the ones before it, so what it made can
+/// be seen under it and the next step can use it.
+fn step_actions(s: &App, at: &Loc, k: &Kit) -> El {
+    let t = &s.wf_test;
+    let nested = !at.place.is_empty();
+    let go = at.clone();
+    let button = if t.running.is_some() {
+        Button::new("Stop")
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.stop_test())
+            .build(k)
+            .key("wfg-step-stop")
+    } else {
+        Button::new("Execute step")
+            .variant(ButtonVariant::Submit)
+            .control_size(ControlSize::Small)
+            .on_press(move |s: &mut App| s.run_step(&go))
+            .build(k)
+            .key("wfg-step-run")
+            .help(if nested {
+                "Runs the step that holds this one, for real, after the results of the steps before it"
+            } else {
+                "Runs this step for real after the results of the steps before it. Ones that have not run yet run first; ones that did are not run again."
+            })
+    };
+    let mut out = col()
+        .w_full()
+        .gap(6.0)
+        .child(row().gap(8.0).center_y().child(button).children(
+            t.memos.as_ref().filter(|m| m.len() > 0).map(|_| {
+                small("Forget results", ButtonVariant::Ghost)
+                    .on_press(|s: &mut App| s.forget_step_results())
+                    .build(k)
+                    .key("wfg-step-forget")
+                    .help("The next step run starts again from the first step")
+            }),
+        ));
+    if let Some(why) = &t.notice {
+        out = out.child(
+            text(why.clone())
+                .font(k.ty.small)
+                .color(k.c.warning.icon)
+                .wrap(),
+        );
     }
     out
 }

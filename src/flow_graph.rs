@@ -731,6 +731,7 @@ mod tests {
             steps: vec![log_line("0", "a")],
             usage: Default::default(),
             snapshot: None,
+            memos: Vec::new(),
         });
         let shown = app.shown_run().unwrap();
         assert!(

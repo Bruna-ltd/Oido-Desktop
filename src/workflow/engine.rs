@@ -164,6 +164,16 @@ pub enum Ending {
     },
 }
 
+/// What one top-level step made when it ran, kept so a later run can start from after it instead of
+/// running it again: its lines in the log, the value it bound, and what that value is tainted by.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Memo {
+    pub logs: Vec<StepLog>,
+    pub bound: Option<(String, Value)>,
+    /// Every name holding outside text, and why, as of just after the step.
+    pub tainted: Vec<(String, String)>,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Outcome {
     pub ending: Ending,
@@ -173,6 +183,9 @@ pub struct Outcome {
     pub usage: Usage,
     /// Where a waiting run stands, to go on from with [`resume`].
     pub snapshot: Option<Snapshot>,
+    /// A run made with [`execute_through`]: one memo for each top-level step done, those skipped
+    /// from the memos given included, so the next run can go on from them.
+    pub memos: Vec<Memo>,
 }
 
 /// The values a run starts with: what was given, else each input's default. A required input that
@@ -320,6 +333,14 @@ struct Run<'a, 'e> {
     decision: Option<Decision>,
     /// Set to end the other branches of a `parallel` step when this one is a branch of it.
     group: Option<Arc<AtomicBool>>,
+    /// Run only as far as this top-level step, taking the first steps from their memos.
+    through: Option<Through>,
+}
+
+/// How far to run the top-level steps, and which of the first ones are already done.
+struct Through {
+    last: usize,
+    done: Vec<Memo>,
 }
 
 impl<'a, 'e> Run<'a, 'e> {
@@ -427,6 +448,59 @@ impl Run<'_, '_> {
                 }
                 Err(halt) => return Err(halt),
             }
+        }
+        Ok(last)
+    }
+
+    /// The top-level steps as [`execute_through`] runs them: those with a memo are not run again.
+    /// A step that fails or is stopped leaves the memos of the ones before it. One that waits for
+    /// an answer is not run: a step is tried alone, so there is nobody to answer it.
+    fn top_through(
+        &mut self,
+        steps: &[Step],
+        through: &Through,
+        scope: &mut Scope,
+    ) -> Result<Value, Halt> {
+        let mut last = Value::Null;
+        for (i, step) in steps.iter().enumerate().take(through.last + 1) {
+            if self.stopped() {
+                return Err(Halt::Stopped);
+            }
+            if let Some(memo) = through.done.get(i).filter(|_| i < through.last) {
+                self.out.steps.extend(memo.logs.iter().cloned());
+                if let Some((name, value)) = &memo.bound {
+                    scope.insert(name.clone(), value.clone());
+                }
+                self.tainted = memo
+                    .tainted
+                    .iter()
+                    .map(|(k, v)| (k.clone(), intern(v)))
+                    .collect();
+                self.out.memos.push(memo.clone());
+                continue;
+            }
+            if step.kind == WAIT {
+                return Err(self.fail(
+                    step,
+                    "This step waits for an answer, so it cannot be tried alone. Run the whole workflow to try it."
+                        .to_owned(),
+                ));
+            }
+            self.taken += 1;
+            let from = self.out.steps.len();
+            last = self.step(step, &child("", i), scope, false)?;
+            self.out.memos.push(Memo {
+                logs: self.out.steps[from..].to_vec(),
+                bound: step
+                    .bind
+                    .as_ref()
+                    .and_then(|name| scope.get(name).map(|v| (name.clone(), v.clone()))),
+                tainted: self
+                    .tainted
+                    .iter()
+                    .map(|(k, v)| (k.clone(), (*v).to_owned()))
+                    .collect(),
+            });
         }
         Ok(last)
     }
@@ -1104,6 +1178,7 @@ fn start<'a, 'e>(env: &'a Env<'e>) -> Run<'a, 'e> {
             steps: Vec::new(),
             usage: Usage::default(),
             snapshot: None,
+            memos: Vec::new(),
         },
         taken: 0,
         rounds: Vec::new(),
@@ -1115,12 +1190,17 @@ fn start<'a, 'e>(env: &'a Env<'e>) -> Run<'a, 'e> {
         resume: VecDeque::new(),
         decision: None,
         group: None,
+        through: None,
     }
 }
 
 /// Works through the steps, from the top or from where a resume left off, and says how it ended.
 fn walk(mut run: Run, def: &Definition, mut scope: Scope) -> Outcome {
-    run.out.ending = match run.block(&def.steps, "", &mut scope) {
+    let result = match run.through.take() {
+        Some(through) => run.top_through(&def.steps, &through, &mut scope),
+        None => run.block(&def.steps, "", &mut scope),
+    };
+    run.out.ending = match result {
         Ok(_) => Ending::Succeeded,
         Err(Halt::Stopped) => Ending::Stopped,
         Err(Halt::Failed { step, error }) => Ending::Failed { step, error },
@@ -1152,6 +1232,27 @@ fn walk(mut run: Run, def: &Definition, mut scope: Scope) -> Outcome {
         }
     };
     run.out
+}
+
+/// Runs the top-level steps up to and including step `last`, taking the first `done.len()` of
+/// them from `done` instead of running them: their lines go in the log and the values they bound
+/// are in scope, as if they had just run. For trying one step with the real output of the ones
+/// before it. The outcome's `memos` are what to give next time.
+pub fn execute_through(
+    def: &Definition,
+    inputs: &Value,
+    last: usize,
+    done: &[Memo],
+    env: &Env,
+) -> Outcome {
+    let mut scope = Scope::new();
+    scope.insert("inputs".to_owned(), inputs.clone());
+    let mut run = start(env);
+    run.through = Some(Through {
+        last,
+        done: done.to_vec(),
+    });
+    walk(run, def, scope)
 }
 
 /// Runs the workflow. `inputs` are what [`bind_inputs`] gave.
@@ -2661,5 +2762,74 @@ mod tests {
         // And a log that was saved never says so: the field is not written.
         let saved = serde_json::to_string(&out.steps[0]).unwrap();
         assert!(!saved.contains("running"), "{saved}");
+    }
+
+    #[test]
+    fn a_step_can_be_run_alone_after_the_remembered_results_of_the_ones_before_it() {
+        let d = def(json!({
+            "steps": [
+                {"id": "ls", "kind": "tool", "tool": "shell", "args": {"command": "ls"}, "bind": "files"},
+                {"id": "cat", "kind": "tool", "tool": "shell",
+                 "args": {"command": "cat {{files.stdout}}"}, "bind": "text"},
+                {"id": "last", "kind": "tool", "tool": "shell",
+                 "args": {"command": "echo {{text.stdout}}"}},
+                {"id": "ok", "kind": "wait", "approve": "Go on?"}
+            ]
+        }));
+        let calls = RefCell::new(Vec::<String>::new());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tool = |_: &str, a: &Value, _: Option<&str>| {
+            let command = a["command"].as_str().unwrap().to_owned();
+            calls.borrow_mut().push(command.clone());
+            ok(json!({ "stdout": format!("<{command}>") }))
+        };
+        let model = |_: &str, _: &str| Ok((String::new(), Usage::default()));
+        let env = Env {
+            tool: &tool,
+            model: &model,
+            cancel: &cancel,
+            flow: &|_: &str| None,
+            progress: None,
+        };
+        let none = json!({});
+
+        // Nothing is remembered, so the first two run, and each leaves a memo.
+        let first = execute_through(&d, &none, 1, &[], &env);
+        assert_eq!(first.ending, Ending::Succeeded);
+        assert_eq!(*calls.borrow(), ["ls", "cat <ls>"]);
+        assert_eq!(first.memos.len(), 2);
+        assert_eq!(first.steps.len(), 2);
+        assert_eq!(
+            first.memos[0].bound,
+            Some(("files".to_owned(), json!({"stdout": "<ls>"})))
+        );
+        assert_eq!(first.memos[0].logs.len(), 1);
+
+        // The third step runs alone, and sees what the second made.
+        let second = execute_through(&d, &none, 2, &first.memos, &env);
+        assert_eq!(second.ending, Ending::Succeeded);
+        assert_eq!(calls.borrow().len(), 3, "only the new step ran");
+        assert_eq!(calls.borrow()[2], "echo <cat <ls>>");
+        assert_eq!(
+            second.steps.len(),
+            3,
+            "the log has the remembered lines too"
+        );
+        assert_eq!(second.memos.len(), 3);
+
+        // A step asked for again runs again; the ones before it are still not run.
+        let again = execute_through(&d, &none, 1, &second.memos, &env);
+        assert_eq!(calls.borrow().len(), 4);
+        assert_eq!(calls.borrow()[3], "cat <ls>");
+        assert_eq!(again.memos.len(), 2);
+
+        // A step that waits for an answer cannot be tried alone, and says why.
+        let wait = execute_through(&d, &none, 3, &second.memos, &env);
+        let Ending::Failed { step, error } = &wait.ending else {
+            panic!("{:?}", wait.ending);
+        };
+        assert_eq!(step, "ok");
+        assert!(error.contains("whole workflow"), "{error}");
+        assert_eq!(wait.memos.len(), 3, "the steps before it are kept");
     }
 }
