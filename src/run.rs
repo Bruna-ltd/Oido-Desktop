@@ -2600,9 +2600,13 @@ data: [DONE]
         app.composer.edit = TextEdit::new("anything");
         app.send();
         assert_eq!(
-            app.composer.edit.text, "anything",
-            "nothing is sent until the question is answered"
+            app.queued_here().map(|p| p.text.as_str()),
+            Some("anything"),
+            "a message written meanwhile waits, and is not sent before the question is answered"
         );
+        assert!(app.composer.edit.text.is_empty());
+        app.unqueue();
+        assert_eq!(app.composer.edit.text, "anything");
 
         app.answer("Blue");
         let second = seen.recv().unwrap();
