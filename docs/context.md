@@ -34,6 +34,10 @@ Status: agreed and built 2026-11-10.
 - The chat header shows it beside the spend: "62% context" with the limit, or "41k context" when
   the limit is unknown. At 80% and above it turns amber. Start fresh clears it.
 - llama-server's "context size" refusal counts as too long.
+- A count belongs to the model that made it: after you change the chat's model, the fill is
+  estimated (about one token per four characters) against the new model's limit, and the next
+  call is sized the same way, until the new model has answered and counted. The chat's token
+  and cost totals are kept per model and priced at each model's own rate.
 
 **Phase 2: make room without a summary.** Before every model call, in chat and in a run alike:
 

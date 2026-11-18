@@ -441,7 +441,7 @@ impl App {
         let fitted = crate::window::fit(
             &mut request,
             limit,
-            crate::window::measured(&chat.messages),
+            crate::window::measured(&chat.messages, &self.providers.model_name(&model)),
             false,
         );
         let summary = fitted
