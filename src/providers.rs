@@ -105,6 +105,25 @@ const BUILT_IN: [(&str, &str, &str); 11] = [
     (TYPESAFE, "TypeSafe", "#3B82F6"),
 ];
 
+/// Where to register with a built-in provider and get what Oido connects with: an API key, or for
+/// Codex a ChatGPT plan.
+pub fn sign_up_url(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "openai" => "https://platform.openai.com/api-keys",
+        CODEX => "https://chatgpt.com/pricing",
+        "anthropic" => "https://console.anthropic.com/settings/keys",
+        "gemini" => "https://aistudio.google.com/apikey",
+        "openrouter" => "https://openrouter.ai/keys",
+        "nvidia" => "https://build.nvidia.com/settings/api-keys",
+        "deepseek" => "https://platform.deepseek.com/api_keys",
+        "mistral" => "https://console.mistral.ai/api-keys",
+        "kimi" => "https://platform.moonshot.ai/console/api-keys",
+        "qwen" => "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key",
+        TYPESAFE => "https://typesafe.ai",
+        _ => return None,
+    })
+}
+
 /// A saved model list is asked for again, when a picker opens, once it is this old (as in core).
 const STALE_AFTER_SECS: i64 = 300;
 

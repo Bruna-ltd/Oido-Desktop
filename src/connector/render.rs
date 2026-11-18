@@ -6,7 +6,7 @@
 use serde::Deserialize;
 
 /// The connector's `read` payload.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Page {
     pub url: String,
@@ -28,7 +28,7 @@ pub struct Link {
     pub href: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 #[serde(default)]
 pub struct Dialog {
     #[serde(rename = "type")]
@@ -36,7 +36,7 @@ pub struct Dialog {
     pub message: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 #[serde(default)]
 pub struct Challenge {
     pub kind: String,

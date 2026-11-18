@@ -8,7 +8,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Divider, Kit, TextInput};
 use super::model_picker::ModelPicker;
 
 use crate::app::{App, now};
-use crate::providers::{CODEX, NEW_SERVER, Provider, Providers, serves_chat};
+use crate::providers::{CODEX, NEW_SERVER, Provider, Providers, serves_chat, sign_up_url};
 
 const PAGE: f32 = 768.0;
 
@@ -139,6 +139,11 @@ pub(super) fn tile(label: &str, color: &str, k: &Kit) -> El {
         .fill(hex(color).unwrap_or(k.c.layer_03))
         .border(1.0, k.c.border_muted)
         .child(text(initial).font(k.ty.ui_medium).color(k.c.white))
+}
+
+/// The provider's logo on its tile, or the initial tile when it has no logo.
+fn provider_tile(p: &Provider, k: &Kit) -> El {
+    super::logo::provider(&p.id, p.color, k).unwrap_or_else(|| tile(&p.label, p.color, k))
 }
 
 pub(super) fn ghost(label: &str, key: String, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
@@ -280,7 +285,7 @@ fn connected_row(s: &App, p: &Provider, k: &Kit) -> El {
             .padding(14.0)
             .gap(12.0)
             .center_y()
-            .child(tile(&p.label, p.color, k))
+            .child(provider_tile(p, k))
             .child(names(
                 &p.label,
                 if detail.is_empty() {
@@ -310,7 +315,7 @@ pub(super) fn pill(label: &str, k: &Kit) -> El {
 fn expandable(
     key: String,
     tile: El,
-    label: &str,
+    title: El,
     action: &str,
     toggle: impl Fn(&mut App) + 'static,
     form: Option<El>,
@@ -328,13 +333,7 @@ fn expandable(
             .expanded(open)
             .on_press(toggle)
             .child(tile)
-            .child(
-                text(label.to_owned())
-                    .font(k.ty.ui)
-                    .color(k.c.text_base)
-                    .truncate()
-                    .grow(1.0),
-            )
+            .child(title)
             .child(pill(if open { "Close" } else { action }, k)),
     );
     let mut r = col()
@@ -385,6 +384,7 @@ fn available_row(s: &App, p: &Provider, k: &Kit) -> El {
                 .grow(1.0)
         };
         let mut body = col().gap(8.0);
+        body = body.children(sign_up_url(&p.id).map(|u| row().child(sign_up_link(u, k))));
         if p.id == CODEX {
             body = body.child(chatgpt_panel(s, &id, signing_in.as_deref(), k));
         } else if let Some(url) = &signing_in {
@@ -424,13 +424,40 @@ fn available_row(s: &App, p: &Provider, k: &Kit) -> El {
     };
     expandable(
         format!("prov-{id}"),
-        tile(&p.label, p.color, k),
-        &p.label,
+        provider_tile(p, k),
+        names(
+            &p.label,
+            sign_up_url(&p.id)
+                .map(|u| format!("Register at {}", host(u)))
+                .unwrap_or_default(),
+            None,
+            k,
+        ),
         "Connect",
         toggle,
         form,
         k,
     )
+}
+
+/// The address's host, for saying where a link goes.
+fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest)
+}
+
+/// A link, in a form, to where the provider is registered with.
+fn sign_up_link(url: &'static str, k: &Kit) -> El {
+    Button::new(format!("Register or get a key at {} ↗", host(url)))
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press(move |_: &mut App| {
+            if let Err(e) = crate::browser::open(url) {
+                eprintln!("oido: could not open {url}: {e}");
+            }
+        })
+        .build(k)
+        .key("sign-up")
 }
 
 /// Opens the sign-in page again, for a browser that did not take it the first time.
@@ -693,7 +720,7 @@ fn server_row(s: &App, p: &Provider, k: &Kit) -> El {
             .padding(14.0)
             .gap(12.0)
             .center_y()
-            .child(tile(&p.label, p.color, k))
+            .child(provider_tile(p, k))
             .child(names(
                 &p.label,
                 if detail.is_empty() {
@@ -721,7 +748,11 @@ fn add_server_row(s: &App, k: &Kit) -> El {
     expandable(
         "prov-add".into(),
         tile("Server", crate::providers::SERVER_COLOR, k),
-        "Add a server you run yourself",
+        text("Add a server you run yourself")
+            .font(k.ty.ui)
+            .color(k.c.text_base)
+            .truncate()
+            .grow(1.0),
         "Add",
         |s: &mut App| s.providers.toggle(NEW_SERVER),
         form,

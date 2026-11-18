@@ -78,11 +78,19 @@ pub fn title(rule: &str) -> Option<&'static str> {
     Some(match rule {
         "browser.open" => "Opens a page",
         "browser.act" => "Clicks or types on a page",
+        "browser.commit" => "Takes a step that commits",
         _ => return None,
     })
 }
 
 impl Approvals {
+    /// Whether a step that commits (posting, sending, paying, deleting) waits for the person: as an
+    /// acting call would with a page in view, which Jev always has. `taint`: the taint pack is on.
+    pub fn commits_ask(&self, taint: bool) -> bool {
+        self.check(Kind::Act, taint.then_some("a web page"))
+            .is_some()
+    }
+
     /// Whether a call of `kind` waits for the person, given what outside text the model had in
     /// view (`outside`, only when the taint pack is on).
     pub fn check(&self, kind: Kind, outside: Option<&str>) -> Option<Finding> {
@@ -139,6 +147,13 @@ mod tests {
         assert_eq!(Kind::of("submit"), Some(Kind::Act));
         assert_eq!(Kind::of("reload"), Some(Kind::Open));
         assert_eq!(Kind::of("fly"), None);
+        assert!(a.commits_ask(true) && !a.commits_ask(false));
+        assert!(strict.commits_ask(false));
+        let free = Approvals {
+            act: Ask::Never,
+            ..a
+        };
+        assert!(!free.commits_ask(true));
     }
 
     #[test]

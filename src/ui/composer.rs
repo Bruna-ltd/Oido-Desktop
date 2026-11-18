@@ -30,7 +30,7 @@ const THUMB: f32 = 64.0;
 
 const IDLE: &str = "Write a message. / for commands, @ for files.";
 const BUSY: &str = "Write your next message; it goes when the reply ends.";
-const ASKED: &str = "Answer or decide on the request above first.";
+const ASKED: &str = "Write your next message; it goes once you answer or decide above.";
 
 pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
@@ -109,14 +109,14 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
         .label("Hold to talk")
         .build(k)
         .key("voice");
-    let can_send = has_content && ready && !asked && !blind;
+    let can_send = has_content && ready && !blind;
     let mut send = IconButton::new(&glyphs::ARROW_RIGHT)
         .variant(if can_send {
             IconButtonVariant::Submit
         } else {
             IconButtonVariant::Ghost
         })
-        .label(if running {
+        .label(if running || asked {
             "Send when the reply ends"
         } else {
             "Send"
@@ -125,7 +125,7 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
         .on_press(|s: &mut App| s.send());
     if let Some(why) = reason(&status) {
         send = send.help(why);
-    } else if running {
+    } else if running || asked {
         send = send.help("Send when the reply ends");
     }
     let stop = IconButton::new(&icons::STOP)
@@ -223,13 +223,15 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
         .w_full()
         .gap(6.0)
         .child(card.child(input).child(actions))
-        .child(hints(running, k))
+        .child(hints(running, asked, k))
 }
 
 /// What the keys do, under the box.
-fn hints(running: bool, k: &Kit) -> El {
+fn hints(running: bool, asked: bool, k: &Kit) -> El {
     let line = if running {
         "Esc stop  ·  ↵ queue  ·  ⇧↵ new line  ·  / commands  ·  @ files"
+    } else if asked {
+        "↵ queue  ·  ⇧↵ new line  ·  @ files"
     } else {
         "↵ send  ·  ⇧↵ new line  ·  ↑ last message  ·  / commands  ·  @ files"
     };

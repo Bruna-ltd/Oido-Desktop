@@ -40,7 +40,7 @@ pub fn acts(name: &str) -> bool {
         || name == crate::tools::RUN_WORKFLOW
         || name == crate::tools::DELEGATE
         || crate::mcp::is_tool(name)
-        || crate::tools::needs_typesafe(name)
+        || crate::typesafe::is_tool(name)
 }
 
 #[cfg(test)]

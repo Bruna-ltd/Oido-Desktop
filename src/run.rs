@@ -441,7 +441,7 @@ impl App {
         let fitted = crate::window::fit(
             &mut request,
             limit,
-            crate::window::measured(&chat.messages),
+            crate::window::measured(&chat.messages, &self.providers.model_name(&model)),
             false,
         );
         let summary = fitted
@@ -1362,6 +1362,10 @@ impl App {
             self.start_workflow_call(&sid, &id, &args);
             return true;
         }
+        if name == crate::connector::jev::NAME {
+            self.start_jev_call(&sid, &id, &args);
+            return true;
+        }
         if crate::tools::needs_typesafe(&name) {
             self.start_typesafe_call(&sid, &id, &name, &args);
             return true;
@@ -1502,6 +1506,45 @@ impl App {
                 }
             },
             move |app, finish| app.command_done(&sid, &id, finish),
+        );
+    }
+
+    /// The agent handed a browsing goal to Jev: driven on its own thread, asking TypeSafe each step,
+    /// until it ends or Stop. Always handles the call, even to refuse it.
+    fn start_jev_call(&mut self, sid: &str, call_id: &str, args: &str) {
+        let key = match (&self.store, self.typesafe_connected()) {
+            (Some(db), true) => db
+                .provider_key(crate::providers::TYPESAFE)
+                .map_err(|e| e.to_string())
+                .and_then(|k| k.ok_or_else(|| "TypeSafe has no saved key.".to_owned())),
+            _ => Err("browser_jev needs TypeSafe, which is not connected.".to_owned()),
+        };
+        let key = match key {
+            Ok(key) => key,
+            Err(why) => {
+                let told = format!(
+                    "Error: {why} The person can connect it on the Providers page; until then, use the browser tool."
+                );
+                self.resolve(sid, call_id, told, true);
+                self.start_next_command(sid);
+                return;
+            }
+        };
+        let cancel = self.track(sid, call_id);
+        let (sid, id, args) = (sid.to_owned(), call_id.to_owned(), args.to_owned());
+        let (connector, commits) = (self.connector.clone(), self.guard.jev_commits());
+        self.spawn(
+            move || {
+                let told =
+                    crate::connector::jev::run(&connector, &sid, &args, &key, commits, &cancel);
+                let finish = if cancel.load(Ordering::Relaxed) {
+                    crate::command::Finish::Stopped(format!("Stopped by the person.\n{told}"))
+                } else {
+                    crate::command::Finish::Done(told)
+                };
+                (sid, finish)
+            },
+            move |app, (sid, finish)| app.command_done(&sid, &id, finish),
         );
     }
 
@@ -2557,9 +2600,13 @@ data: [DONE]
         app.composer.edit = TextEdit::new("anything");
         app.send();
         assert_eq!(
-            app.composer.edit.text, "anything",
-            "nothing is sent until the question is answered"
+            app.queued_here().map(|p| p.text.as_str()),
+            Some("anything"),
+            "a message written meanwhile waits, and is not sent before the question is answered"
         );
+        assert!(app.composer.edit.text.is_empty());
+        app.unqueue();
+        assert_eq!(app.composer.edit.text, "anything");
 
         app.answer("Blue");
         let second = seen.recv().unwrap();

@@ -18,7 +18,7 @@ pub const SCORE: &str = "typesafe_score";
 pub const LOCATE: &str = "typesafe_locate";
 
 pub const BASE: &str = "https://api.typesafe.ai/v1";
-const MODEL: &str = "jev-latest";
+pub const MODEL: &str = "jev-latest";
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// The one question every call asks, by the name its answer comes back under.
 const Q: &str = "q";
@@ -305,9 +305,24 @@ fn ask(
 ) -> Result<String, String> {
     let v: Value = serde_json::from_str(args).map_err(|_| "the arguments were not JSON.")?;
     let pictures = read_pictures(root, &image_paths(&v)?)?;
-    let body = request(name, &v, &pictures)?.to_string();
+    let request = request(name, &v, &pictures)?;
+    let body = systemone(base, key, &request, !pictures.is_empty(), TIMEOUT)?;
+    answer(&body, (name == LOCATE).then(|| pictures[0].size))
+}
+
+/// Posts one `/systemone` request and gives back the reply's body, or what went wrong in words for
+/// the agent. `images`: the request holds images, which TypeSafe takes only when told so. Blocks on
+/// the network, at most `timeout`.
+pub fn systemone(
+    base: &str,
+    key: &str,
+    request: &Value,
+    images: bool,
+    timeout: Duration,
+) -> Result<String, String> {
+    let body = request.to_string();
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
+        .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .build()
         .into();
@@ -315,7 +330,7 @@ fn ask(
         .post(&format!("{base}/systemone"))
         .header("Content-Type", "application/json")
         .header("Authorization", &format!("Bearer {key}"));
-    if !pictures.is_empty() {
+    if images {
         // Images are off unless each request that has one says so.
         call = call.header("TypeSafe-Danger-Zone-Images", "true");
     }
@@ -328,7 +343,7 @@ fn ask(
         .read_to_string()
         .map_err(|_| "TypeSafe could not be reached.".to_owned())?;
     match status {
-        200..=299 => answer(&text, (name == LOCATE).then(|| pictures[0].size)),
+        200..=299 => Ok(text),
         401 | 403 => Err("TypeSafe did not accept the key. The person can connect it again on the Providers page.".into()),
         400 | 413 | 422 => Err(format!("TypeSafe refused the question: {}", detail(&text))),
         other => Err(format!("TypeSafe answered HTTP {other}.")),

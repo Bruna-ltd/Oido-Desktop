@@ -9,6 +9,7 @@ use crate::completion::{Request, Role, Turn};
 use crate::model::{Message, Outcome};
 use crate::models::ModelRef;
 use crate::providers::ModelStatus;
+use crate::run::build_turns;
 
 /// The share of the limit from which a chat counts as nearly full.
 pub const NEAR: f64 = 0.8;
@@ -84,8 +85,10 @@ fn starts_over(m: &Message) -> bool {
 }
 
 /// The tokens a chat holds: the provider's count at its last finished reply since the last divider
-/// or summary. `None` before one has finished, and right after "Start fresh" or a summary.
-pub fn used(messages: &[Message]) -> Option<u32> {
+/// or summary. `None` before one has finished, and right after "Start fresh" or a summary. With
+/// `model` (called by that name), a reply another model wrote does not count: it counts tokens its
+/// own way, so its count does not measure the chat for this one.
+pub fn used(messages: &[Message], model: Option<&str>) -> Option<u32> {
     messages
         .iter()
         .rev()
@@ -95,9 +98,12 @@ pub fn used(messages: &[Message]) -> Option<u32> {
                 stats: Some(s),
                 outcome: Outcome::Done,
                 ..
-            } => s.context,
+            } => s
+                .context
+                .map(|c| model.is_none_or(|n| s.model == n).then_some(c)),
             _ => None,
         })
+        .flatten()
 }
 
 /// What the provider counted for a chat's last call, and what trimming took out of it.
@@ -109,9 +115,10 @@ pub struct Measured {
     pub trimmed: u32,
 }
 
-/// The chat's last finished reply since the last divider or summary, if the provider counted it. A
-/// later reply that went uncounted leaves nothing measured, as does "Start fresh" or a summary.
-pub fn measured(messages: &[Message]) -> Option<Measured> {
+/// The chat's last finished reply since the last divider or summary, if the provider counted it for
+/// `model` (called by that name). A later reply that went uncounted, or that another model wrote,
+/// leaves nothing measured, as does "Start fresh" or a summary.
+pub fn measured(messages: &[Message], model: &str) -> Option<Measured> {
     messages
         .iter()
         .rev()
@@ -121,7 +128,7 @@ pub fn measured(messages: &[Message]) -> Option<Measured> {
                 stats,
                 outcome: Outcome::Done,
                 ..
-            } => Some(stats.as_ref().and_then(|s| {
+            } => Some(stats.as_ref().filter(|s| s.model == model).and_then(|s| {
                 Some(Measured {
                     context: s.context?,
                     trimmed: s.trimmed.unwrap_or(0),
@@ -373,15 +380,27 @@ impl App {
         self.limits.get(model, declared)
     }
 
-    /// How full the agent's open chat is, against the model it answers with now.
+    /// How full the agent's open chat is, against the model it answers with now. After a change of
+    /// model the size is estimated, until that model has answered and counted it.
     pub fn chat_fill(&self, agent: &Agent) -> Option<Fill> {
-        let used = used(&agent.chat().messages)?;
-        let limit = match self.providers.status(agent.model.as_ref()) {
-            ModelStatus::Ready(m) => self.context_limit(&m),
-            _ => None,
+        let ModelStatus::Ready(m) = self.providers.status(agent.model.as_ref()) else {
+            return None;
         };
-        Some(Fill { used, limit })
+        let messages = &agent.chat().messages;
+        let used = used(messages, Some(&self.providers.model_name(&m))).or_else(|| {
+            used(messages, None)?;
+            Some(estimate(&build_turns(messages)))
+        })?;
+        Some(Fill {
+            used,
+            limit: self.context_limit(&m),
+        })
     }
+}
+
+/// About how many tokens `turns` hold, for a chat no provider has counted for the model now in use.
+fn estimate(turns: &[Turn]) -> u32 {
+    turns.iter().map(turn_tokens).fold(0, u32::saturating_add)
 }
 
 #[cfg(test)]
@@ -512,14 +531,14 @@ mod tests {
         }
         let user = || Message::User("hi".into());
         assert_eq!(
-            measured(&[user(), trimmed.clone(), user()]),
+            measured(&[user(), trimmed.clone(), user()], "m"),
             Some(Measured {
                 context: 5_000,
                 trimmed: 700
             })
         );
         assert_eq!(
-            measured(&[user(), trimmed, reply(None, Outcome::Done)]),
+            measured(&[user(), trimmed, reply(None, Outcome::Done)], "m"),
             None,
             "a later uncounted reply"
         );
@@ -554,16 +573,28 @@ mod tests {
     }
 
     #[test]
+    fn another_models_count_does_not_measure_the_chat() {
+        let chat = vec![
+            Message::User("hi".into()),
+            reply(Some(5_000), Outcome::Done),
+        ];
+        assert_eq!(used(&chat, Some("m")), Some(5_000));
+        assert_eq!(used(&chat, Some("other")), None);
+        assert_eq!(used(&chat, None), Some(5_000), "counted by someone");
+        assert_eq!(measured(&chat, "other"), None);
+    }
+
+    #[test]
     fn a_summary_or_divider_leaves_the_chat_unmeasured() {
         let mut chat = talk(1);
-        assert!(measured(&chat).is_some());
+        assert!(measured(&chat, "m").is_some());
         chat.push(Message::Summary {
             text: "s".into(),
             keeps: 2,
             outside: None,
         });
-        assert_eq!(measured(&chat), None);
-        assert_eq!(used(&chat), None);
+        assert_eq!(measured(&chat, "m"), None);
+        assert_eq!(used(&chat, None), None);
     }
 
     #[test]
@@ -608,7 +639,7 @@ mod tests {
     #[test]
     fn a_chat_holds_what_its_last_finished_reply_counted_until_it_starts_fresh() {
         let user = || Message::User("hi".into());
-        assert_eq!(used(&[user()]), None, "nothing answered yet");
+        assert_eq!(used(&[user()], None), None, "nothing answered yet");
         let chat = vec![
             user(),
             reply(Some(1_200), Outcome::Done),
@@ -617,16 +648,16 @@ mod tests {
             reply(None, Outcome::Done),
         ];
         assert_eq!(
-            used(&chat),
+            used(&chat, None),
             Some(1_200),
             "failed and uncounted replies skipped"
         );
         let mut fresh = chat.clone();
         fresh.push(Message::Divider("Context cleared".into()));
-        assert_eq!(used(&fresh), None);
+        assert_eq!(used(&fresh, None), None);
         fresh.push(user());
         fresh.push(reply(Some(300), Outcome::Done));
-        assert_eq!(used(&fresh), Some(300));
+        assert_eq!(used(&fresh, None), Some(300));
     }
 
     #[test]

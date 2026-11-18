@@ -282,7 +282,7 @@ fn user(s: &App, p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
             text(p.text.clone())
                 .font(k.ty.body)
                 .color(k.c.text_base)
-                .wrap()
+                .wrap_anywhere()
                 .selectable(true),
         );
     }

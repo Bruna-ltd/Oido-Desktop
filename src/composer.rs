@@ -742,13 +742,21 @@ impl App {
     }
 
     /// Sends the draft: it joins the chat and the agent starts answering. A whole command
-    /// (`/clear`) runs instead; while the agent is still answering, the message waits and goes
-    /// when the reply ends.
+    /// (`/clear`) runs instead; while the agent is still answering, or waits for you to answer or
+    /// decide on something, the message waits and goes when the turn ends.
     pub fn send(&mut self) {
-        if !self.can_answer() || self.awaiting_answer() {
+        if !self.can_answer() {
+            return;
+        }
+        // A command or a rewrite acts at once, so each waits until the request is settled.
+        let settling = self.awaiting_answer();
+        if settling && self.composer.editing.is_some() {
             return;
         }
         if let Some(c) = self.typed_command() {
+            if settling {
+                return;
+            }
             self.composer = Composer::focused();
             self.run_command(c);
             return;
@@ -781,7 +789,7 @@ impl App {
             self.post(&sid, prompt);
             return;
         }
-        if self.busy() {
+        if self.busy() || settling {
             match self.queued.get_mut(&sid) {
                 Some(waiting) => waiting.append(prompt),
                 None => {

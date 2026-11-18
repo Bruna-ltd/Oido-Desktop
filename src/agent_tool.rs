@@ -573,6 +573,7 @@ impl App {
             let typesafe: Vec<String> = crate::typesafe::specs()
                 .into_iter()
                 .map(|t| t.name)
+                .chain([crate::connector::jev::NAME.to_owned()])
                 .collect();
             out.push(format!(
                 "TypeSafe tools that can be given: {}",
