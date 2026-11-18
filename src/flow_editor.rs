@@ -607,6 +607,40 @@ impl App {
             .map(|t| t.schema)
     }
 
+    pub fn editor_add_reply(&mut self, at: &Loc) {
+        if let Some(n) = self.wf_editor.as_mut().and_then(|e| e.node_mut(at)) {
+            n.reply.push(crate::workflow::editor::ReplyRow {
+                name: rune::TextEdit::new(""),
+                kind: crate::workflow::definition::FieldKind::default(),
+            });
+        }
+    }
+
+    pub fn editor_remove_reply(&mut self, at: &Loc, i: usize) {
+        if let Some(ed) = &mut self.wf_editor {
+            if let Some(n) = ed.node_mut(at)
+                && i < n.reply.len()
+            {
+                n.reply.remove(i);
+            }
+            ed.check();
+        }
+    }
+
+    pub fn editor_set_reply_kind(&mut self, at: &Loc, i: usize, label: &str) {
+        use crate::workflow::definition::FieldKind;
+        if let Some(row) = self
+            .wf_editor
+            .as_mut()
+            .and_then(|e| e.node_mut(at))
+            .and_then(|n| n.reply.get_mut(i))
+            && let Some(kind) = FieldKind::ALL.into_iter().find(|k| k.label() == label)
+        {
+            row.kind = kind;
+        }
+        self.wf_menu = None;
+    }
+
     pub fn editor_toggle_all(&mut self, at: &Loc) {
         if let Some(n) = self.wf_editor.as_mut().and_then(|e| e.node_mut(at)) {
             n.all = !n.all;

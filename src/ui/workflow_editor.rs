@@ -11,7 +11,7 @@ use super::workflow_graph;
 use crate::app::App;
 use crate::flow_graph::View;
 use crate::workflow::cond;
-use crate::workflow::definition::{FOR_EACH, PARALLEL, SWITCH, TOOL, WHILE};
+use crate::workflow::definition::{FOR_EACH, FieldKind, GENERATE, PARALLEL, SWITCH, TOOL, WHILE};
 use crate::workflow::editor::{
     ArgKind, Block, Editor, INPUT_KINDS, KINDS, Loc, Menu, Node, ParamSpec, Part, Place, Refs,
     Target, params_of, specs,
@@ -982,6 +982,9 @@ fn card(
             out = out.child(expression_toggle(at, n, k));
         }
     }
+    if n.kind == GENERATE {
+        out = out.children(reply_fields(at, n, &key, s, k, layer));
+    }
     if n.kind == FOR_EACH || n.kind == PARALLEL {
         let on = n.go_on;
         let go = at.clone();
@@ -1225,6 +1228,73 @@ fn tool_params(
         };
         out.push(item);
     }
+    out
+}
+
+/// The fields an AI step answers with: none is plain text, some is an object of those fields that
+/// later steps can read as `name.field`, in a condition, a switch or a loop.
+fn reply_fields(at: &Loc, n: &Node, key: &str, s: &App, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
+    let c = &k.c;
+    let mut out = vec![
+        text("Answer as fields")
+            .font(k.ty.small_medium)
+            .color(c.text_muted),
+    ];
+    out.extend(help_line(
+        "Leave empty for plain text. With fields the AI must answer in this shape, and is asked again if it does not, so later steps can use result.field.",
+        k,
+    ));
+    let labels: Vec<&str> = FieldKind::ALL.iter().map(|f| f.label()).collect();
+    for (i, row_) in n.reply.iter().enumerate() {
+        let (pick_at, rm_at) = (at.clone(), at.clone());
+        let picker = pick(
+            format!("wfe-reply-kind-{key}-{i}"),
+            Menu::ReplyKind(at.clone(), i),
+            &labels,
+            Some(row_.kind.label()),
+            "Type",
+            false,
+            s,
+            k,
+            layer,
+            move |s, label| s.editor_set_reply_kind(&pick_at, i, label),
+        );
+        let name_at = at.clone();
+        out.push(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(col().grow(1.0).child(field(
+                    "Field name",
+                    &row_.name,
+                    &format!("wfe-reply-{key}-{i}"),
+                    "score",
+                    1,
+                    None,
+                    k,
+                    move |s: &mut App| s.editor_text(&Target::Reply(name_at.clone(), i)),
+                )))
+                .child(row().pt(18.0).child(picker))
+                .child(
+                    row().pt(18.0).child(
+                        small("Remove", ButtonVariant::Ghost)
+                            .on_press(move |s: &mut App| s.editor_remove_reply(&rm_at, i))
+                            .build(k)
+                            .key(format!("wfe-reply-remove-{key}-{i}")),
+                    ),
+                ),
+        );
+    }
+    let add_at = at.clone();
+    out.push(
+        row().child(
+            small("Add a field", ButtonVariant::Outline)
+                .on_press(move |s: &mut App| s.editor_add_reply(&add_at))
+                .build(k)
+                .key(format!("wfe-add-reply-{key}")),
+        ),
+    );
     out
 }
 

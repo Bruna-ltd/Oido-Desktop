@@ -9,9 +9,9 @@ use serde_json::Value;
 
 use super::cond::{self, Op};
 use super::definition::{
-    Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input,
-    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, Trigger, WAIT, WHILE, each_step, plain,
-    validate,
+    Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, Field, FieldKind, GENERATE,
+    IF, Input, PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, Trigger, WAIT, WHILE, each_step,
+    plain, validate,
 };
 use super::{Published, Saved};
 use crate::schedules::form::TimingForm;
@@ -343,6 +343,8 @@ pub struct Node {
     pub go_on: bool,
     /// For a switch: run every case that matches, not only the first.
     pub all: bool,
+    /// For an AI step: the fields to answer with; none means plain text.
+    pub reply: Vec<ReplyRow>,
     /// One per [`specs`] of the kind.
     pub fields: Vec<TextEdit>,
     pub blocks: Vec<Block>,
@@ -426,6 +428,13 @@ impl Param {
             kind,
         }
     }
+}
+
+/// One field of the reply an AI step is asked for, as the editor holds it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ReplyRow {
+    pub name: TextEdit,
+    pub kind: FieldKind,
 }
 
 /// One argument a tool takes, as a form shows it.
@@ -605,6 +614,7 @@ impl Node {
             },
             go_on: false,
             all: false,
+            reply: Vec::new(),
             fields: specs(kind).iter().map(|_| TextEdit::new("")).collect(),
             blocks,
             when: matches!(kind, IF | WHILE).then(Comparison::default),
@@ -685,7 +695,17 @@ impl Node {
                     .map(|(k, v)| (k.clone(), Param::of(v)))
                     .collect();
             }
-            GENERATE => n.set_field("instruction", text(&s.instruction)),
+            GENERATE => {
+                n.set_field("instruction", text(&s.instruction));
+                n.reply = s
+                    .reply
+                    .iter()
+                    .map(|f| ReplyRow {
+                        name: TextEdit::new(f.name.clone()),
+                        kind: f.kind,
+                    })
+                    .collect();
+            }
             DECIDE => {
                 n.set_field("question", text(&s.question));
                 n.set_field("options", s.options.join("\n"));
@@ -814,7 +834,17 @@ impl Node {
                 }
                 s.args = Some(args).filter(|a| !a.is_empty());
             }
-            GENERATE => s.instruction = get("instruction"),
+            GENERATE => {
+                s.instruction = get("instruction");
+                s.reply = self
+                    .reply
+                    .iter()
+                    .map(|r| Field {
+                        name: r.name.text.trim().to_owned(),
+                        kind: r.kind,
+                    })
+                    .collect();
+            }
             DECIDE => {
                 s.question = get("question");
                 s.options = self.field_at("options").map(lines_of).unwrap_or_default();
@@ -947,6 +977,8 @@ pub enum Target {
     Right(Loc),
     /// An argument of a tool step: its name, and what it is, which it is made as when first typed in.
     Param(Loc, String, ArgKind),
+    /// The name of a field of an AI step's reply.
+    Reply(Loc, usize),
 }
 
 /// Which pop-up list of the editor is open; one at a time.
@@ -954,6 +986,8 @@ pub enum Target {
 pub enum Menu {
     Agent,
     InputKind(usize),
+    /// The type of a field of an AI step's reply.
+    ReplyKind(Loc, usize),
     /// Add a step at the end of this list.
     Add(Place),
     /// Add a step at this position in this list.
@@ -1463,6 +1497,10 @@ impl Editor {
                     })
                     .edit
             }),
+            Target::Reply(at, i) => self
+                .node_mut(at)
+                .and_then(|n| n.reply.get_mut(*i))
+                .map(|r| &mut r.name),
             Target::Right(at) => self
                 .node_mut(at)
                 .and_then(|n| n.when.as_mut())
@@ -2343,6 +2381,33 @@ mod tests {
             e.names(&here, None),
             ["inputs.folder", "command", "files", "text"]
         );
+    }
+
+    #[test]
+    fn an_ai_step_keeps_the_fields_it_answers_with_in_order() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], GENERATE);
+        e.steps[0].reply = vec![
+            ReplyRow {
+                name: TextEdit::new(" score "),
+                kind: FieldKind::Number,
+            },
+            ReplyRow {
+                name: TextEdit::new("tags"),
+                kind: FieldKind::List,
+            },
+        ];
+        let step = e.steps[0].to_step("1", &mut Vec::new());
+        let got: Vec<(&str, FieldKind)> = step
+            .reply
+            .iter()
+            .map(|f| (f.name.as_str(), f.kind))
+            .collect();
+        assert_eq!(
+            got,
+            [("score", FieldKind::Number), ("tags", FieldKind::List)]
+        );
+        assert_eq!(Node::from_step(&step).reply[1].kind, FieldKind::List);
     }
 
     #[test]

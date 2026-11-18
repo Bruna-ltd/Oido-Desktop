@@ -1364,6 +1364,26 @@ pub static SCENES: &[Scene] = &[
             index: last,
         }));
     }),
+    ("workflow-reply", |s| {
+        use crate::workflow::editor::Loc;
+        graph_scene(s);
+        s.editor_add(&Vec::new(), "Ask the AI");
+        let at = Loc {
+            place: Vec::new(),
+            index: s
+                .wf_editor
+                .as_ref()
+                .map_or(0, |e| e.steps.len().saturating_sub(1)),
+        };
+        s.editor_add_reply(&at);
+        s.editor_add_reply(&at);
+        if let Some(n) = s.wf_editor.as_mut().and_then(|e| e.node_mut(&at)) {
+            n.reply[0].name = TextEdit::new("score");
+            n.reply[0].kind = crate::workflow::definition::FieldKind::Number;
+            n.reply[1].name = TextEdit::new("reason");
+        }
+        s.select_step(Some(at));
+    }),
     ("workflow-trigger", |s| {
         graph_scene(s);
         // Live as an older copy, with a schedule asked for in the draft.

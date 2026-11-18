@@ -211,6 +211,7 @@ is the one non-deterministic tool step and is marked as such.
   the body bound (nothing else changes between rounds). A loop still true after `max` rounds fails
   the run rather than stopping quietly.
 - `index` counts from 0; the run log's round numbers count from 1.
+- `generate` with `reply: [{name, kind}]` (kinds `text`, `number`, `yes_no`, `list`) asks the model for a JSON object of those fields and gives back that object, so later steps can use `result.field` in conditions, switches and loops. A number written as text, "yes" for true and a single value for a list are taken as meant; any other mismatch sends the reply back to the model, with what was wrong, up to 2 more times, then fails the step. `decide` re-asks the same way when the answer is not one of its options.
 - `switch` compares by equality only (a whole number equals the same number written with a point). To test a different condition in each case, switch on `true` and write a condition in each `when`; with `all` set every case that holds runs, as with n8n's "send data to all matching outputs".
 - The editor's condition operators are is, is not, contains, does not contain, starts with, ends with, matches the pattern, is empty, is not empty, is more than, is at least, is less than, is at most. "Matches the pattern" is a regular expression (`text.matches("^a+")` in an expression), bounded in size.
 - A `set` step's values each see what was there before it, not one another.

@@ -44,6 +44,7 @@ pub const MAX_STEPS: usize = 50;
 /// Containers inside containers.
 pub const MAX_DEPTH: usize = 5;
 const MAX_OPTIONS: usize = 20;
+const MAX_REPLY_FIELDS: usize = 20;
 /// A loop's most rounds when it names no limit, and the most it may name.
 pub const DEFAULT_ROUNDS: u32 = 100;
 pub const MAX_ROUNDS: u32 = 1000;
@@ -116,6 +117,40 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// What kind of value one field of an AI reply holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldKind {
+    #[default]
+    Text,
+    Number,
+    /// True or false.
+    YesNo,
+    /// A list of text.
+    List,
+}
+
+impl FieldKind {
+    pub const ALL: [FieldKind; 4] = [Self::Text, Self::Number, Self::YesNo, Self::List];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Number => "number",
+            Self::YesNo => "yes or no",
+            Self::List => "list of text",
+        }
+    }
+}
+
+/// One field of the reply a `generate` step asks the model for.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Field {
+    pub name: String,
+    #[serde(default)]
+    pub kind: FieldKind,
+}
+
 /// One case of a `switch`: the steps run when its value equals the one switched on.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Case {
@@ -165,6 +200,10 @@ pub struct Step {
     pub cases: Vec<Case>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default: Vec<Step>,
+    /// generate: the fields to answer with. With none the result is text; with some it is an
+    /// object of these fields, checked, so later steps can use `name.field`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reply: Vec<Field>,
     /// switch: run every case that matches, in order, not only the first.
     #[serde(default, skip_serializing_if = "is_false")]
     pub all: bool,
@@ -225,7 +264,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 28] = [
+        let fields: [(&str, bool); 29] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -237,6 +276,7 @@ impl Step {
             ("cases", !self.cases.is_empty()),
             ("default", !self.default.is_empty()),
             ("all", self.all),
+            ("reply", !self.reply.is_empty()),
             ("over", self.over.is_some()),
             ("as", self.item.is_some()),
             ("on_error", self.on_error.is_some()),
@@ -266,7 +306,7 @@ impl Step {
 fn takes(kind: &str) -> &'static [&'static str] {
     match kind {
         TOOL => &["tool", "args"],
-        GENERATE => &["instruction"],
+        GENERATE => &["instruction", "reply"],
         DECIDE => &["question", "options", "input"],
         IF => &["cond", "then", "else"],
         SWITCH => &["on", "cases", "default", "all"],
@@ -520,12 +560,27 @@ impl Check<'_> {
                     }
                 }
             }
-            GENERATE => match s.instruction.as_deref() {
-                None | Some("") => self
-                    .bad
-                    .push(format!("{at}: a generate step needs an instruction")),
-                Some(t) => refs.extend(template::find_refs(t)),
-            },
+            GENERATE => {
+                match s.instruction.as_deref() {
+                    None | Some("") => self
+                        .bad
+                        .push(format!("{at}: a generate step needs an instruction")),
+                    Some(t) => refs.extend(template::find_refs(t)),
+                }
+                let names: BTreeSet<&str> = s.reply.iter().map(|f| f.name.as_str()).collect();
+                if s.reply.len() > MAX_REPLY_FIELDS {
+                    self.bad.push(format!(
+                        "{at}: a reply may have up to {MAX_REPLY_FIELDS} fields"
+                    ));
+                } else if s.reply.iter().any(|f| !name_ok(&f.name, false)) {
+                    self.bad.push(format!(
+                        "{at}: each reply field needs a name of letters, digits and underscores"
+                    ));
+                } else if names.len() != s.reply.len() {
+                    self.bad
+                        .push(format!("{at}: the reply fields must have different names"));
+                }
+            }
             DECIDE => {
                 match s.question.as_deref() {
                     None | Some("") => self
