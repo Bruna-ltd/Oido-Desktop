@@ -173,10 +173,19 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
             let (who, task) = crate::delegate::parse(&args.to_string());
             let Some(member) = p.crew.iter().find(|c| c.is(&who)) else {
                 return ToolOutcome {
-                    error: Some(format!("{who:?} is not on this agent's team.")),
+                    error: Some(format!(
+                        "{who:?} is not an agent this workflow can hand to."
+                    )),
                     ..ToolOutcome::default()
                 };
             };
+            if crate::delegate::in_background(&args.to_string()) {
+                member.start(&task, outside);
+                return ToolOutcome {
+                    value: Value::String(format!("Handed to {who}, not waiting for its answer.")),
+                    ..ToolOutcome::default()
+                };
+            }
             let taken = member.take(&task, outside, stop);
             let done = match taken.answer() {
                 Ok(text) => ToolOutcome {
@@ -1621,7 +1630,57 @@ mod tests {
             .prepare_flow(&w.agent_id, Some(&w.id), &w.definition)
             .err()
             .unwrap();
-        assert!(why.contains("not on") && why.contains("team"), "{why}");
+        assert!(why.contains("no agent has that name"), "{why}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_step_can_hand_a_task_to_any_agent_and_wait_for_the_answer_or_just_start_it() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (200, EVENTS, text_stream("Cy answers")),
+                (200, EVENTS, text_stream("Cy answers later")),
+            ],
+        );
+        // Cy is another agent of the roster, not on the first one's team.
+        let mut cy = crate::agents::Agent::blank(new_id());
+        cy.name = "Cy".into();
+        cy.model = app.current().unwrap().model.clone();
+        app.roster.list.push(cy);
+        let hand = |id: &str, background: bool| Step {
+            id: id.into(),
+            kind: "tool".into(),
+            tool: Some(crate::tools::DELEGATE.into()),
+            args: json!({"agent": "cy", "task": format!("Do {id}"), "background": background})
+                .as_object()
+                .cloned(),
+            bind: Some(id.into()),
+            ..Step::default()
+        };
+
+        // Waiting is the default: its answer is the step's result.
+        save_workflow(&mut app, vec![hand("now", false)], json!({}));
+        app.go(Route::Workflows);
+        app.run_open_workflow();
+        let run = &app.wf_runs[0];
+        assert_eq!(run.status, RunStatus::Succeeded, "{}", run.error);
+        assert!(run.output.contains("Cy answers"), "{}", run.output);
+        assert!(seen.try_recv().unwrap().contains("do now"));
+
+        // Not waiting: the step ends at once saying so, and the agent still gets the task.
+        let w = save_workflow(&mut app, vec![hand("later", true)], json!({}));
+        app.select_workflow(&w.id);
+        app.run_open_workflow();
+        let run = &app.wf_runs[0];
+        assert_eq!(run.status, RunStatus::Succeeded, "{}", run.error);
+        assert!(run.output.contains("not waiting"), "{}", run.output);
+        // The agent was started: its request comes in.
+        let asked = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(asked.contains("do later"), "{asked}");
     }
 
     #[cfg(unix)]

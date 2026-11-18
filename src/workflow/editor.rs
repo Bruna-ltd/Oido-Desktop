@@ -201,12 +201,16 @@ const fn kind(
     }
 }
 
+/// "Ask an agent" in the Add step list. It is not a kind of step of its own: it adds a tool step
+/// that hands a task to an agent.
+pub const AGENT: &str = "agent";
+
 pub const COMMON: &str = "Common";
 pub const MORE: &str = "More";
 
 /// The kinds of step a person can add, in the order the list shows them: what most workflows are
 /// made of first, then the rest.
-pub const KINDS: [Kind; 13] = [
+pub const KINDS: [Kind; 14] = [
     kind(
         TOOL,
         "Use a tool",
@@ -218,6 +222,12 @@ pub const KINDS: [Kind; 13] = [
         "Ask the AI",
         COMMON,
         "The model writes text from your instruction",
+    ),
+    kind(
+        AGENT,
+        "Ask an agent",
+        COMMON,
+        "Hand a task to one of your agents, and use its answer",
     ),
     kind(
         IF,
@@ -479,7 +489,11 @@ pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
                 key.as_str(),
                 "command" | "content" | "task" | "old_text" | "new_text" | "instruction"
             ) || kind == ArgKind::Json;
-            let mut label = key.replace(['_', '-'], " ");
+            // A schema may name a box in words of its own.
+            let mut label = match p.get("title").and_then(Value::as_str) {
+                Some(title) => title.to_owned(),
+                None => key.replace(['_', '-'], " "),
+            };
             if let Some(first) = label.get(..1) {
                 label = format!("{}{}", first.to_uppercase(), &label[1..]);
             }
@@ -550,6 +564,12 @@ fn opt(t: &TextEdit) -> Option<String> {
 impl Node {
     /// A new, empty step of `kind`.
     pub fn new(kind: &str, id: String) -> Node {
+        if kind == AGENT {
+            return Node {
+                tool: crate::tools::DELEGATE.to_owned(),
+                ..Node::new(TOOL, id)
+            };
+        }
         let blocks = match kind {
             IF => vec![Block::new(Part::Then), Block::new(Part::Else)],
             SWITCH => vec![Block::new(Part::Case), Block::new(Part::Default)],
@@ -573,6 +593,19 @@ impl Node {
             when: matches!(kind, IF | WHILE).then(Comparison::default),
             params: BTreeMap::new(),
         }
+    }
+
+    /// What the step is called in the Add step list.
+    pub fn label(&self) -> &'static str {
+        let kind = if self.kind == TOOL && self.tool == crate::tools::DELEGATE {
+            AGENT
+        } else {
+            self.kind.as_str()
+        };
+        KINDS
+            .iter()
+            .find(|x| x.kind == kind)
+            .map_or("Step", |x| x.label)
     }
 
     fn field_at(&self, key: &str) -> Option<&TextEdit> {
@@ -2372,5 +2405,34 @@ mod tests {
         assert!(why.contains("trigger") && why.contains("minutes"), "{why}");
         e.trigger.set_schedule(false, 1_000);
         assert_eq!(e.definition().unwrap().trigger, Trigger::Manual);
+    }
+
+    #[test]
+    fn ask_an_agent_adds_a_step_that_hands_a_task_over_and_is_shown_by_that_name() {
+        let n = Node::new(AGENT, "a1".into());
+        assert_eq!(
+            (n.kind.as_str(), n.tool.as_str()),
+            (TOOL, crate::tools::DELEGATE)
+        );
+        assert_eq!(n.label(), "Ask an agent");
+        assert_eq!(kind_named("Ask an agent"), Some(AGENT));
+        assert_eq!(Node::new(TOOL, "t1".into()).label(), "Use a tool");
+
+        // Saved and opened again it is still that: a tool step naming the delegate tool.
+        let mut e = Editor::blank("a1");
+        e.name = TextEdit::new("Hand over");
+        e.steps.push(n);
+        e.set_param(
+            &Loc {
+                place: Vec::new(),
+                index: 0,
+            },
+            "agent",
+            ArgKind::Text,
+            "Ann",
+        );
+        let step = e.steps[0].to_step("1", &mut Vec::new());
+        assert_eq!(step.tool.as_deref(), Some(crate::tools::DELEGATE));
+        assert_eq!(Node::from_step(&step).label(), "Ask an agent");
     }
 }

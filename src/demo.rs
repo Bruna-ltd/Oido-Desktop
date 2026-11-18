@@ -1344,6 +1344,19 @@ pub static SCENES: &[Scene] = &[
         }
     }),
     ("workflow-graph", |s| graph_scene(s)),
+    ("workflow-agent", |s| {
+        use crate::workflow::editor::Loc;
+        graph_scene(s);
+        s.editor_add(&Vec::new(), "Ask an agent");
+        let last = s
+            .wf_editor
+            .as_ref()
+            .map_or(0, |e| e.steps.len().saturating_sub(1));
+        s.select_step(Some(Loc {
+            place: Vec::new(),
+            index: last,
+        }));
+    }),
     ("workflow-trigger", |s| {
         graph_scene(s);
         // Live as an older copy, with a schedule asked for in the draft.

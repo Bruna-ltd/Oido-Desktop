@@ -849,13 +849,6 @@ fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
     list
 }
 
-fn kind_label(kind: &str) -> &'static str {
-    KINDS
-        .iter()
-        .find(|x| x.kind == kind)
-        .map_or("Step", |x| x.label)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn card(
     s: &App,
@@ -902,9 +895,7 @@ fn card(
                 .build(k)
                 .key(format!("wfe-remove-{key}")),
         );
-    let label = text(kind_label(&n.kind))
-        .font(k.ty.ui_medium)
-        .color(c.text_base);
+    let label = text(n.label()).font(k.ty.ui_medium).color(c.text_base);
     let head = row()
         .w_full()
         .center_y()
@@ -953,7 +944,11 @@ fn card(
     }
 
     if n.kind == TOOL {
-        out = out.child(tool_field(s, at, n, &key, k, layer));
+        // Handing a task to an agent is its own kind of step in the list, so it has no tool to
+        // choose.
+        if n.tool != crate::tools::DELEGATE {
+            out = out.child(tool_field(s, at, n, &key, k, layer));
+        }
         for p in tool_params(s, ed, at, n, &key, k, layer) {
             out = out.child(p);
         }

@@ -8,7 +8,6 @@
 //! frame, and a join under a frame is the frame's end.
 
 use super::definition::{DECIDE, GENERATE, plain};
-use super::editor::KINDS;
 use super::editor::{Editor, Loc, Node, Part, Place};
 
 pub const NODE_W: f32 = 240.0;
@@ -257,11 +256,7 @@ impl Layout {
 /// The text a step shows: what it does in a sentence, and under it what kind of step it is.
 fn words(n: &Node) -> (String, String) {
     let step = n.to_step("", &mut Vec::new());
-    let kind = KINDS
-        .iter()
-        .find(|k| k.kind == n.kind)
-        .map_or("", |k| k.label);
-    (plain(&step), kind.to_owned())
+    (plain(&step), n.label().to_owned())
 }
 
 fn is_model(n: &Node) -> bool {

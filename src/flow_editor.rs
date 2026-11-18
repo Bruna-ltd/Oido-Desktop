@@ -575,19 +575,12 @@ impl App {
     }
 
     /// The tools a step of the editor's workflow can use, by the name the model knows them by:
-    /// the built-in ones a flow may call, those of the MCP servers that are on, and handing a task
-    /// over when the agent has a team.
+    /// the built-in ones a flow may call, and those of the MCP servers that are on. Handing a
+    /// task to an agent is its own kind of step, not a tool to choose.
     pub fn step_tools(&self, current: &str) -> Vec<String> {
         let mut tools: Vec<String> = STEP_TOOLS.iter().map(|t| (*t).to_owned()).collect();
         for server in self.mcp.servers.iter().filter(|m| m.offers()) {
             tools.extend(server.tools.iter().map(|t| server.qualified(&t.name)));
-        }
-        let agent = self.wf_editor.as_ref().map(|e| e.agent_id.as_str());
-        if agent
-            .and_then(|id| self.roster.agent_ref(id))
-            .is_some_and(|a| !a.subagents.is_empty())
-        {
-            tools.push(crate::tools::DELEGATE.to_owned());
         }
         // The one a step already names stays, though its server is off.
         if !current.is_empty() && !tools.iter().any(|t| t == current) {
@@ -599,12 +592,14 @@ impl App {
     /// The JSON schema of the arguments of a tool, as the workflow's agent would see it.
     pub fn step_tool_schema(&self, tool: &str) -> Option<serde_json::Value> {
         if tool == crate::tools::DELEGATE {
-            let team = self
-                .wf_editor
-                .as_ref()
-                .and_then(|e| self.roster.agent_ref(&e.agent_id))
-                .map(|a| a.subagents.clone())?;
-            return Some(crate::delegate::spec(&team).schema);
+            let agents: Vec<_> = self
+                .roster
+                .list
+                .iter()
+                .flat_map(|a| std::iter::once(a).chain(a.subagents.iter()))
+                .cloned()
+                .collect();
+            return Some(crate::delegate::step_schema(&agents));
         }
         self.all_tools()
             .into_iter()

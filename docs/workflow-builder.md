@@ -247,10 +247,11 @@ is the one non-deterministic tool step and is marked as such.
   workflows use). Renaming or deleting a workflow another one runs is found when that one next
   runs or is saved, not at the moment. Outside text: the other workflow is held only if what it
   was given is outside text; what it fetches itself comes back as outside text as usual.
-- `delegate` is a `tool` step with the tool `delegate` and arguments `agent` (a team member of the
-  workflow's agent, fixed text, any case) and `task` (text; `{{...}}` allowed). The editor offers
-  it only when the agent has a team. A member the workflow names is made ready before the run
-  starts (so one that is not on the team, or has no model, is said up front). It takes the task as
+- `delegate` is a `tool` step with the tool `delegate` and arguments `agent` (an agent by name,
+  fixed text, any case: one of the workflow's own team first, else any agent in the roster),
+  `task` (text; `{{...}}` allowed) and `background` (yes: start it and go on). The editor shows it
+  as the **Ask an agent** step. An agent the workflow names is made ready before the run starts
+  (so one that does not exist, or has no model, is said up front). It takes the task as
   in a chat: fresh, with its own brief, model, tools and folder, unattended, up to 20 model calls.
   Stop ends it. The answer is the step's result, as text. Each task is filed as a run of the
   member's own under the Runs page. It goes through the guard like any acting step: if its task
@@ -582,3 +583,20 @@ A workflow has a **draft** (what the editor changes and a test run uses) and a *
 - **Left out on purpose**: version history, a webhook or channel trigger, running the draft of a
   workflow that another workflow calls (a call always runs the callee's published copy, so saving a
   draft that calls an unpublished one is refused).
+
+## Ask an agent (ADR-10)
+
+The `delegate` step is no longer limited to the workflow's own team, and has its own entry in the
+Add step list.
+
+- **Any agent**: the step names an agent of the roster (its own team members win a name clash). The
+  agent starts fresh and unattended, with its own brief, model, tools and folder, through the same
+  guard, and its run is filed on the Runs page. This widens ADR-7, which kept delegation inside
+  the agent: the agent a flow calls may have tools the flow's own agent does not, so what it may
+  do is decided by its own settings and the guard, not by the workflow.
+- **Wait or not**: by default the step waits and its result is the agent's answer. With
+  **Background** on, it starts the agent on a worker and the flow goes on at once; the step's result
+  is only a note that it was handed over, so no later step can use an answer. Stopping the flow does
+  not stop a background agent, and its run is filed when it ends (an app that closes first loses it).
+- **Stored as** the existing `delegate` tool step, so the engine, the guard and saved workflows are
+  unchanged; "Ask an agent" is how the editor names it.
