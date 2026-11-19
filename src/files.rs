@@ -120,7 +120,13 @@ fn read_text(path: &Path, root: &Path) -> Result<String, String> {
 
 fn read(root: &Path, v: &Value) -> Result<String, String> {
     let path = resolve(root, text(v, "path")?)?;
-    let body = read_text(&path, root)?;
+    let body = match std::fs::read(&path) {
+        // Only for reading: an edit must never write a PDF's text back over the PDF.
+        Ok(bytes) if bytes.starts_with(b"%PDF-") => {
+            crate::prompt::pdf_text(&shown(root, &path), &bytes)?
+        }
+        _ => read_text(&path, root)?,
+    };
     let lines: Vec<&str> = body.split_inclusive('\n').collect();
     let total = lines.len();
     let start = count(v, "offset").unwrap_or(1).max(1) - 1;
@@ -303,6 +309,8 @@ mod tests {
         assert!(call(&r, READ, json!({"path": "nope.txt"})).starts_with("Error:"));
         std::fs::write(r.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
         assert!(call(&r, READ, json!({"path": "bin"})).contains("not a text file"));
+        std::fs::write(r.join("a.pdf"), crate::prompt::test_pdf()).unwrap();
+        assert!(call(&r, READ, json!({"path": "a.pdf"})).contains("Hello PDF"));
         std::fs::write(r.join("empty"), "").unwrap();
         assert_eq!(
             call(&r, READ, json!({"path": "empty"})),
