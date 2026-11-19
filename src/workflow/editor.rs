@@ -1046,8 +1046,6 @@ pub enum Menu {
     Param(Loc, String),
     /// How it compares.
     Compare(Loc),
-    /// Names to put into a box.
-    Names(Target),
 }
 
 /// A workflow being made or changed.
@@ -1433,10 +1431,31 @@ impl Editor {
         let node = Node::new(kind, self.fresh_id());
         self.record("Add step");
         self.block_mut(place)?.insert(index, node);
+        self.name_required_results();
         Some(Loc {
             place: place.clone(),
             index,
         })
+    }
+
+    /// Gives the result of every step that must keep one (an answer, a flow's output, values) a
+    /// name where it has none, so nothing has to be filled in just to let the workflow run.
+    pub fn name_required_results(&mut self) {
+        fn walk(list: &mut [Node], taken: &mut Vec<String>) {
+            for n in list {
+                if matches!(n.kind.as_str(), DECIDE | FLOW | SET) && n.bind.text.trim().is_empty() {
+                    let name = fresh_name(n, taken);
+                    taken.push(name.clone());
+                    n.bind = TextEdit::new(name);
+                }
+                for block in &mut n.blocks {
+                    walk(&mut block.steps, taken);
+                }
+            }
+        }
+        let mut taken = Vec::new();
+        collect_binds(&self.steps, &mut taken);
+        walk(&mut self.steps, &mut taken);
     }
 
     pub fn remove(&mut self, at: &Loc) {
@@ -1676,7 +1695,7 @@ impl Editor {
         seen
     }
 
-    fn node(&self, at: &Loc) -> Option<&Node> {
+    pub fn node(&self, at: &Loc) -> Option<&Node> {
         let mut list = &self.steps;
         for &(step, block) in &at.place {
             list = &list.get(step)?.blocks.get(block)?.steps;
@@ -1853,10 +1872,7 @@ impl Editor {
             return Vec::new();
         };
         let seen = self.scope(at, key);
-        let mut fields = if seen
-            .iter()
-            .any(|s| matches!(s, Seen::Item(n) if n == root))
-        {
+        let mut fields = if seen.iter().any(|s| matches!(s, Seen::Item(n) if n == root)) {
             self.item_fields(at, root)
         } else {
             seen.iter()
@@ -1909,11 +1925,71 @@ impl Editor {
             .and_then(|n| n.field_at("over"))
             .map(|t| t.text.trim().to_owned())
             .unwrap_or_default();
-        if over.is_empty() || !over.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+        if over.is_empty()
+            || !over
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
             return Vec::new();
         }
         let path: Vec<&str> = over.split('.').collect();
         self.fields_at_path(&loop_at, Some("over"), &path)
+    }
+
+    /// What the step at `at` can use, nearest first: the results of the steps before it, a loop's
+    /// item, the inputs.
+    pub fn available(&self, at: &Loc) -> Vec<Avail> {
+        let mut out: Vec<Avail> = Vec::new();
+        for seen in self.scope(at, None) {
+            out.push(match seen {
+                Seen::Input(n) => Avail {
+                    title: format!("Input: {n}"),
+                    root: Root::Name(format!("inputs.{n}")),
+                    fields: Vec::new(),
+                },
+                Seen::Item(n) => Avail {
+                    title: format!("The current item ({n})"),
+                    fields: self.item_fields(at, &n),
+                    root: Root::Name(n),
+                },
+                Seen::Index => Avail {
+                    title: "Which round this is (from 0)".to_owned(),
+                    root: Root::Name("index".to_owned()),
+                    fields: Vec::new(),
+                },
+                Seen::Error => Avail {
+                    title: "What went wrong".to_owned(),
+                    root: Root::Name("error".to_owned()),
+                    fields: Vec::new(),
+                },
+                Seen::Step(loc) => {
+                    let Some(node) = self.node(&loc) else {
+                        continue;
+                    };
+                    if node.kind == WAIT {
+                        continue;
+                    }
+                    Avail {
+                        title: plain(&node.to_step("", &mut Vec::new())),
+                        fields: node_fields(node),
+                        root: Root::Step(loc),
+                    }
+                }
+            });
+        }
+        out.reverse();
+        out
+    }
+
+    /// The name a root is used by, giving a step's result a name if it has none.
+    pub fn root_name(&mut self, root: &Root) -> Option<String> {
+        match root {
+            Root::Name(n) => Some(n.clone()),
+            Root::Step(at) => self.resolve(&Source::Step {
+                at: at.clone(),
+                suffix: String::new(),
+            }),
+        }
     }
 
     /// The name a [`Found`] stands for, if it has one now.
@@ -1999,6 +2075,23 @@ impl Editor {
 }
 
 /// What a box at some place can reach, as the scope walk finds it.
+/// Where something a step can use comes from.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Root {
+    /// A step's result, by the name it keeps it under (given one when first used).
+    Step(Loc),
+    /// A name that is there already: an input, a loop's item.
+    Name(String),
+}
+
+/// One thing a step can use, with what it is known to hold, for the node window's input list.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Avail {
+    pub title: String,
+    pub root: Root,
+    pub fields: Vec<Field>,
+}
+
 /// What is typed at the caret, and how it could be finished.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Completion {
@@ -2223,8 +2316,7 @@ mod tests {
         );
         // A step's result, a field's own fields, a shell's two, and the inputs.
         assert_eq!(
-            finish(&inside, Refs::Braces, "{{mail.")
-                .map(|c| c.1),
+            finish(&inside, Refs::Braces, "{{mail.").map(|c| c.1),
             Some(vec!["mail.messages".into()])
         );
         assert_eq!(
@@ -2247,6 +2339,34 @@ mod tests {
         assert_eq!(finish(&inside, Refs::Bare, "message.subject"), None);
         assert_eq!(finish(&at(&[], 0), Refs::Bare, "files.s"), None);
         assert_eq!(finish(&inside, Refs::Bare, "1.5"), None);
+    }
+
+    #[test]
+    fn no_kind_of_step_asks_for_a_name_for_its_result_when_it_is_added_or_run() {
+        for kind in KINDS {
+            // Anywhere: at the top, in a branch of an if, and twice, so names do not clash.
+            let mut e = Editor::blank("a1");
+            e.add_at(&Vec::new(), 0, kind.kind).unwrap();
+            e.add_at(&Vec::new(), 1, kind.kind).unwrap();
+            e.add_at(&Vec::new(), 0, IF).unwrap();
+            e.add_at(&vec![(0, 0)], 0, kind.kind).unwrap();
+            e.check();
+            for why in &e.problems {
+                assert!(!why.contains("bind"), "{}: {}", kind.label, why);
+            }
+            let mut binds = Vec::new();
+            collect_binds(&e.steps, &mut binds);
+            let mut unique = binds.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(binds.len(), unique.len(), "{}: {binds:?}", kind.label);
+        }
+        // One cleared by hand is named again before a run.
+        let mut e = Editor::blank("a1");
+        e.add_at(&Vec::new(), 0, DECIDE).unwrap();
+        e.steps[0].bind = TextEdit::new("");
+        e.name_required_results();
+        assert_eq!(e.steps[0].bind.text, "choice");
     }
 
     #[test]

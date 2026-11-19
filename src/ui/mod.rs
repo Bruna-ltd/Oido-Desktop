@@ -30,6 +30,7 @@ pub(crate) mod usage;
 mod workflow_editor;
 mod workflow_graph;
 mod workflow_logs;
+mod workflow_node;
 mod workflow_picker;
 mod workflows;
 

@@ -301,6 +301,9 @@ impl App {
         if self.wf_test.running.is_some() {
             return;
         }
+        if let Some(ed) = &mut self.wf_editor {
+            ed.name_required_results();
+        }
         self.autosave();
         let Some(ed) = &mut self.wf_editor else {
             return;
@@ -813,7 +816,7 @@ impl App {
     /// What the step at `at` made in the last run of it: a top-level step's bound result, kept as
     /// it is; for a step inside another, what its last round wrote in the log, read as JSON if it
     /// is.
-    fn result_of(&self, at: &Loc) -> Option<Value> {
+    pub(crate) fn result_of(&self, at: &Loc) -> Option<Value> {
         if at.place.is_empty() {
             return self
                 .wf_test
@@ -1039,24 +1042,6 @@ impl App {
             row.kind = k;
         }
         self.wf_menu = None;
-        self.autosave();
-    }
-
-    /// Puts a name into the box it was picked for, as `{{name}}` where the box reads braces.
-    /// Puts into a box the result a person chose by its words, giving the step it comes from a
-    /// name for it if it has none.
-    pub fn editor_use(&mut self, which: &Target, at: &Loc, key: &str, braces: bool, label: &str) {
-        let name = self.wf_editor.as_mut().and_then(|ed| {
-            let found = ed
-                .results(at, Some(key))
-                .into_iter()
-                .find(|f| f.label == label)?;
-            ed.resolve(&found.source)
-        });
-        match name {
-            Some(name) => self.editor_insert(which, braces, &name),
-            None => self.wf_menu = None,
-        }
         self.autosave();
     }
 

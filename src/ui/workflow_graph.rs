@@ -13,12 +13,11 @@ use rune_kit::{
 use super::icons;
 use crate::app::App;
 use crate::workflow::editor::{Editor, Loc, Menu};
-use crate::workflow::engine::StepLog;
 use crate::workflow::layout::{
     Dir, Form, Gap, Item, Label, Layout, NODE_H, NODE_W, Rect, Wire, layout,
 };
 use crate::workflow::pause::Decision;
-use crate::workflow::trace::{NodeRun, State, loc_of, problems_by_id, runs_by_step};
+use crate::workflow::trace::{NodeRun, State, problems_by_id, runs_by_step};
 
 /// The width of the form beside the drawing.
 pub const INSPECTOR_W: f32 = 380.0;
@@ -261,6 +260,7 @@ fn graph_key(s: &mut App, e: &KeyEvent) -> bool {
         (Key::Right, false, false, false) => s.move_selection(Dir::Down),
         (Key::Up, false, false, false) => s.move_selection(Dir::Left),
         (Key::Down, false, false, false) => s.move_selection(Dir::Right),
+        (Key::Enter, false, false, false) => s.open_node(),
         (Key::Escape, false, false, false) => s.select_step(None),
         _ => return false,
     }
@@ -583,7 +583,7 @@ fn step(item: &Item, selected: bool, faded: bool, look: &Look, k: &Kit) -> El {
         .label(accessible(item, look))
         .help(tip(item, look))
         .opacity(if faded { 0.4 } else { 1.0 })
-        .on_press(move |s: &mut App| s.select_step(Some(at.clone())));
+        .on_press(move |s: &mut App| s.press_step(at.clone()));
     if item.model {
         // A model works here: dashed, so it is not mistaken for a fixed step.
         e = e.border_dash(5.0, 3.0);
@@ -642,7 +642,7 @@ fn caption(
         );
     }
     match at {
-        Some(at) => e.on_press(move |s: &mut App| s.select_step(Some(at.clone()))),
+        Some(at) => e.on_press(move |s: &mut App| s.press_step(at.clone())),
         None => e.on_press(|s: &mut App| s.select_trigger()),
     }
 }
@@ -690,7 +690,7 @@ fn frame(item: &Item, selected: bool, faded: bool, look: &Look, k: &Kit) -> El {
         .label(accessible(item, look))
         .help(tip(item, look))
         .opacity(if faded { 0.4 } else { 1.0 })
-        .on_press(move |s: &mut App| s.select_step(Some(at.clone())))
+        .on_press(move |s: &mut App| s.press_step(at.clone()))
         .child(bar);
     k.interactive(e)
 }
@@ -873,56 +873,6 @@ pub fn banner(s: &App, ed: &Editor, k: &Kit) -> Option<El> {
                 .key("wfg-hide-run"),
         ),
     )
-}
-
-/// What the shown run did at the selected step, round by round, under its form.
-pub fn run_panel(s: &App, ed: &Editor, at: &Loc, k: &Kit) -> Option<El> {
-    let c = &k.c;
-    let shown = s.shown_run()?;
-    let mine: Vec<&StepLog> = shown
-        .lines
-        .iter()
-        .filter(|l| loc_of(ed, &l.path).as_ref() == Some(at))
-        .collect();
-    if mine.is_empty() {
-        return None;
-    }
-    let mut out = col()
-        .key("wfg-run-panel")
-        .w_full()
-        .gap(6.0)
-        .padding(12.0)
-        .radius(k.radius.md)
-        .border(1.0, c.border_muted)
-        .child(
-            text(format!("{}: this step", shown.label))
-                .font(k.ty.ui_medium)
-                .color(c.text_base),
-        );
-    for line in mine {
-        let head = [line.round_note(), Some(format!("{} ms", line.ms))]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let (body, bad) = match (&line.error, line.running) {
-            (Some(e), _) => (e.clone(), true),
-            (None, true) => ("Still running.".to_owned(), false),
-            (None, false) if line.output.is_empty() => ("Nothing came back.".to_owned(), false),
-            (None, false) => (line.output.clone(), false),
-        };
-        let (cut, more) = crate::runs::clip(&body, 800);
-        out = out
-            .child(text(head).font(k.ty.small).color(c.text_muted))
-            .child(
-                text(if more { format!("{cut}…") } else { cut })
-                    .font(k.ty.mono)
-                    .color(if bad { c.warning.icon } else { c.text_base })
-                    .wrap()
-                    .selectable(true),
-            );
-    }
-    Some(out)
 }
 
 /// The hint on a step: its line, and under it what is wrong or why it failed, which a small

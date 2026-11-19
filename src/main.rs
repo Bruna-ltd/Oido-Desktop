@@ -23,6 +23,7 @@ mod extensions;
 mod files;
 mod flow_editor;
 mod flow_graph;
+mod flow_node;
 mod flows;
 mod folders;
 mod guard;

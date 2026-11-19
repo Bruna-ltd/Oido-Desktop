@@ -192,7 +192,7 @@ fn tail(s: &App, ed: &Editor, k: &Kit) -> El {
 
 /// The steps as boxes and wires, with the form of the selected one beside them.
 fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
-    col()
+    let page = col()
         .key("workflow-editor")
         .grow(1.0)
         .h_full()
@@ -219,9 +219,17 @@ fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                                 .child(workflow_graph::view(s, ed, k, layer))
                                 .children(super::workflow_logs::panel(s, ed, k)),
                         )
-                        .child(inspector(s, ed, k, layer)),
+                        .children(side(s, ed, k, layer)),
                 ),
-        )
+        );
+    super::workflow_node::window(s, ed, k, layer);
+    page
+}
+
+/// The panel at the right: the workflow's own settings, the list of steps to add, or the trigger.
+/// A selected step has its own window instead.
+fn side(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> Option<El> {
+    (s.picker_place().is_some() || s.selected_step().is_none()).then(|| inspector(s, ed, k, layer))
 }
 
 /// The form of the selected step, or the workflow's own when nothing is selected.
@@ -238,29 +246,11 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         });
-    let chosen = s.selected_step().and_then(|at| {
-        let list = list_at(ed, &at.place);
-        list.get(at.index).map(|n| (at, n, list.len()))
-    });
-    match chosen {
-        Some((at, node, len)) => {
-            out = out
-                .child(
-                    row().child(
-                        small("Workflow settings", ButtonVariant::Ghost)
-                            .on_press(|s: &mut App| s.select_step(None))
-                            .build(k)
-                            .key("wfg-settings"),
-                    ),
-                )
-                .child(step_actions(s, ed, &at, node, k, layer))
-                .child(card(s, ed, &at, node, len, false, k, layer))
-                .children(workflow_graph::run_panel(s, ed, &at, k));
-        }
-        None if s.wf_graph.on_trigger => out = out.child(trigger_form(ed, k)),
-        None => {
-            let c = &k.c;
-            out = out
+    if s.wf_graph.on_trigger {
+        out = out.child(trigger_form(ed, k));
+    } else {
+        let c = &k.c;
+        out = out
                 .child(
                     col()
                         .gap(2.0)
@@ -270,7 +260,7 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                                 .color(c.text_base),
                         )
                         .child(
-                            text("Name, who runs it, what it takes, and when it counts as done. Press a step to change it instead.")
+                            text("Name, who runs it, what it takes, and when it counts as done. Double-press a step to open it.")
                                 .font(k.ty.small)
                                 .color(c.text_muted)
                                 .wrap(),
@@ -279,14 +269,20 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(basics(s, ed, k, layer))
                 .child(el().w_full().h(1.0).fill(c.border_muted))
                 .child(tail(s, ed, k));
-        }
     }
     out
 }
 
 /// Runs the selected step for real, after the results of the ones before it, so what it made can
 /// be seen under it and the next step can use it.
-fn step_actions(s: &App, ed: &Editor, at: &Loc, node: &Node, k: &Kit, layer: &mut Vec<El>) -> El {
+pub(super) fn step_actions(
+    s: &App,
+    ed: &Editor,
+    at: &Loc,
+    node: &Node,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
     let t = &s.wf_test;
     let nested = !at.place.is_empty();
     let go = at.clone();
@@ -612,7 +608,12 @@ fn finishing(s: &App, c: &Complete, edit: &TextEdit, k: &Kit, layer: &mut Vec<El
         .anchored(c.anchor.clone(), Side::Bottom, Align::Start, 4.0)
         .width(320.0)
         .max_height(240.0)
-        .items(found.options.iter().map(|o| PopupItem::new(o.clone(), o.clone())))
+        .items(
+            found
+                .options
+                .iter()
+                .map(|o| PopupItem::new(o.clone(), o.clone())),
+        )
         .active(Some(active))
         .label("Names".to_owned())
         .on_choose(move |s: &mut App, id, _| s.editor_complete(&c, id))
@@ -672,7 +673,9 @@ fn field_with(
                     .label(label.to_owned())
                     .on_edit(f);
                 match complete {
-                    Some(c) => input.on_input_key(move |s: &mut App, key, _| s.wf_complete_key(&c, key)),
+                    Some(c) => {
+                        input.on_input_key(move |s: &mut App, key, _| s.wf_complete_key(&c, key))
+                    }
                     None => input,
                 }
             }),
@@ -911,7 +914,7 @@ fn steps(s: &App, ed: &Editor, place: &Place, k: &Kit, layer: &mut Vec<El>) -> E
     )))
 }
 
-fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
+pub(super) fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
     let mut list: &[Node] = &ed.steps;
     for &(step, block) in place {
         match list.get(step).and_then(|n| n.blocks.get(block)) {
@@ -923,7 +926,7 @@ fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn card(
+pub(super) fn card(
     s: &App,
     ed: &Editor,
     at: &Loc,
@@ -1026,7 +1029,7 @@ fn card(
                 out = out.children(help_line(&about, k));
             }
         }
-        for p in tool_params(s, ed, at, n, &key, k, layer) {
+        for p in tool_params(s, at, n, &key, k, layer) {
             out = out.child(p);
         }
     }
@@ -1039,7 +1042,6 @@ fn card(
             continue;
         }
         let target = Target::Field(at.clone(), i);
-        let names = names_for(s, ed, at, spec.key, spec.refs, &target, &key, k, layer);
         let f_at = at.clone();
         let box_id = format!("wfe-field-{key}-{i}");
         let complete = (spec.refs != Refs::None).then(|| Complete {
@@ -1058,7 +1060,7 @@ fn card(
             &box_id,
             spec.hint,
             spec.lines,
-            names,
+            None,
             complete,
             k,
             move |s: &mut App| s.editor_text(&Target::Field(f_at.clone(), i)),
@@ -1199,15 +1201,7 @@ fn tool_field(s: &App, at: &Loc, n: &Node, key: &str, k: &Kit, layer: &mut Vec<E
 /// The arguments of a tool step as a form: a box for each, named in words, those the tool needs
 /// first and the rest under "Optional".
 #[allow(clippy::too_many_arguments)]
-fn tool_params(
-    s: &App,
-    ed: &Editor,
-    at: &Loc,
-    n: &Node,
-    key: &str,
-    k: &Kit,
-    layer: &mut Vec<El>,
-) -> Vec<El> {
+fn tool_params(s: &App, at: &Loc, n: &Node, key: &str, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
     let c = &k.c;
     let mut specs = s
         .step_tool_schema(&n.tool)
@@ -1289,11 +1283,6 @@ fn tool_params(
                 .children(help_line(&p.help, k))
         } else {
             let target = Target::Param(at.clone(), p.key.clone(), kind);
-            let names = if kind == ArgKind::Text {
-                names_for(s, ed, at, &p.key, Refs::Braces, &target, &box_key, k, layer)
-            } else {
-                None
-            };
             let complete = (kind == ArgKind::Text).then(|| Complete {
                 at: at.clone(),
                 key: p.key.clone(),
@@ -1313,7 +1302,7 @@ fn tool_params(
                     &box_key,
                     &p.about,
                     p.lines,
-                    names,
+                    None,
                     complete,
                     k,
                     move |s: &mut App| {
@@ -1402,45 +1391,6 @@ fn help_line(help: &str, k: &Kit) -> Option<El> {
             .color(k.c.text_faint)
             .wrap()
     })
-}
-
-/// The picker of what a box can use, when the box reads results: "Output of: `ls`", not the name
-/// the step keeps it under.
-#[allow(clippy::too_many_arguments)]
-fn names_for(
-    s: &App,
-    ed: &Editor,
-    at: &Loc,
-    box_key: &str,
-    refs: Refs,
-    target: &Target,
-    key: &str,
-    k: &Kit,
-    layer: &mut Vec<El>,
-) -> Option<El> {
-    if refs == Refs::None {
-        return None;
-    }
-    let found = ed.results(at, Some(box_key));
-    if found.is_empty() {
-        return None;
-    }
-    let list: Vec<&str> = found.iter().map(|f| f.label.as_str()).collect();
-    let (target_for, at_for, box_for) = (target.clone(), at.clone(), box_key.to_owned());
-    Some(pick(
-        format!("wfe-names-{key}-{box_key}"),
-        Menu::Names(target.clone()),
-        &list,
-        None,
-        "Use a result",
-        false,
-        s,
-        k,
-        layer,
-        move |s, label| {
-            s.editor_use(&target_for, &at_for, &box_for, refs == Refs::Braces, label);
-        },
-    ))
 }
 
 /// An `if` or `while` condition as "[result] [is] [value]".

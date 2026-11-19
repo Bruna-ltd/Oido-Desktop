@@ -36,7 +36,16 @@ pub struct GraphView {
     pub menu: Option<(Loc, [f32; 2])>,
     /// Show the workflow's last run on the steps, when no test run is.
     pub show_last: bool,
+    /// The selected step is open in its own window.
+    pub open: bool,
+    /// The step last pressed and when, to tell a second press on it.
+    pub pressed: Option<(Loc, std::time::Instant)>,
+    /// Branches of the data trees the person turned over from how they show at first.
+    pub flipped: std::collections::HashSet<String>,
 }
+
+/// How soon a second press on a step opens it.
+const DOUBLE_PRESS: std::time::Duration = std::time::Duration::from_millis(450);
 
 /// A run drawn on the steps: its log, where it waits, and if it can be answered, how.
 pub struct Shown {
@@ -81,6 +90,9 @@ impl Default for GraphView {
             panning: None,
             menu: None,
             show_last: false,
+            open: false,
+            pressed: None,
+            flipped: Default::default(),
         }
     }
 }
@@ -105,7 +117,37 @@ impl App {
         self.autosave();
         self.wf_graph.selected = at;
         self.wf_graph.on_trigger = false;
+        self.wf_graph.open = false;
         self.wf_menu = None;
+    }
+
+    /// A press on a step: selects it, and a second press on it soon after opens it in its window.
+    pub fn press_step(&mut self, at: Loc) {
+        let twice = self
+            .wf_graph
+            .pressed
+            .as_ref()
+            .is_some_and(|(was, when)| *was == at && when.elapsed() < DOUBLE_PRESS);
+        self.select_step(Some(at.clone()));
+        self.wf_graph.pressed = (!twice).then(|| (at, std::time::Instant::now()));
+        self.wf_graph.open = twice;
+    }
+
+    /// Opens the selected step in its window.
+    pub fn open_node(&mut self) {
+        self.wf_graph.open = self.selected_step().is_some();
+    }
+
+    /// Closes the step's window, keeping what was typed in it.
+    pub fn close_node(&mut self) {
+        self.wf_graph.open = false;
+        self.wf_menu = None;
+        self.autosave();
+    }
+
+    /// Whether the selected step is showing in its window.
+    pub fn node_open(&self) -> bool {
+        self.wf_graph.open && self.selected_step().is_some()
     }
 
     /// Selects the Trigger node.
@@ -329,6 +371,8 @@ impl App {
         if let Ok(at) = done {
             ed.check();
             self.wf_graph.selected = Some(at);
+            // A step just made opens, to be filled in, as in n8n.
+            self.wf_graph.open = true;
         }
         self.autosave();
     }

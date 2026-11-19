@@ -1354,6 +1354,16 @@ pub static SCENES: &[Scene] = &[
         graph_scene(s);
         s.open_add_menu();
     }),
+    ("workflow-node", |s| {
+        if let Some((_, f)) = SCENES.iter().find(|(n, _)| *n == "workflow-logs") {
+            f(s);
+        }
+        s.wf_graph.selected = Some(crate::workflow::editor::Loc {
+            place: vec![(1, 0)],
+            index: 0,
+        });
+        s.wf_graph.open = true;
+    }),
     ("workflow-logs", |s| {
         use crate::workflow::engine::{Ending, Outcome, StepLog, Usage};
         graph_scene(s);
