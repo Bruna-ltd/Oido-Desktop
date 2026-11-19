@@ -1256,6 +1256,7 @@ pub static SCENES: &[Scene] = &[
             .into(),
             steps: vec![list, write],
             success: "A changelog was written.".into(),
+            trigger: Default::default(),
         };
         let w = Saved {
             id: "w1".into(),
@@ -1264,6 +1265,7 @@ pub static SCENES: &[Scene] = &[
             goal: "Turns the week's commits into a changelog.".into(),
             definition: def,
             created_at: app::now(),
+            published: None,
         };
         let other = Saved {
             id: "w2".into(),
@@ -1332,9 +1334,15 @@ pub static SCENES: &[Scene] = &[
         ];
         s.route = Route::Workflows;
     }),
+    ("workflow-list", |s| {
+        if let Some((_, f)) = SCENES.iter().find(|(n, _)| *n == "workflows") {
+            f(s);
+        }
+        s.wf_open = None;
+        s.wf_runs.clear();
+    }),
     ("workflow-nested", |s| nested_workflow(s)),
     ("workflow-editor", |s| {
-        s.wf_graph.shown = crate::flow_graph::View::Cards;
         use crate::workflow::editor::Editor;
         nested_workflow(s);
         if let Some(w) = s.workflows.first() {
@@ -1342,6 +1350,143 @@ pub static SCENES: &[Scene] = &[
         }
     }),
     ("workflow-graph", |s| graph_scene(s)),
+    ("workflow-picker", |s| {
+        graph_scene(s);
+        s.open_add_menu();
+    }),
+    ("workflow-node", |s| {
+        if let Some((_, f)) = SCENES.iter().find(|(n, _)| *n == "workflow-logs") {
+            f(s);
+        }
+        s.wf_graph.selected = Some(crate::workflow::editor::Loc {
+            place: vec![(1, 0)],
+            index: 0,
+        });
+        s.wf_graph.open = true;
+    }),
+    ("workflow-logs", |s| {
+        use crate::workflow::engine::{Ending, Outcome, StepLog, Usage};
+        graph_scene(s);
+        let line = |id: &str,
+                    kind: &str,
+                    what: &str,
+                    path: &str,
+                    ms: u64,
+                    out: &str,
+                    err: Option<&str>| StepLog {
+            id: id.into(),
+            kind: kind.into(),
+            what: what.into(),
+            output: out.into(),
+            error: err.map(Into::into),
+            ms,
+            path: path.into(),
+            rounds: Vec::new(),
+            running: false,
+        };
+        let mut second = line(
+            "pdf",
+            "tool",
+            "Run mv <name> docs/",
+            "1.notes.1.body.0.case0.0",
+            40,
+            "",
+            Some("mv: cannot move 'report.pdf' to 'docs/': No such file or directory (exit 1)"),
+        );
+        second.rounds = vec![2];
+        s.wf_test.result = Some(Outcome {
+            ending: Ending::Failed {
+                step: "pdf".into(),
+                error:
+                    "mv: cannot move 'report.pdf' to 'docs/': No such file or directory (exit 1)"
+                        .into(),
+            },
+            output: String::new(),
+            steps: vec![
+                line(
+                    "ls",
+                    "tool",
+                    "Run ls <folder>",
+                    "0",
+                    120,
+                    "a.txt\nreport.pdf\n",
+                    None,
+                ),
+                line(
+                    "n",
+                    "tool",
+                    "Fetch https://example.com/news",
+                    "1.news.0",
+                    1840,
+                    "<html>…</html>",
+                    None,
+                ),
+                line(
+                    "r",
+                    "tool",
+                    "Read notes/today.md",
+                    "1.notes.0",
+                    12,
+                    "# Today\n- ship",
+                    None,
+                ),
+                second,
+            ],
+            usage: Usage::default(),
+            snapshot: None,
+            memos: Vec::new(),
+        });
+        s.select_step(None);
+    }),
+    ("workflow-settings", |s| {
+        graph_scene(s);
+        s.select_step(None);
+    }),
+    ("workflow-agent", |s| {
+        use crate::workflow::editor::Loc;
+        graph_scene(s);
+        s.editor_add(&Vec::new(), "Ask an agent");
+        let last = s
+            .wf_editor
+            .as_ref()
+            .map_or(0, |e| e.steps.len().saturating_sub(1));
+        s.select_step(Some(Loc {
+            place: Vec::new(),
+            index: last,
+        }));
+    }),
+    ("workflow-reply", |s| {
+        use crate::workflow::editor::Loc;
+        graph_scene(s);
+        s.editor_add(&Vec::new(), "Ask the AI");
+        let at = Loc {
+            place: Vec::new(),
+            index: s
+                .wf_editor
+                .as_ref()
+                .map_or(0, |e| e.steps.len().saturating_sub(1)),
+        };
+        s.editor_add_reply(&at);
+        s.editor_add_reply(&at);
+        if let Some(n) = s.wf_editor.as_mut().and_then(|e| e.node_mut(&at)) {
+            n.reply[0].name = TextEdit::new("score");
+            n.reply[0].kind = crate::workflow::definition::FieldKind::Number;
+            n.reply[1].name = TextEdit::new("reason");
+        }
+        s.select_step(Some(at));
+    }),
+    ("workflow-trigger", |s| {
+        graph_scene(s);
+        // Live as an older copy, with a schedule asked for in the draft.
+        if let Some(w) = s.workflows.first_mut() {
+            w.published = Some(crate::workflow::Published {
+                definition: Default::default(),
+                at: app::now() - 3600,
+            });
+        }
+        s.editor_set_schedule(true);
+        s.select_trigger();
+    }),
     ("workflow-drag", |s| {
         use crate::flow_graph::StepDrag;
         use crate::workflow::editor::Loc;
@@ -1363,7 +1508,7 @@ pub static SCENES: &[Scene] = &[
             })
             .map(|i| i.rect)
             .unwrap_or_default();
-        let point = [r.centre_x() + 30.0, r.bottom() + 12.0];
+        let point = [r.x + r.w + 12.0, r.y + r.h / 2.0 + 30.0];
         s.wf_graph.selected = Some(from.clone());
         s.wf_graph.drag = Some(StepDrag {
             drop: lay.drop_target(&from, point),
@@ -1382,7 +1527,7 @@ pub static SCENES: &[Scene] = &[
         nested_workflow(s);
         s.new_workflow();
         // A snapshot draws one frame, so give the view the size the window leaves it.
-        s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+        s.wf_graph.viewport = [0.0, 0.0, 660.0, 760.0];
         s.fit_graph();
     }),
     ("workflow-run", |s| {
@@ -1446,13 +1591,13 @@ pub static SCENES: &[Scene] = &[
             steps,
             usage: Usage::default(),
             snapshot: None,
+            memos: Vec::new(),
         });
         if let Some(ed) = s.wf_editor.as_mut() {
             ed.problems = vec!["step 5.1 (\"send\"): a tool step needs a tool".into()];
         }
     }),
     ("workflow-parallel", |s| {
-        s.wf_graph.shown = crate::flow_graph::View::Cards;
         use crate::workflow::definition::Step;
         use crate::workflow::editor::Editor;
         nested_workflow(s);
@@ -1485,7 +1630,6 @@ pub static SCENES: &[Scene] = &[
         }
     }),
     ("workflow-test", |s| {
-        s.wf_graph.shown = crate::flow_graph::View::Cards;
         use crate::workflow::editor::Editor;
         use crate::workflow::engine::{Ending, Outcome, Usage};
         nested_workflow(s);
@@ -1504,6 +1648,7 @@ pub static SCENES: &[Scene] = &[
             steps,
             usage: Usage::default(),
             snapshot: None,
+            memos: Vec::new(),
         });
     }),
     ("draft", |s| {
@@ -1871,7 +2016,6 @@ fn demo_runs(app: &mut App) {
 /// A workflow with loops and a switch, and a run of it, for the Workflows page.
 /// A flow with every kind of nesting, open in the graph with a step selected.
 fn graph_scene(s: &mut App) {
-    use crate::flow_graph::View;
     use crate::workflow::definition::Definition;
     use crate::workflow::editor::{Editor, Loc};
     nested_workflow(s);
@@ -1905,10 +2049,9 @@ fn graph_scene(s: &mut App) {
         w.definition = def;
         s.wf_editor = Some(Editor::from_saved(w));
     }
-    s.wf_graph.shown = View::Graph;
     // A snapshot draws one frame, so the view cannot report its size first: give it what the
     // window leaves beside the form.
-    s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+    s.wf_graph.viewport = [0.0, 0.0, 660.0, 760.0];
     s.fit_graph();
     s.wf_graph.selected = Some(Loc {
         place: vec![(1, 1), (1, 0)],
@@ -1943,6 +2086,7 @@ fn nested_workflow(s: &mut App) {
             }))
             .unwrap_or_default(),
             created_at: app::now(),
+            published: None,
         };
     s.wf_runs = vec![RunRecord {
         id: "r1".into(),
@@ -2003,7 +2147,6 @@ fn nested_workflow(s: &mut App) {
 /// step with the check is selected, or the list of steps to add is open.
 fn simple_workflow(s: &mut App, mode: &str) {
     let adding = mode == "add";
-    use crate::flow_graph::View;
     use crate::workflow::definition::Definition;
     use crate::workflow::editor::{Editor, Loc, Menu};
     nested_workflow(s);
@@ -2026,8 +2169,7 @@ fn simple_workflow(s: &mut App, mode: &str) {
         ed.steps[0].bind = rune::TextEdit::new("command");
         s.wf_editor = Some(ed);
     }
-    s.wf_graph.shown = View::Graph;
-    s.wf_graph.viewport = [0.0, 0.0, 735.0, 900.0];
+    s.wf_graph.viewport = [0.0, 0.0, 660.0, 760.0];
     s.fit_graph();
     s.wf_graph.selected = Some(Loc {
         place: Vec::new(),

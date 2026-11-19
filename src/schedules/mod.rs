@@ -482,7 +482,13 @@ impl App {
             (None, None) => return Err("give a `prompt` or a `workflow` to run".to_owned()),
         };
         if let Some(wf) = self.workflows.iter().find(|w| w.id == wf_id) {
-            crate::workflow::engine::bind_inputs(&wf.definition, &inputs)?;
+            let live = wf.live().ok_or_else(|| {
+                format!(
+                    "the workflow {:?} is not published, so it cannot run",
+                    wf.name
+                )
+            })?;
+            crate::workflow::engine::bind_inputs(live, &inputs)?;
         }
         Ok(Target::Workflow { id: wf_id, inputs })
     }
@@ -686,7 +692,8 @@ impl App {
 
     /// The open schedule, in the form.
     pub fn edit_schedule(&mut self) {
-        let Some(s) = self.open_schedule().cloned() else {
+        // One a workflow's trigger made is changed there.
+        let Some(s) = self.open_schedule().filter(|s| !s.from_trigger).cloned() else {
             return;
         };
         let source = Source::Edit(s.id.clone());
@@ -799,6 +806,9 @@ impl App {
 
     /// Asks first, then deletes the open schedule. Its fires' chats stay.
     pub fn delete_open_schedule(&mut self) {
+        if self.open_schedule().is_some_and(|s| s.from_trigger) {
+            return;
+        }
         if !self.schedule_page.confirm {
             self.schedule_page.confirm = true;
             return;
@@ -1119,9 +1129,12 @@ mod tests {
                     ..Step::default()
                 }],
                 success: String::new(),
+                trigger: Default::default(),
             },
             created_at: now(),
-        };
+            published: None,
+        }
+        .published_as_is();
         app.save("w", |db| db.insert_workflow(&wf));
         app.workflows.push(wf.clone());
         let inputs = json!({"word": "pong"}).as_object().unwrap().clone();
@@ -1267,6 +1280,7 @@ mod tests {
             goal: String::new(),
             definition: Default::default(),
             created_at: 0,
+            published: None,
         };
         app.workflows.push(wf);
         let told = call(
@@ -1419,8 +1433,8 @@ mod tests {
         app.select_schedule(&s.id);
         app.edit_schedule();
         let f = app.schedule_page.form_mut();
-        assert_eq!(f.every.text, "1");
-        f.every = rune::TextEdit::new("30");
+        assert_eq!(f.timing.every.text, "1");
+        f.timing.every = rune::TextEdit::new("30");
         app.save_schedule_form();
         let after = &app.schedules[0];
         assert_eq!(

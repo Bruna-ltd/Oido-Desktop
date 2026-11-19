@@ -7,12 +7,14 @@ use std::collections::BTreeMap;
 use rune::TextEdit;
 use serde_json::Value;
 
-use super::Saved;
 use super::cond::{self, Op};
 use super::definition::{
-    Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, GENERATE, IF, Input,
-    PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, WAIT, WHILE, each_step, plain, validate,
+    Branch, CODE, CONTINUE, Case, DECIDE, Definition, FLOW, FOR_EACH, Field, FieldKind, GENERATE,
+    IF, Input, PARALLEL, SET, STEP_TOOLS, SWITCH, Step, TOOL, TRY, Trigger, WAIT, WHILE, each_step,
+    plain, validate,
 };
+use super::{Published, Saved};
+use crate::schedules::form::TimingForm;
 
 /// How a text box is checked and what can be put into it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -199,12 +201,16 @@ const fn kind(
     }
 }
 
+/// "Ask an agent" in the Add step list. It is not a kind of step of its own: it adds a tool step
+/// that hands a task to an agent.
+pub const AGENT: &str = "agent";
+
 pub const COMMON: &str = "Common";
 pub const MORE: &str = "More";
 
 /// The kinds of step a person can add, in the order the list shows them: what most workflows are
 /// made of first, then the rest.
-pub const KINDS: [Kind; 13] = [
+pub const KINDS: [Kind; 14] = [
     kind(
         TOOL,
         "Use a tool",
@@ -216,6 +222,12 @@ pub const KINDS: [Kind; 13] = [
         "Ask the AI",
         COMMON,
         "The model writes text from your instruction",
+    ),
+    kind(
+        AGENT,
+        "Ask an agent",
+        COMMON,
+        "Hand a task to one of your agents, and use its answer",
     ),
     kind(
         IF,
@@ -329,6 +341,12 @@ pub struct Node {
     pub tool: String,
     /// For a loop: carry on when a round fails.
     pub go_on: bool,
+    /// For a switch: run every case that matches, not only the first.
+    pub all: bool,
+    /// For an AI step: the fields to answer with; none means plain text.
+    pub reply: Vec<ReplyRow>,
+    /// The fields the result of the step was found to have, whatever the kind of step.
+    pub found: Vec<Field>,
     /// One per [`specs`] of the kind.
     pub fields: Vec<TextEdit>,
     pub blocks: Vec<Block>,
@@ -414,6 +432,13 @@ impl Param {
     }
 }
 
+/// One field of the reply an AI step is asked for, as the editor holds it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ReplyRow {
+    pub name: TextEdit,
+    pub kind: FieldKind,
+}
+
 /// One argument a tool takes, as a form shows it.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ParamSpec {
@@ -422,6 +447,8 @@ pub struct ParamSpec {
     pub label: String,
     /// What it is for, from the tool's own description.
     pub about: String,
+    /// The same, in full: shown under the box's name so what to type is plain.
+    pub help: String,
     pub kind: ArgKind,
     pub required: bool,
     /// The values it may be, if the tool lists them.
@@ -460,6 +487,17 @@ pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let help = p
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let help = match help.char_indices().nth(240) {
+                Some((i, _)) => format!("{}…", help[..i].trim_end()),
+                None => help,
+            };
             let about = p
                 .get("description")
                 .and_then(Value::as_str)
@@ -477,7 +515,11 @@ pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
                 key.as_str(),
                 "command" | "content" | "task" | "old_text" | "new_text" | "instruction"
             ) || kind == ArgKind::Json;
-            let mut label = key.replace(['_', '-'], " ");
+            // A schema may name a box in words of its own.
+            let mut label = match p.get("title").and_then(Value::as_str) {
+                Some(title) => title.to_owned(),
+                None => key.replace(['_', '-'], " "),
+            };
             if let Some(first) = label.get(..1) {
                 label = format!("{}{}", first.to_uppercase(), &label[1..]);
             }
@@ -485,6 +527,7 @@ pub fn params_of(schema: &Value) -> Vec<ParamSpec> {
                 key: key.clone(),
                 label,
                 about,
+                help,
                 kind,
                 required: required.contains(&key.as_str()),
                 options: if kind == ArgKind::Text {
@@ -548,6 +591,12 @@ fn opt(t: &TextEdit) -> Option<String> {
 impl Node {
     /// A new, empty step of `kind`.
     pub fn new(kind: &str, id: String) -> Node {
+        if kind == AGENT {
+            return Node {
+                tool: crate::tools::DELEGATE.to_owned(),
+                ..Node::new(TOOL, id)
+            };
+        }
         let blocks = match kind {
             IF => vec![Block::new(Part::Then), Block::new(Part::Else)],
             SWITCH => vec![Block::new(Part::Case), Block::new(Part::Default)],
@@ -566,11 +615,27 @@ impl Node {
                 String::new()
             },
             go_on: false,
+            all: false,
+            reply: Vec::new(),
+            found: Vec::new(),
             fields: specs(kind).iter().map(|_| TextEdit::new("")).collect(),
             blocks,
             when: matches!(kind, IF | WHILE).then(Comparison::default),
             params: BTreeMap::new(),
         }
+    }
+
+    /// What the step is called in the Add step list.
+    pub fn label(&self) -> &'static str {
+        let kind = if self.kind == TOOL && self.tool == crate::tools::DELEGATE {
+            AGENT
+        } else {
+            self.kind.as_str()
+        };
+        KINDS
+            .iter()
+            .find(|x| x.kind == kind)
+            .map_or("Step", |x| x.label)
     }
 
     fn field_at(&self, key: &str) -> Option<&TextEdit> {
@@ -622,6 +687,7 @@ impl Node {
     pub fn from_step(s: &Step) -> Node {
         let mut n = Node::new(&s.kind, s.id.clone());
         n.bind = TextEdit::new(s.bind.clone().unwrap_or_default());
+        n.found = s.found.clone();
         let text = |o: &Option<String>| o.clone().unwrap_or_default();
         match s.kind.as_str() {
             TOOL => {
@@ -633,7 +699,17 @@ impl Node {
                     .map(|(k, v)| (k.clone(), Param::of(v)))
                     .collect();
             }
-            GENERATE => n.set_field("instruction", text(&s.instruction)),
+            GENERATE => {
+                n.set_field("instruction", text(&s.instruction));
+                n.reply = s
+                    .reply
+                    .iter()
+                    .map(|f| ReplyRow {
+                        name: TextEdit::new(f.name.clone()),
+                        kind: f.kind,
+                    })
+                    .collect();
+            }
             DECIDE => {
                 n.set_field("question", text(&s.question));
                 n.set_field("options", s.options.join("\n"));
@@ -645,6 +721,7 @@ impl Node {
                 n.blocks[1].steps = s.otherwise.iter().map(Node::from_step).collect();
             }
             SWITCH => {
+                n.all = s.all;
                 n.set_field("on", text(&s.on));
                 n.blocks = s
                     .cases
@@ -744,6 +821,7 @@ impl Node {
             id: self.id.text.trim().to_owned(),
             kind: self.kind.clone(),
             bind: opt(&self.bind).map(|b| b.trim().to_owned()),
+            found: self.found.clone(),
             ..Step::default()
         };
         match self.kind.as_str() {
@@ -761,7 +839,18 @@ impl Node {
                 }
                 s.args = Some(args).filter(|a| !a.is_empty());
             }
-            GENERATE => s.instruction = get("instruction"),
+            GENERATE => {
+                s.instruction = get("instruction");
+                s.reply = self
+                    .reply
+                    .iter()
+                    .map(|r| Field {
+                        name: r.name.text.trim().to_owned(),
+                        kind: r.kind,
+                        of: Vec::new(),
+                    })
+                    .collect();
+            }
             DECIDE => {
                 s.question = get("question");
                 s.options = self.field_at("options").map(lines_of).unwrap_or_default();
@@ -774,6 +863,7 @@ impl Node {
             }
             SWITCH => {
                 s.on = get("on");
+                s.all = self.all;
                 for b in &self.blocks {
                     if b.part == Part::Default {
                         s.default = steps(b, bad, at);
@@ -873,6 +963,46 @@ pub struct InputRow {
     pub default: TextEdit,
 }
 
+/// Leaves `node` holding only the way down to the step at `index` of the list `place` names, and
+/// that step last in its list.
+fn cut_after(node: &mut Node, place: &[(usize, usize)], index: usize) {
+    let Some(&(_, block)) = place.first() else {
+        return;
+    };
+    for (b, other) in node.blocks.iter_mut().enumerate() {
+        if b != block {
+            other.steps.clear();
+        }
+    }
+    let Some(list) = node.blocks.get_mut(block).map(|b| &mut b.steps) else {
+        return;
+    };
+    match place.get(1) {
+        Some(&(next, _)) => {
+            list.truncate(next + 1);
+            if let Some(inner) = list.get_mut(next) {
+                cut_after(inner, &place[1..], index);
+            }
+        }
+        None => list.truncate(index + 1),
+    }
+}
+
+/// What a new workflow is called until it is renamed: "My workflow", then "My workflow 2", "My
+/// workflow 3" and so on, the first that is not already a name (capitals aside).
+pub fn new_workflow_name<'a>(taken: impl IntoIterator<Item = &'a str>) -> String {
+    const BASE: &str = "My workflow";
+    let taken: Vec<String> = taken.into_iter().map(|n| n.trim().to_lowercase()).collect();
+    let free = |name: &str| !taken.contains(&name.to_lowercase());
+    if free(BASE) {
+        return BASE.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{BASE} {n}"))
+        .find(|name| free(name))
+        .unwrap_or_else(|| BASE.to_owned())
+}
+
 pub const INPUT_KINDS: [&str; 3] = ["string", "number", "boolean"];
 
 /// What a box of the editor is, for finding it again when it is typed in.
@@ -893,6 +1023,8 @@ pub enum Target {
     Right(Loc),
     /// An argument of a tool step: its name, and what it is, which it is made as when first typed in.
     Param(Loc, String, ArgKind),
+    /// The name of a field of an AI step's reply.
+    Reply(Loc, usize),
 }
 
 /// Which pop-up list of the editor is open; one at a time.
@@ -900,6 +1032,8 @@ pub enum Target {
 pub enum Menu {
     Agent,
     InputKind(usize),
+    /// The type of a field of an AI step's reply.
+    ReplyKind(Loc, usize),
     /// Add a step at the end of this list.
     Add(Place),
     /// Add a step at this position in this list.
@@ -912,8 +1046,6 @@ pub enum Menu {
     Param(Loc, String),
     /// How it compares.
     Compare(Loc),
-    /// Names to put into a box.
-    Names(Target),
 }
 
 /// A workflow being made or changed.
@@ -927,6 +1059,9 @@ pub struct Editor {
     pub success: TextEdit,
     pub inputs: Vec<InputRow>,
     pub steps: Vec<Node>,
+    pub trigger: TriggerEdit,
+    /// The live copy, kept so saving a draft does not lose it.
+    published: Option<Published>,
     /// What is wrong, as of the last check.
     pub problems: Vec<String>,
     /// The steps as they were before each change to their structure, newest last, with what the
@@ -935,10 +1070,85 @@ pub struct Editor {
     redo: Vec<(String, Vec<Node>)>,
 }
 
+/// What starts the workflow, as typed: manual, or a schedule with a value for each input.
+#[derive(Debug)]
+pub struct TriggerEdit {
+    pub schedule: bool,
+    pub timing: TimingForm,
+    /// A value per input, by the input's name; an input with no box typed in gets its default.
+    pub inputs: BTreeMap<String, TextEdit>,
+}
+
+impl TriggerEdit {
+    pub fn manual() -> TriggerEdit {
+        TriggerEdit {
+            schedule: false,
+            timing: TimingForm::new(),
+            inputs: BTreeMap::new(),
+        }
+    }
+
+    pub fn of(t: &Trigger) -> TriggerEdit {
+        match t {
+            Trigger::Manual => TriggerEdit::manual(),
+            Trigger::Schedule { timing, inputs } => TriggerEdit {
+                schedule: true,
+                timing: TimingForm::of(timing, &chrono::Local),
+                inputs: inputs
+                    .iter()
+                    .map(|(name, v)| (name.clone(), TextEdit::new(super::template::as_text(v))))
+                    .collect(),
+            },
+        }
+    }
+
+    /// Switches between manual and a schedule. A new "every" schedule starts counting now, so
+    /// reading it again gives the same timing.
+    pub fn set_schedule(&mut self, on: bool, now: i64) {
+        self.schedule = on;
+        if on && self.timing.every_start.is_none() {
+            self.timing.every_start = Some(now);
+        }
+    }
+
+    /// The trigger as typed. What is wrong with it goes in `bad`.
+    fn read(&self, inputs: &BTreeMap<String, Input>, bad: &mut Vec<String>) -> Trigger {
+        if !self.schedule {
+            return Trigger::Manual;
+        }
+        let now = crate::app::now();
+        let timing = match self.timing.read(now, &chrono::Local) {
+            Ok(t) => t,
+            Err(why) => {
+                bad.push(format!("trigger: {why}"));
+                return Trigger::Manual;
+            }
+        };
+        let given = inputs
+            .keys()
+            .filter_map(|name| {
+                let text = self.inputs.get(name)?.text.trim().to_owned();
+                (!text.is_empty()).then(|| (name.clone(), Value::String(text)))
+            })
+            .collect();
+        Trigger::Schedule {
+            timing,
+            inputs: given,
+        }
+    }
+}
+
 /// How many changes can be taken back.
 const HISTORY: usize = 200;
 
 impl Editor {
+    /// A new workflow with the name it starts with: [`new_workflow_name`] among the names taken.
+    pub fn blank_named<'a>(agent_id: &str, taken: impl IntoIterator<Item = &'a str>) -> Editor {
+        let mut ed = Editor::blank(agent_id);
+        ed.name = TextEdit::new(new_workflow_name(taken));
+        ed
+    }
+
     pub fn blank(agent_id: &str) -> Editor {
         Editor {
             workflow: None,
@@ -948,6 +1158,8 @@ impl Editor {
             success: TextEdit::new(""),
             inputs: Vec::new(),
             steps: Vec::new(),
+            trigger: TriggerEdit::manual(),
+            published: None,
             problems: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -981,6 +1193,8 @@ impl Editor {
                 })
                 .collect(),
             steps: d.steps.iter().map(Node::from_step).collect(),
+            trigger: TriggerEdit::of(&d.trigger),
+            published: w.published.clone(),
             problems: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -990,6 +1204,64 @@ impl Editor {
     /// The definition the boxes say, and every problem with it: what could not be read, then what
     /// [`validate`] finds.
     pub fn definition(&self) -> Result<Definition, Vec<String>> {
+        self.build(&self.steps)
+    }
+
+    /// The workflow as it stands, finished or not, to keep as a draft: what is typed that cannot
+    /// be read is left out, and what is wrong with it is not reported here.
+    pub fn draft(&self, id: &str, created_at: i64) -> Saved {
+        let (definition, _) = self.build_lenient(&self.steps);
+        Saved {
+            id: id.to_owned(),
+            agent_id: self.agent_id.clone(),
+            name: match self.name.text.trim() {
+                "" => "Untitled workflow".to_owned(),
+                name => name.to_owned(),
+            },
+            goal: self.goal.text.trim().to_owned(),
+            definition,
+            created_at,
+            published: self.published.clone(),
+        }
+    }
+
+    /// The step whose results are the ones this step starts from: the one before it in its list,
+    /// or if it is the first, the one before the step it is in, and so on outwards.
+    pub fn step_before(&self, at: &Loc) -> Option<Loc> {
+        if at.index > 0 {
+            return Some(Loc {
+                place: at.place.clone(),
+                index: at.index - 1,
+            });
+        }
+        let (&(holder, _), outer) = at.place.split_last()?;
+        self.step_before(&Loc {
+            place: outer.to_vec(),
+            index: holder,
+        })
+    }
+
+    /// The workflow as far as the step at `at`, for running that far: the steps after it, and
+    /// inside a step that holds it, the steps after it and the other lists, are left out, so a
+    /// step still to be finished somewhere else cannot stop it. Only what is kept is checked.
+    pub fn definition_through(&self, at: &Loc) -> Result<Definition, Vec<String>> {
+        let top = at.place.first().map_or(at.index, |(step, _)| *step);
+        let mut steps: Vec<Node> = self.steps.iter().take(top + 1).cloned().collect();
+        if let Some(node) = steps.get_mut(top) {
+            cut_after(node, &at.place, at.index);
+        }
+        self.build(&steps)
+    }
+
+    fn build(&self, nodes: &[Node]) -> Result<Definition, Vec<String>> {
+        match self.build_lenient(nodes) {
+            (def, bad) if bad.is_empty() => Ok(def),
+            (_, bad) => Err(bad),
+        }
+    }
+
+    /// The workflow and everything wrong with it, together.
+    fn build_lenient(&self, nodes: &[Node]) -> (Definition, Vec<String>) {
         let mut bad = Vec::new();
         let mut inputs = BTreeMap::new();
         for row in &self.inputs {
@@ -1028,8 +1300,8 @@ impl Editor {
                 bad.push(format!("input {name:?} is there twice"));
             }
         }
-        let steps = self
-            .steps
+        let trigger = self.trigger.read(&inputs, &mut bad);
+        let steps = nodes
             .iter()
             .enumerate()
             .map(|(i, n)| n.to_step(&(i + 1).to_string(), &mut bad))
@@ -1038,11 +1310,17 @@ impl Editor {
             inputs,
             steps,
             success: self.success.text.trim().to_owned(),
+            trigger,
         };
         if let Err(more) = validate(&def) {
             bad.extend(more);
         }
-        if bad.is_empty() { Ok(def) } else { Err(bad) }
+        (def, bad)
+    }
+
+    /// The live copy changed (published or taken down) while the editor was open.
+    pub fn set_published(&mut self, published: Option<Published>) {
+        self.published = published;
     }
 
     /// Looks again at what is typed and keeps what is wrong with it.
@@ -1077,6 +1355,7 @@ impl Editor {
             goal: self.goal.text.trim().to_owned(),
             definition,
             created_at,
+            published: self.published.clone(),
         })
     }
 
@@ -1152,10 +1431,31 @@ impl Editor {
         let node = Node::new(kind, self.fresh_id());
         self.record("Add step");
         self.block_mut(place)?.insert(index, node);
+        self.name_required_results();
         Some(Loc {
             place: place.clone(),
             index,
         })
+    }
+
+    /// Gives the result of every step that must keep one (an answer, a flow's output, values) a
+    /// name where it has none, so nothing has to be filled in just to let the workflow run.
+    pub fn name_required_results(&mut self) {
+        fn walk(list: &mut [Node], taken: &mut Vec<String>) {
+            for n in list {
+                if matches!(n.kind.as_str(), DECIDE | FLOW | SET) && n.bind.text.trim().is_empty() {
+                    let name = fresh_name(n, taken);
+                    taken.push(name.clone());
+                    n.bind = TextEdit::new(name);
+                }
+                for block in &mut n.blocks {
+                    walk(&mut block.steps, taken);
+                }
+            }
+        }
+        let mut taken = Vec::new();
+        collect_binds(&self.steps, &mut taken);
+        walk(&mut self.steps, &mut taken);
     }
 
     pub fn remove(&mut self, at: &Loc) {
@@ -1326,6 +1626,10 @@ impl Editor {
                     })
                     .edit
             }),
+            Target::Reply(at, i) => self
+                .node_mut(at)
+                .and_then(|n| n.reply.get_mut(*i))
+                .map(|r| &mut r.name),
             Target::Right(at) => self
                 .node_mut(at)
                 .and_then(|n| n.when.as_mut())
@@ -1391,7 +1695,7 @@ impl Editor {
         seen
     }
 
-    fn node(&self, at: &Loc) -> Option<&Node> {
+    pub fn node(&self, at: &Loc) -> Option<&Node> {
         let mut list = &self.steps;
         for &(step, block) in &at.place {
             list = &list.get(step)?.blocks.get(block)?.steps;
@@ -1401,7 +1705,6 @@ impl Editor {
 
     /// What a box can name: the inputs as `inputs.name`, what the steps before bind, and inside a
     /// loop its item and `index`. A `while` condition also sees what its body binds.
-    #[cfg(test)]
     pub fn names(&self, at: &Loc, key: Option<&str>) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for seen in self.scope(at, key) {
@@ -1463,7 +1766,26 @@ impl Editor {
                             label: format!("{what_it_is}: {what}"),
                             source: Source::Step {
                                 at: loc.clone(),
-                                suffix,
+                                suffix: (*suffix).to_owned(),
+                            },
+                        });
+                    }
+                    // What the step answers with, or was found to hold, by name.
+                    let fields: Vec<&str> = if node.kind == GENERATE && !node.reply.is_empty() {
+                        node.reply
+                            .iter()
+                            .map(|r| r.name.text.trim())
+                            .filter(|n| !n.is_empty())
+                            .collect()
+                    } else {
+                        node.found.iter().map(|f| f.name.as_str()).collect()
+                    };
+                    for name in fields {
+                        out.push(Found {
+                            label: format!("Field {name} of: {what}"),
+                            source: Source::Step {
+                                at: loc.clone(),
+                                suffix: format!(".{name}"),
                             },
                         });
                     }
@@ -1480,6 +1802,194 @@ impl Editor {
             }
         }
         out
+    }
+
+    /// What the name being typed at the caret could become: the names a box can use, and after a
+    /// dot the fields of what is before it (`mail.` offers `messages`, `message.` offers what one
+    /// message holds). `refs` says where names may be typed: in `{{ }}` for text, anywhere in an
+    /// expression.
+    pub fn completions(
+        &self,
+        at: &Loc,
+        key: Option<&str>,
+        refs: Refs,
+        text: &str,
+        caret: usize,
+    ) -> Option<Completion> {
+        let head = text.get(..caret)?;
+        let name_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
+        let from = head
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !name_char(*c))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let typed = &head[from..];
+        if !typed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            return None;
+        }
+        let open = match refs {
+            Refs::None => false,
+            Refs::Bare => true,
+            Refs::Braces => {
+                let before = &head[..from];
+                let opened = before.rfind("{{");
+                opened.is_some() && opened > before.rfind("}}")
+            }
+        };
+        if !open {
+            return None;
+        }
+        let lower = typed.to_lowercase();
+        let mut options: Vec<String> = self
+            .names(at, key)
+            .into_iter()
+            .filter(|n| n.to_lowercase().starts_with(&lower))
+            .collect();
+        if let Some((base, _)) = typed.rsplit_once('.') {
+            let path: Vec<&str> = base.split('.').collect();
+            options.extend(
+                self.fields_at_path(at, key, &path)
+                    .into_iter()
+                    .map(|f| format!("{base}.{}", f.name))
+                    .filter(|n| n.to_lowercase().starts_with(&lower)),
+            );
+        }
+        let mut unique: Vec<String> = Vec::new();
+        for o in options {
+            if o != typed && !unique.contains(&o) {
+                unique.push(o);
+            }
+        }
+        let mut options = unique;
+        options.truncate(COMPLETIONS);
+        (!options.is_empty()).then_some(Completion { from, options })
+    }
+
+    /// The fields of what `path` names, as a box at `at` sees it: a step's result by the name it
+    /// keeps it under, or a loop's item, then deeper into what each field holds.
+    fn fields_at_path(&self, at: &Loc, key: Option<&str>, path: &[&str]) -> Vec<Field> {
+        let Some((root, rest)) = path.split_first() else {
+            return Vec::new();
+        };
+        let seen = self.scope(at, key);
+        let mut fields = if seen.iter().any(|s| matches!(s, Seen::Item(n) if n == root)) {
+            self.item_fields(at, root)
+        } else {
+            seen.iter()
+                .rev()
+                .filter_map(|s| match s {
+                    Seen::Step(loc) => self.node(loc),
+                    _ => None,
+                })
+                .find(|n| n.bind.text.trim() == *root)
+                .map(node_fields)
+                .unwrap_or_default()
+        };
+        for name in rest {
+            fields = fields
+                .into_iter()
+                .find(|f| f.name == *name)
+                .map(|f| f.of)
+                .unwrap_or_default();
+        }
+        fields
+    }
+
+    /// What one item of the loop that names its item `name` holds, from what the list it goes over
+    /// was found to hold.
+    fn item_fields(&self, at: &Loc, name: &str) -> Vec<Field> {
+        let mut list = &self.steps;
+        let mut place = Place::new();
+        let mut found = None;
+        for &(step, block) in &at.place {
+            let Some(node) = list.get(step) else {
+                break;
+            };
+            if node.kind == FOR_EACH && node.item_name() == name {
+                found = Some(Loc {
+                    place: place.clone(),
+                    index: step,
+                });
+            }
+            let Some(b) = node.blocks.get(block) else {
+                break;
+            };
+            list = &b.steps;
+            place.push((step, block));
+        }
+        let Some(loop_at) = found else {
+            return Vec::new();
+        };
+        let over = self
+            .node(&loop_at)
+            .and_then(|n| n.field_at("over"))
+            .map(|t| t.text.trim().to_owned())
+            .unwrap_or_default();
+        if over.is_empty()
+            || !over
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            return Vec::new();
+        }
+        let path: Vec<&str> = over.split('.').collect();
+        self.fields_at_path(&loop_at, Some("over"), &path)
+    }
+
+    /// What the step at `at` can use, nearest first: the results of the steps before it, a loop's
+    /// item, the inputs.
+    pub fn available(&self, at: &Loc) -> Vec<Avail> {
+        let mut out: Vec<Avail> = Vec::new();
+        for seen in self.scope(at, None) {
+            out.push(match seen {
+                Seen::Input(n) => Avail {
+                    title: format!("Input: {n}"),
+                    root: Root::Name(format!("inputs.{n}")),
+                    fields: Vec::new(),
+                },
+                Seen::Item(n) => Avail {
+                    title: format!("The current item ({n})"),
+                    fields: self.item_fields(at, &n),
+                    root: Root::Name(n),
+                },
+                Seen::Index => Avail {
+                    title: "Which round this is (from 0)".to_owned(),
+                    root: Root::Name("index".to_owned()),
+                    fields: Vec::new(),
+                },
+                Seen::Error => Avail {
+                    title: "What went wrong".to_owned(),
+                    root: Root::Name("error".to_owned()),
+                    fields: Vec::new(),
+                },
+                Seen::Step(loc) => {
+                    let Some(node) = self.node(&loc) else {
+                        continue;
+                    };
+                    if node.kind == WAIT {
+                        continue;
+                    }
+                    Avail {
+                        title: plain(&node.to_step("", &mut Vec::new())),
+                        fields: node_fields(node),
+                        root: Root::Step(loc),
+                    }
+                }
+            });
+        }
+        out.reverse();
+        out
+    }
+
+    /// The name a root is used by, giving a step's result a name if it has none.
+    pub fn root_name(&mut self, root: &Root) -> Option<String> {
+        match root {
+            Root::Name(n) => Some(n.clone()),
+            Root::Step(at) => self.resolve(&Source::Step {
+                at: at.clone(),
+                suffix: String::new(),
+            }),
+        }
     }
 
     /// The name a [`Found`] stands for, if it has one now.
@@ -1565,6 +2075,63 @@ impl Editor {
 }
 
 /// What a box at some place can reach, as the scope walk finds it.
+/// Where something a step can use comes from.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Root {
+    /// A step's result, by the name it keeps it under (given one when first used).
+    Step(Loc),
+    /// A name that is there already: an input, a loop's item.
+    Name(String),
+}
+
+/// One thing a step can use, with what it is known to hold, for the node window's input list.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Avail {
+    pub title: String,
+    pub root: Root,
+    pub fields: Vec<Field>,
+}
+
+/// What is typed at the caret, and how it could be finished.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Completion {
+    /// Where the name being typed starts (a byte offset); the caret is where it ends.
+    pub from: usize,
+    pub options: Vec<String>,
+}
+
+/// How many ways to finish a name are offered.
+const COMPLETIONS: usize = 8;
+
+/// The fields a step's result is known to have: a shell's two, what an AI step answers in, or what
+/// was found by looking at a real result.
+fn node_fields(node: &Node) -> Vec<Field> {
+    if node.kind == TOOL && node.tool == crate::tools::SHELL {
+        let field = |name: &str, kind| Field {
+            name: name.to_owned(),
+            kind,
+            of: Vec::new(),
+        };
+        return vec![
+            field("stdout", FieldKind::Text),
+            field("exit_code", FieldKind::Number),
+        ];
+    }
+    if node.kind == GENERATE && !node.reply.is_empty() {
+        return node
+            .reply
+            .iter()
+            .filter(|r| !r.name.text.trim().is_empty())
+            .map(|r| Field {
+                name: r.name.text.trim().to_owned(),
+                kind: r.kind,
+                of: Vec::new(),
+            })
+            .collect();
+    }
+    node.found.clone()
+}
+
 enum Seen {
     Input(String),
     Step(Loc),
@@ -1586,7 +2153,7 @@ pub enum Source {
     /// A name that is there already: an input, a loop's item, the name a step keeps its result as.
     Name(String),
     /// The result of a step, or a part of it (`.stdout`).
-    Step { at: Loc, suffix: &'static str },
+    Step { at: Loc, suffix: String },
 }
 
 /// A name for the result of `node`, from what it is, that none in `taken` is.
@@ -1676,6 +2243,7 @@ mod tests {
             goal: "Does it.".into(),
             definition: serde_json::from_value(v).unwrap(),
             created_at: 5,
+            published: None,
         }
     }
 
@@ -1718,6 +2286,87 @@ mod tests {
             ],
             "success": "All done."
         })
+    }
+
+    #[test]
+    fn a_name_being_typed_is_finished_with_the_fields_of_what_it_reaches_into() {
+        let e = Editor::from_saved(&saved(json!({
+            "inputs": {"who": {"type": "string"}},
+            "steps": [
+                {"id": "find", "kind": "tool", "tool": "mcp__gmail__search", "bind": "mail",
+                 "found": [{"name": "messages", "kind": "list",
+                            "of": [{"name": "from"}, {"name": "subject"}, {"name": "snippet"}]}]},
+                {"id": "each", "kind": "for_each", "over": "mail.messages", "as": "message",
+                 "steps": [{"id": "say", "kind": "tool", "tool": "shell",
+                            "args": {"command": "echo"}}]},
+                {"id": "ls", "kind": "tool", "tool": "shell", "bind": "files",
+                 "args": {"command": "ls"}},
+                {"id": "end", "kind": "tool", "tool": "shell", "args": {"command": "echo"}}
+            ]
+        })));
+        let inside = at(&[(1, 0)], 0);
+        let finish = |at: &Loc, refs, typed: &str| {
+            e.completions(at, None, refs, typed, typed.len())
+                .map(|c| (c.from, c.options))
+        };
+        // In a loop's step: the item's fields, from what the list it goes over holds.
+        assert_eq!(
+            finish(&inside, Refs::Braces, "echo {{message.s"),
+            Some((7, vec!["message.subject".into(), "message.snippet".into()]))
+        );
+        // A step's result, a field's own fields, a shell's two, and the inputs.
+        assert_eq!(
+            finish(&inside, Refs::Braces, "{{mail.").map(|c| c.1),
+            Some(vec!["mail.messages".into()])
+        );
+        assert_eq!(
+            finish(&inside, Refs::Bare, "mail.messages.fr").map(|c| c.1),
+            Some(vec!["mail.messages.from".into()])
+        );
+        assert_eq!(
+            finish(&at(&[], 3), Refs::Braces, "{{files.").map(|c| c.1),
+            Some(vec!["files.stdout".into(), "files.exit_code".into()])
+        );
+        assert_eq!(
+            finish(&inside, Refs::Bare, "inp").map(|c| c.1),
+            Some(vec!["inputs.who".into()])
+        );
+        // Not offered: outside `{{ }}` in text, in plain text, after a finished name, or for what
+        // is not yet made.
+        assert_eq!(finish(&inside, Refs::Braces, "echo mail.m"), None);
+        assert_eq!(finish(&inside, Refs::Braces, "{{mail.messages}} m"), None);
+        assert_eq!(finish(&inside, Refs::None, "mail.m"), None);
+        assert_eq!(finish(&inside, Refs::Bare, "message.subject"), None);
+        assert_eq!(finish(&at(&[], 0), Refs::Bare, "files.s"), None);
+        assert_eq!(finish(&inside, Refs::Bare, "1.5"), None);
+    }
+
+    #[test]
+    fn no_kind_of_step_asks_for_a_name_for_its_result_when_it_is_added_or_run() {
+        for kind in KINDS {
+            // Anywhere: at the top, in a branch of an if, and twice, so names do not clash.
+            let mut e = Editor::blank("a1");
+            e.add_at(&Vec::new(), 0, kind.kind).unwrap();
+            e.add_at(&Vec::new(), 1, kind.kind).unwrap();
+            e.add_at(&Vec::new(), 0, IF).unwrap();
+            e.add_at(&vec![(0, 0)], 0, kind.kind).unwrap();
+            e.check();
+            for why in &e.problems {
+                assert!(!why.contains("bind"), "{}: {}", kind.label, why);
+            }
+            let mut binds = Vec::new();
+            collect_binds(&e.steps, &mut binds);
+            let mut unique = binds.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(binds.len(), unique.len(), "{}: {binds:?}", kind.label);
+        }
+        // One cleared by hand is named again before a run.
+        let mut e = Editor::blank("a1");
+        e.add_at(&Vec::new(), 0, DECIDE).unwrap();
+        e.steps[0].bind = TextEdit::new("");
+        e.name_required_results();
+        assert_eq!(e.steps[0].bind.text, "choice");
     }
 
     #[test]
@@ -2137,6 +2786,9 @@ mod tests {
             ("Path", true)
         );
         assert_eq!(of("reason").about, "Why.");
+        // The full description is kept for the form, on one line.
+        assert_eq!(of("reason").help, "Why. More.");
+        assert_eq!(of("limit").help, "");
         assert_eq!(of("limit").kind, ArgKind::Whole);
         assert_eq!(of("all").kind, ArgKind::Flag);
         assert_eq!((of("tags").kind, of("tags").lines), (ArgKind::Json, 3));
@@ -2205,6 +2857,88 @@ mod tests {
     }
 
     #[test]
+    fn the_fields_a_step_answers_with_or_was_found_to_hold_are_offered_by_name_after_it() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], GENERATE);
+        e.add(&vec![], TOOL);
+        e.steps[0].reply = vec![ReplyRow {
+            name: TextEdit::new("score"),
+            kind: FieldKind::Number,
+        }];
+        e.steps[1].found = vec![Field {
+            name: "stdout".into(),
+            kind: FieldKind::Text,
+            of: Vec::new(),
+        }];
+        e.add(&vec![], GENERATE);
+        let here = at(&[], 2);
+        let labels: Vec<String> = e
+            .results(&here, None)
+            .into_iter()
+            .map(|f| f.label)
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.starts_with("Field score of: ")),
+            "{labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.starts_with("Field stdout of: ")),
+            "{labels:?}"
+        );
+        // What was found is kept in the saved step and comes back.
+        let step = e.steps[1].to_step("2", &mut Vec::new());
+        assert_eq!(step.found.len(), 1);
+        assert_eq!(Node::from_step(&step).found[0].name, "stdout");
+        // Using one names the result and reaches into it.
+        let found = e
+            .results(&here, None)
+            .into_iter()
+            .find(|f| f.label.starts_with("Field score of: "))
+            .unwrap();
+        assert!(e.resolve(&found.source).unwrap().ends_with(".score"));
+    }
+
+    #[test]
+    fn an_ai_step_keeps_the_fields_it_answers_with_in_order() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], GENERATE);
+        e.steps[0].reply = vec![
+            ReplyRow {
+                name: TextEdit::new(" score "),
+                kind: FieldKind::Number,
+            },
+            ReplyRow {
+                name: TextEdit::new("tags"),
+                kind: FieldKind::List,
+            },
+        ];
+        let step = e.steps[0].to_step("1", &mut Vec::new());
+        let got: Vec<(&str, FieldKind)> = step
+            .reply
+            .iter()
+            .map(|f| (f.name.as_str(), f.kind))
+            .collect();
+        assert_eq!(
+            got,
+            [("score", FieldKind::Number), ("tags", FieldKind::List)]
+        );
+        assert_eq!(Node::from_step(&step).reply[1].kind, FieldKind::List);
+    }
+
+    #[test]
+    fn a_switch_remembers_whether_it_runs_every_case_that_matches() {
+        let mut e = Editor::blank("a1");
+        e.add(&vec![], SWITCH);
+        assert!(!e.steps[0].all);
+        e.steps[0].all = true;
+        let step = e.steps[0].to_step("1", &mut Vec::new());
+        assert!(step.all);
+        assert!(Node::from_step(&step).all);
+        e.steps[0].all = false;
+        assert!(!e.steps[0].to_step("1", &mut Vec::new()).all);
+    }
+
+    #[test]
     fn a_condition_said_in_parts_is_the_expression_it_stands_for_and_reads_back_as_parts() {
         let mut e = Editor::blank("a1");
         e.add(&vec![], IF);
@@ -2239,5 +2973,165 @@ mod tests {
         e.text_mut(&Target::Field(here.clone(), 0)).unwrap().text = "x.trimmed() != \"\"".into();
         assert!(e.condition_in_parts(&here));
         assert_eq!(e.steps[0].when.as_ref().unwrap().op, Op::IsNotEmpty);
+    }
+
+    #[test]
+    fn a_schedule_trigger_is_typed_checked_and_comes_back_as_it_was_saved() {
+        let mut e = Editor::from_saved(&saved(every_kind()));
+        assert!(!e.trigger.schedule);
+        assert_eq!(e.definition().unwrap().trigger, Trigger::Manual);
+
+        // Choosing a schedule makes it daily at 09:00 until the boxes say otherwise.
+        e.trigger.set_schedule(true, 1_000);
+        e.trigger.timing.at = TextEdit::new("07:30");
+        e.trigger
+            .inputs
+            .insert("folder".into(), TextEdit::new(" inbox "));
+        // A value for something that is not an input, or left empty, is not kept.
+        e.trigger.inputs.insert("gone".into(), TextEdit::new("x"));
+        e.trigger.inputs.insert("n".into(), TextEdit::new(" "));
+        let def = e.definition().unwrap();
+        let Trigger::Schedule { timing, inputs } = &def.trigger else {
+            panic!("not a schedule: {:?}", def.trigger);
+        };
+        assert_eq!(timing.describe(&chrono::Utc), "every day at 07:30");
+        assert_eq!(
+            inputs,
+            json!({"folder": "inbox"}).as_object().unwrap(),
+            "only the workflow's own inputs, as typed"
+        );
+
+        // Saved and opened again, it is the same boxes and reads the same.
+        let mut w = saved(every_kind());
+        w.definition = def.clone();
+        let again = Editor::from_saved(&w);
+        assert!(again.trigger.schedule);
+        assert_eq!(again.definition().unwrap().trigger, def.trigger);
+
+        // An "every" schedule keeps its grid: reading twice gives one timing.
+        e.trigger.timing.when = crate::schedules::form::When::Every;
+        e.trigger.timing.every = TextEdit::new("15");
+        let (a, b) = (e.definition().unwrap(), e.definition().unwrap());
+        assert_eq!(a.trigger, b.trigger);
+
+        // What cannot be read is said, and back to manual there is nothing to say.
+        e.trigger.timing.every = TextEdit::new("soon");
+        let why = e.definition().unwrap_err().join(" ");
+        assert!(why.contains("trigger") && why.contains("minutes"), "{why}");
+        e.trigger.set_schedule(false, 1_000);
+        assert_eq!(e.definition().unwrap().trigger, Trigger::Manual);
+    }
+
+    #[test]
+    fn ask_an_agent_adds_a_step_that_hands_a_task_over_and_is_shown_by_that_name() {
+        let n = Node::new(AGENT, "a1".into());
+        assert_eq!(
+            (n.kind.as_str(), n.tool.as_str()),
+            (TOOL, crate::tools::DELEGATE)
+        );
+        assert_eq!(n.label(), "Ask an agent");
+        assert_eq!(kind_named("Ask an agent"), Some(AGENT));
+        assert_eq!(Node::new(TOOL, "t1".into()).label(), "Use a tool");
+
+        // Saved and opened again it is still that: a tool step naming the delegate tool.
+        let mut e = Editor::blank("a1");
+        e.name = TextEdit::new("Hand over");
+        e.steps.push(n);
+        e.set_param(
+            &Loc {
+                place: Vec::new(),
+                index: 0,
+            },
+            "agent",
+            ArgKind::Text,
+            "Ann",
+        );
+        let step = e.steps[0].to_step("1", &mut Vec::new());
+        assert_eq!(step.tool.as_deref(), Some(crate::tools::DELEGATE));
+        assert_eq!(Node::from_step(&step).label(), "Ask an agent");
+    }
+
+    #[test]
+    fn a_new_workflow_is_named_with_the_next_number_not_taken_and_the_name_can_be_changed() {
+        assert_eq!(new_workflow_name([]), "My workflow");
+        assert_eq!(new_workflow_name(["Tidy downloads"]), "My workflow");
+        assert_eq!(new_workflow_name(["My workflow"]), "My workflow 2");
+        assert_eq!(
+            new_workflow_name(["my WORKFLOW", "My workflow 2"]),
+            "My workflow 3"
+        );
+        assert_eq!(
+            new_workflow_name(["My workflow", "My workflow 3"]),
+            "My workflow 2"
+        );
+        let mut e = Editor::blank_named("a1", ["My workflow"]);
+        assert_eq!(e.name.text, "My workflow 2");
+        e.name = TextEdit::new("Weekly report");
+        assert_eq!(e.name.text, "Weekly report");
+    }
+
+    #[test]
+    fn running_as_far_as_a_step_leaves_out_and_does_not_check_what_comes_after() {
+        let e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls"}},
+            {"id": "each", "kind": "for_each", "over": "[1, 2]", "steps": [
+                {"id": "ok", "kind": "tool", "tool": "shell", "args": {"command": "echo"}},
+                {"id": "later", "kind": "tool"}
+            ]},
+            {"id": "last", "kind": "tool"}
+        ]})));
+        assert!(
+            e.definition().is_err(),
+            "the whole workflow is not finished"
+        );
+        let at = |place: Vec<(usize, usize)>, index| Loc { place, index };
+        let first = e.definition_through(&at(Vec::new(), 0)).unwrap();
+        assert_eq!(first.steps.len(), 1);
+        // A step inside a loop: the loop, with the step last in it and nothing after it.
+        let inner = e.definition_through(&at(vec![(1, 0)], 0)).unwrap();
+        assert_eq!(inner.steps.len(), 2);
+        assert_eq!(inner.steps[1].steps.len(), 1);
+        assert_eq!(inner.steps[1].steps[0].id, "ok");
+        // A step that is not finished is said so, by what is wrong with it.
+        let bad = e.definition_through(&at(vec![(1, 0)], 1)).unwrap_err();
+        assert!(bad.iter().any(|p| p.contains("needs a tool")), "{bad:?}");
+    }
+
+    #[test]
+    fn a_draft_keeps_a_workflow_that_is_not_fit_to_run_and_a_step_starts_from_the_one_before() {
+        let e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls"}},
+            {"id": "each", "kind": "for_each", "over": "[1]", "steps": [
+                {"id": "first", "kind": "tool"},
+                {"id": "second", "kind": "tool"}
+            ]},
+            {"id": "last", "kind": "tool"}
+        ]})));
+        assert!(e.definition().is_err());
+        let kept = e.draft("w9", 5);
+        assert_eq!((kept.id.as_str(), kept.created_at), ("w9", 5));
+        assert_eq!(kept.definition.steps.len(), 3, "nothing is dropped");
+        assert_eq!(kept.definition.steps[1].steps.len(), 2);
+        let at = |place: Vec<(usize, usize)>, index| Loc { place, index };
+        assert_eq!(e.step_before(&at(vec![], 2)), Some(at(vec![], 1)));
+        assert_eq!(
+            e.step_before(&at(vec![(1, 0)], 1)),
+            Some(at(vec![(1, 0)], 0))
+        );
+        // The first step in a loop starts from what is before the loop; the first of all has none.
+        assert_eq!(e.step_before(&at(vec![(1, 0)], 0)), Some(at(vec![], 0)));
+        assert_eq!(e.step_before(&at(vec![], 0)), None);
+    }
+
+    #[test]
+    fn an_empty_box_says_what_it_is_for() {
+        let e = Editor::from_saved(&saved(json!({"steps": [
+            {"id": "each", "kind": "for_each", "steps": []},
+            {"id": "if", "kind": "if"}
+        ]})));
+        let bad = e.definition().unwrap_err().join("\n");
+        assert!(bad.contains("it needs the list to repeat over"), "{bad}");
+        assert!(bad.contains("it needs a condition"), "{bad}");
+        assert!(!bad.contains("a over"), "{bad}");
     }
 }

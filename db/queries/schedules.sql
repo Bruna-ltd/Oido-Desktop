@@ -1,13 +1,13 @@
 -- name: PutSchedule :exec
-INSERT INTO schedules (id, agent_id, workflow_id, name, prompt, inputs, timing, enabled, next_at, created_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+INSERT INTO schedules (id, agent_id, workflow_id, name, prompt, inputs, timing, enabled, next_at, created_at, from_trigger)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
 ON CONFLICT (id) DO UPDATE SET
     workflow_id = excluded.workflow_id, name = excluded.name, prompt = excluded.prompt,
     inputs = excluded.inputs, timing = excluded.timing, enabled = excluded.enabled,
-    next_at = excluded.next_at;
+    next_at = excluded.next_at, from_trigger = excluded.from_trigger;
 
 -- name: ListSchedules :many
-SELECT id, agent_id, workflow_id, name, prompt, inputs, timing, enabled, next_at, created_at
+SELECT id, agent_id, workflow_id, name, prompt, inputs, timing, enabled, next_at, created_at, from_trigger
 FROM schedules ORDER BY name COLLATE NOCASE, rowid;
 
 -- After a fire, a pause or a resume.

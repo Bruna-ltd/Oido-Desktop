@@ -2,110 +2,147 @@
 //! list of steps inside a card for each branch or loop it holds. What is wrong with what is
 //! typed is listed above the buttons.
 
-use rune::{El, ScrollSpec, TextEdit, col, el, row, text, text_input};
+use rune::{Align, El, ScrollSpec, Side, TextEdit, col, el, row, text, text_input};
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Select, SelectAppearance, Switch,
+    Button, ButtonVariant, ControlSize, Kit, PopupItem, PopupList, SegmentedControl, Select,
+    SelectAppearance, Switch,
 };
 
 use super::workflow_graph;
 use crate::app::App;
-use crate::flow_graph::View;
+use crate::flow_editor::Complete;
 use crate::workflow::cond;
-use crate::workflow::definition::{FOR_EACH, PARALLEL, SWITCH, TOOL, WHILE};
+use crate::workflow::definition::{FOR_EACH, FieldKind, GENERATE, PARALLEL, SWITCH, TOOL, WHILE};
 use crate::workflow::editor::{
     ArgKind, Block, Editor, INPUT_KINDS, KINDS, Loc, Menu, Node, ParamSpec, Part, Place, Refs,
     Target, params_of, specs,
 };
 
-/// The width the editor's text stops at.
-const WIDTH: f32 = 760.0;
-
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(ed) = &s.wf_editor else {
         return el();
     };
-    match s.wf_graph.shown {
-        View::Cards => cards(s, ed, k, layer),
-        View::Graph => graph(s, ed, k, layer),
-    }
+    graph(s, ed, k, layer)
 }
 
-/// The title and the switch between the two views.
-fn heading(s: &App, ed: &Editor, k: &Kit) -> El {
-    let title = if ed.workflow.is_some() {
-        "Change workflow"
-    } else {
-        "New workflow"
+/// The bar along the top, as n8n has it: back to the list and the workflow's name on the left;
+/// where it stands, then Check, Save and Publish on the right. Publish makes what is saved the
+/// live copy; Unpublish and Revert show when there is a live copy to take down or go back to.
+fn top_bar(s: &App, ed: &Editor, k: &Kit) -> El {
+    let c = &k.c;
+    let saved = ed
+        .workflow
+        .as_ref()
+        .and_then(|id| s.workflows.iter().find(|w| &w.id == id));
+    let live = saved.is_some_and(|w| w.live().is_some());
+    let changed = saved.is_none_or(|w| w.has_unpublished_changes());
+    let (state, quiet) = match (live, changed) {
+        (false, _) => ("Draft · not published", false),
+        (true, true) => ("Published · changes not published", false),
+        (true, false) => ("Published", true),
     };
-    let shown = match s.wf_graph.shown {
-        View::Cards => 0,
-        View::Graph => 1,
-    };
-    row()
-        .w_full()
-        .center_y()
-        .gap(12.0)
-        .child(text(title).font(k.ty.body_medium).color(k.c.text_base))
-        .child(
-            SegmentedControl::new(&["Cards", "Graph"], Some(shown))
-                .label("View")
-                .fit()
-                .on_pick(|s: &mut App, i, _| {
-                    s.set_view(if i == 0 { View::Cards } else { View::Graph });
-                })
-                .build(k),
-        )
-        .child(history(ed, k))
-}
-
-/// Undo and redo, each naming what it would do.
-fn history(ed: &Editor, k: &Kit) -> El {
-    let button = |label: &str, what: Option<&str>, key: &str| {
+    let button = |label: &str, variant: ButtonVariant, key: &str| {
         Button::new(label.to_owned())
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Small)
-            .disabled(what.is_none())
+            .variant(variant)
+            .control_size(ControlSize::Regular)
             .build(k)
             .key(key.to_owned())
-            .help(match what {
-                Some(w) => format!("{label} {}", w.to_lowercase()),
-                None => format!("Nothing to {}", label.to_lowercase()),
-            })
     };
-    row()
-        .gap(2.0)
-        .child(button("Undo", ed.undoes(), "wfe-undo").on_press(|s: &mut App| s.undo_editor()))
-        .child(button("Redo", ed.redoes(), "wfe-redo").on_press(|s: &mut App| s.redo_editor()))
-}
-
-/// Save, Check and Cancel.
-fn buttons(k: &Kit) -> El {
-    row()
-        .gap(8.0)
-        .child(
-            Button::new("Save")
-                .variant(ButtonVariant::Submit)
-                .control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.save_editor())
-                .build(k)
-                .key("wfe-save"),
+    let style = rune::TextStyle {
+        line_height: 22.0,
+        ..k.ty.body_medium
+    };
+    let name = row()
+        .w(280.0)
+        .px(10.0)
+        .py(5.0)
+        .radius(k.radius.md)
+        .border(
+            1.0,
+            if ed.name.focused {
+                c.border_strong
+            } else {
+                rune::Color::TRANSPARENT
+            },
         )
         .child(
-            Button::new("Check")
-                .variant(ButtonVariant::Outline)
-                .control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.check_editor())
-                .build(k)
-                .key("wfe-check"),
+            text_input(&ed.name, style)
+                .key("wfe-name")
+                .w_full()
+                .color(c.text_base)
+                .placeholder("Name this workflow".to_owned(), c.text_faint)
+                .caret(c.text_base, k.selection())
+                .label("Workflow name".to_owned())
+                .on_edit(|s: &mut App| s.editor_text(&Target::Name)),
+        );
+    let bar = row()
+        .key("wfe-bar")
+        .w_full()
+        .center_y()
+        .gap(10.0)
+        .px(16.0)
+        .py(10.0)
+        .child(
+            button("← Workflows", ButtonVariant::Ghost, "wfe-cancel")
+                .help("Back to the list. Your changes are already kept.")
+                .on_press(|s: &mut App| s.cancel_editor()),
+        )
+        .child(el().w(1.0).h(20.0).fill(c.border_muted))
+        .child(name)
+        .child(el().grow(1.0))
+        .children(s.has_last_run().then(|| {
+            let on = s.wf_graph.show_last;
+            button(
+                if on { "Hide last run" } else { "Show last run" },
+                ButtonVariant::Ghost,
+                "wfg-last-run",
+            )
+            .on_press(move |s: &mut App| {
+                s.hide_run();
+                s.wf_graph.show_last = !on;
+            })
+        }))
+        .child(
+            text(if s.editor_saved() {
+                "Saved"
+            } else {
+                "Unsaved changes"
+            })
+            .font(k.ty.small)
+            .color(c.text_faint),
+        )
+        .child(text(state).font(k.ty.small).color(if quiet {
+            c.text_muted
+        } else {
+            c.warning.icon
+        }))
+        .children((live && changed).then(|| {
+            button("Revert", ButtonVariant::Ghost, "wfe-revert")
+                .help("Drop the changes made since it was published")
+                .on_press(|s: &mut App| s.revert_editor())
+        }))
+        .children(live.then(|| {
+            button("Unpublish", ButtonVariant::Ghost, "wfe-unpublish")
+                .help("Nothing runs it, and its schedule stops, until it is published again")
+                .on_press(|s: &mut App| s.unpublish_editor())
+        }))
+        .child(
+            button("Check", ButtonVariant::Ghost, "wfe-check")
+                .on_press(|s: &mut App| s.check_editor()),
         )
         .child(
-            Button::new("Cancel")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .on_press(|s: &mut App| s.cancel_editor())
-                .build(k)
-                .key("wfe-cancel"),
+            button("Save", ButtonVariant::Outline, "wfe-save")
+                .on_press(|s: &mut App| s.save_editor()),
         )
+        .child(
+            button("Publish", ButtonVariant::Submit, "wfe-publish")
+                .help("Save, then make this the version that agents and schedules run")
+                .on_press(|s: &mut App| s.publish_editor()),
+        );
+    col()
+        .w_full()
+        .child(bar)
+        .child(el().w_full().h(1.0).fill(c.border_muted))
 }
 
 /// Name, what it is for, who owns it, and what a run is given.
@@ -113,16 +150,6 @@ fn basics(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     col()
         .w_full()
         .gap(14.0)
-        .child(field(
-            "Name",
-            &ed.name,
-            "wfe-name",
-            "Weekly report",
-            1,
-            None,
-            k,
-            |s: &mut App| s.editor_text(&Target::Name),
-        ))
         .child(field(
             "What it is for",
             &ed.goal,
@@ -163,84 +190,53 @@ fn tail(s: &App, ed: &Editor, k: &Kit) -> El {
     out.child(test_run(s, ed, k))
 }
 
-/// Every step as a form, one under the other.
-fn cards(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
-    let c = &k.c;
-    col()
-        .key("workflow-editor")
-        .grow(1.0)
-        .h_full()
-        .min_h(0.0)
-        .max_w(WIDTH)
-        .padding(20.0)
-        .gap(14.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .child(heading(s, ed, k))
-        .child(basics(s, ed, k, layer))
-        .child(text("Steps").font(k.ty.ui_medium).color(c.text_base))
-        .child(steps(s, ed, &Vec::new(), k, layer))
-        .child(tail(s, ed, k))
-        .child(buttons(k))
-}
-
 /// The steps as boxes and wires, with the form of the selected one beside them.
 fn graph(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
-    let (place, index) = s.add_position();
-    let target = place.clone();
-    let header = heading(s, ed, k)
-        .child(add_menu(
-            "wfg-add-step".to_owned(),
-            Menu::AddStep,
-            "Add step",
-            s,
-            k,
-            layer,
-            move |s, label| s.editor_add_at(&target, index, label),
-        ))
-        .child(el().grow(1.0))
-        .children(s.has_last_run().then(|| {
-            let on = s.wf_graph.show_last;
-            small(
-                if on { "Hide last run" } else { "Show last run" },
-                ButtonVariant::Ghost,
-            )
-            .on_press(move |s: &mut App| {
-                s.hide_run();
-                s.wf_graph.show_last = !on;
-            })
-            .build(k)
-            .key("wfg-last-run")
-        }))
-        .child(
-            small("Fit", ButtonVariant::Ghost)
-                .on_press(|s: &mut App| s.fit_graph())
-                .build(k)
-                .key("wfg-fit"),
-        )
-        .child(buttons(k));
-    col()
+    let page = col()
         .key("workflow-editor")
         .grow(1.0)
         .h_full()
         .min_h(0.0)
-        .padding(20.0)
-        .gap(12.0)
-        .child(header)
-        .children(workflow_graph::banner(s, ed, k))
+        .child(top_bar(s, ed, k))
         .child(
-            row()
+            col()
                 .grow(1.0)
                 .min_h(0.0)
-                .gap(16.0)
-                .child(workflow_graph::view(s, ed, k, layer))
-                .child(inspector(s, ed, k, layer)),
-        )
+                .padding(16.0)
+                .gap(12.0)
+                .children(workflow_graph::banner(s, ed, k))
+                .child(
+                    row()
+                        .grow(1.0)
+                        .min_h(0.0)
+                        .gap(16.0)
+                        .child(
+                            col()
+                                .grow(1.0)
+                                .min_w(0.0)
+                                .min_h(0.0)
+                                .gap(12.0)
+                                .child(workflow_graph::view(s, ed, k, layer))
+                                .children(super::workflow_logs::panel(s, ed, k)),
+                        )
+                        .children(side(s, ed, k, layer)),
+                ),
+        );
+    super::workflow_node::window(s, ed, k, layer);
+    page
+}
+
+/// The panel at the right: the workflow's own settings, the list of steps to add, or the trigger.
+/// A selected step has its own window instead.
+fn side(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> Option<El> {
+    (s.picker_place().is_some() || s.selected_step().is_none()).then(|| inspector(s, ed, k, layer))
 }
 
 /// The form of the selected step, or the workflow's own when nothing is selected.
 fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
+    if s.picker_place().is_some() {
+        return super::workflow_picker::panel(s, k);
+    }
     let mut out = col()
         .key("wfg-inspector")
         .w(workflow_graph::INSPECTOR_W)
@@ -250,26 +246,239 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         });
-    let chosen = s.selected_step().and_then(|at| {
-        let list = list_at(ed, &at.place);
-        list.get(at.index).map(|n| (at, n, list.len()))
-    });
-    match chosen {
-        Some((at, node, len)) => {
-            out = out
+    if s.wf_graph.on_trigger {
+        out = out.child(trigger_form(ed, k));
+    } else {
+        let c = &k.c;
+        out = out
                 .child(
-                    row().child(
-                        small("Workflow settings", ButtonVariant::Ghost)
-                            .on_press(|s: &mut App| s.select_step(None))
-                            .build(k)
-                            .key("wfg-settings"),
-                    ),
+                    col()
+                        .gap(2.0)
+                        .child(
+                            text("Workflow settings")
+                                .font(k.ty.body_medium)
+                                .color(c.text_base),
+                        )
+                        .child(
+                            text("Name, who runs it, what it takes, and when it counts as done. Double-press a step to open it.")
+                                .font(k.ty.small)
+                                .color(c.text_muted)
+                                .wrap(),
+                        ),
                 )
-                .child(card(s, ed, &at, node, len, false, k, layer))
-                .children(workflow_graph::run_panel(s, ed, &at, k));
+                .child(basics(s, ed, k, layer))
+                .child(el().w_full().h(1.0).fill(c.border_muted))
+                .child(tail(s, ed, k));
+    }
+    out
+}
+
+/// Runs the selected step for real, after the results of the ones before it, so what it made can
+/// be seen under it and the next step can use it.
+pub(super) fn step_actions(
+    s: &App,
+    ed: &Editor,
+    at: &Loc,
+    node: &Node,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
+    let t = &s.wf_test;
+    let nested = !at.place.is_empty();
+    let go = at.clone();
+    let button = if t.running.is_some() {
+        Button::new("Stop")
+            .variant(ButtonVariant::Outline)
+            .control_size(ControlSize::Small)
+            .on_press(|s: &mut App| s.stop_test())
+            .build(k)
+            .key("wfg-step-stop")
+    } else {
+        Button::new("Execute step")
+            .variant(ButtonVariant::Submit)
+            .control_size(ControlSize::Small)
+            .on_press(move |s: &mut App| s.run_step(&go))
+            .build(k)
+            .key("wfg-step-run")
+            .help(if nested {
+                "Runs the steps before this one and the step that holds it as far as this one, for real. Steps after it are not run, so ones not finished yet do not stop it."
+            } else {
+                "Runs this step for real after the results of the steps before it. Ones that have not run yet run first; ones that did are not run again."
+            })
+    };
+    let before = at.clone();
+    let mut out = col()
+        .w_full()
+        .gap(6.0)
+        .child(row().gap(8.0).center_y().child(button).children(
+            (t.running.is_none()).then(|| {
+                small("Run what comes before", ButtonVariant::Outline)
+                    .on_press(move |s: &mut App| s.run_before(&before))
+                    .build(k)
+                    .key("wfg-step-before")
+                    .help("Runs the steps before this one, for real, so what they made is there to use. This step is not run, so it can still be unfinished.")
+            }),
+        ))
+        .child(row().gap(8.0).center_y().children(
+            t.memos.as_ref().filter(|m| m.len() > 0).map(|_| {
+                small("Forget results", ButtonVariant::Ghost)
+                    .on_press(|s: &mut App| s.forget_step_results())
+                    .build(k)
+                    .key("wfg-step-forget")
+                    .help("The next step run starts again from the first step")
+            }),
+        ));
+    if let Some(why) = &t.notice {
+        out = out.child(
+            text(why.clone())
+                .font(k.ty.small)
+                .color(k.c.warning.icon)
+                .wrap(),
+        );
+    }
+    out.child(discover(s, ed, at, node, k, layer))
+}
+
+/// Finding the fields of a step's result: a model of the person's choice looks at the result the
+/// step made when it was tried, and what it finds is offered by name after the step.
+fn discover(s: &App, _ed: &Editor, at: &Loc, node: &Node, k: &Kit, layer: &mut Vec<El>) -> El {
+    use super::model_picker::ModelPicker;
+    let c = &k.c;
+    let m = &s.wf_mapper;
+    let go = at.clone();
+    let picker = ModelPicker::new("wf-mapper-model", s.providers.groups())
+        .current(
+            m.model.clone(),
+            m.model.as_ref().map(|x| s.providers.model_name(x)),
+        )
+        .placeholder("Same model as the agent".to_owned())
+        .label("Model that looks at the result")
+        .clearable(true)
+        .on_open(|s: &mut App| s.models_opened())
+        .build(
+            k,
+            layer,
+            &m.picker,
+            |s: &mut App| &mut s.wf_mapper.picker,
+            |s: &mut App, v| s.wf_mapper.model = v,
+        )
+        .key("wf-mapper-model");
+    let mut out = col()
+        .w_full()
+        .gap(6.0)
+        .child(
+            text("Fields of the result")
+                .font(k.ty.small_medium)
+                .color(c.text_muted),
+        )
+        .child(picker)
+        .child(
+            row().child(
+                small(
+                    if m.running {
+                        "Looking…"
+                    } else {
+                        "Discover fields"
+                    },
+                    ButtonVariant::Outline,
+                )
+                .disabled(m.running)
+                .on_press(move |s: &mut App| s.discover_fields(&go))
+                .build(k)
+                .key("wfg-step-discover")
+                .help("Runs this step first if it has not been run, then a model looks at what it made and lists its fields, which later boxes offer by name"),
+            ),
+        );
+    if !node.found.is_empty() {
+        let list: Vec<String> = node
+            .found
+            .iter()
+            .map(|f| format!("{} ({})", f.name, f.kind.label()))
+            .collect();
+        out = out.child(
+            text(format!("Found: {}", list.join(", ")))
+                .font(k.ty.small)
+                .color(c.text_faint)
+                .wrap(),
+        );
+    }
+    if let Some(why) = &m.notice {
+        out = out.child(
+            text(why.clone())
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .wrap(),
+        );
+    }
+    out
+}
+
+/// What starts the workflow: you or an agent, or a schedule. It takes effect when published.
+fn trigger_form(ed: &Editor, k: &Kit) -> El {
+    let c = &k.c;
+    let t = &ed.trigger;
+    let mut out = col()
+        .w_full()
+        .gap(14.0)
+        .child(
+            row().child(
+                small("Workflow settings", ButtonVariant::Ghost)
+                    .on_press(|s: &mut App| s.select_step(None))
+                    .build(k)
+                    .key("wfg-settings"),
+            ),
+        )
+        .child(text("Trigger").font(k.ty.ui_medium).color(c.text_base))
+        .child(
+            SegmentedControl::new(&["Manual", "Schedule"], Some(usize::from(t.schedule)))
+                .label("Trigger")
+                .fit()
+                .on_pick(|s: &mut App, i, _| s.editor_set_schedule(i == 1))
+                .build(k)
+                .key("wfe-trigger"),
+        )
+        .child(
+            text(if t.schedule {
+                "Runs by itself while Oido is open, once the workflow is published. A test run ignores the schedule."
+            } else {
+                "Starts when you or an agent run the published workflow."
+            })
+            .font(k.ty.small)
+            .color(c.text_muted)
+            .wrap(),
+        );
+    if t.schedule {
+        out = out.child(super::schedules::timing_fields(
+            &t.timing,
+            "trigger-",
+            k,
+            |s: &mut App| s.trigger_timing(),
+        ));
+        let names: Vec<String> = ed
+            .inputs
+            .iter()
+            .map(|r| r.name.text.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .collect();
+        if !names.is_empty() {
+            out = out.child(
+                text("What each run is given")
+                    .font(k.ty.small)
+                    .color(c.text_muted),
+            );
         }
-        None => {
-            out = out.child(basics(s, ed, k, layer)).child(tail(s, ed, k));
+        for name in names {
+            let blank = TextEdit::new("");
+            let edit = t.inputs.get(&name).unwrap_or(&blank);
+            let n = name.clone();
+            out = out.child(super::schedules::input(
+                &name,
+                edit,
+                &format!("trigger-input-{name}"),
+                "",
+                k,
+                move |s: &mut App| s.trigger_input(&n),
+            ));
         }
     }
     out
@@ -382,6 +591,49 @@ fn field(
     k: &Kit,
     f: impl for<'a> Fn(&'a mut App) -> &'a mut TextEdit + 'static,
 ) -> El {
+    field_with(label, edit, key, hint, lines, names, None, k, f)
+}
+
+/// The list that finishes the name being typed in a box, under it, while the box has the caret.
+fn finishing(s: &App, c: &Complete, edit: &TextEdit, k: &Kit, layer: &mut Vec<El>) {
+    if !edit.focused {
+        return;
+    }
+    let Some(found) = s.wf_completion(c, edit) else {
+        return;
+    };
+    let active = s.wf_suggest.active.min(found.options.len() - 1);
+    let c = c.clone();
+    PopupList::new(format!("{}-finish", c.anchor), c.anchor.clone())
+        .anchored(c.anchor.clone(), Side::Bottom, Align::Start, 4.0)
+        .width(320.0)
+        .max_height(240.0)
+        .items(
+            found
+                .options
+                .iter()
+                .map(|o| PopupItem::new(o.clone(), o.clone())),
+        )
+        .active(Some(active))
+        .label("Names".to_owned())
+        .on_choose(move |s: &mut App, id, _| s.editor_complete(&c, id))
+        .on_close(|_: &mut App| {})
+        .build(k, layer);
+}
+
+/// [`field`] that also finishes the names typed in it, when it is given what it may name.
+#[allow(clippy::too_many_arguments)]
+fn field_with(
+    label: &str,
+    edit: &TextEdit,
+    key: &str,
+    hint: &str,
+    lines: usize,
+    names: Option<El>,
+    complete: Option<Complete>,
+    k: &Kit,
+    f: impl for<'a> Fn(&'a mut App) -> &'a mut TextEdit + 'static,
+) -> El {
     let c = &k.c;
     let style = rune::TextStyle {
         line_height: 22.0,
@@ -411,16 +663,22 @@ fn field(
                     c.border_base
                 },
             )
-            .child(
-                text_input(edit, style)
+            .child({
+                let input = text_input(edit, style)
                     .key(key.to_owned())
                     .w_full()
                     .color(c.text_base)
                     .placeholder(hint.to_owned(), c.text_faint)
                     .caret(c.text_base, k.selection())
                     .label(label.to_owned())
-                    .on_edit(f),
-            ),
+                    .on_edit(f);
+                match complete {
+                    Some(c) => {
+                        input.on_input_key(move |s: &mut App, key, _| s.wf_complete_key(&c, key))
+                    }
+                    None => input,
+                }
+            }),
     )
 }
 
@@ -656,7 +914,7 @@ fn steps(s: &App, ed: &Editor, place: &Place, k: &Kit, layer: &mut Vec<El>) -> E
     )))
 }
 
-fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
+pub(super) fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
     let mut list: &[Node] = &ed.steps;
     for &(step, block) in place {
         match list.get(step).and_then(|n| n.blocks.get(block)) {
@@ -667,15 +925,8 @@ fn list_at<'a>(ed: &'a Editor, place: &Place) -> &'a [Node] {
     list
 }
 
-fn kind_label(kind: &str) -> &'static str {
-    KINDS
-        .iter()
-        .find(|x| x.kind == kind)
-        .map_or("Step", |x| x.label)
-}
-
 #[allow(clippy::too_many_arguments)]
-fn card(
+pub(super) fn card(
     s: &App,
     ed: &Editor,
     at: &Loc,
@@ -720,9 +971,7 @@ fn card(
                 .build(k)
                 .key(format!("wfe-remove-{key}")),
         );
-    let label = text(kind_label(&n.kind))
-        .font(k.ty.ui_medium)
-        .color(c.text_base);
+    let label = text(n.label()).font(k.ty.ui_medium).color(c.text_base);
     let head = row()
         .w_full()
         .center_y()
@@ -771,8 +1020,16 @@ fn card(
     }
 
     if n.kind == TOOL {
-        out = out.child(tool_field(s, at, n, &key, k, layer));
-        for p in tool_params(s, ed, at, n, &key, k, layer) {
+        // Handing a task to an agent is its own kind of step in the list, so it has no tool to
+        // choose.
+        if n.tool != crate::tools::DELEGATE {
+            out = out.child(tool_field(s, at, n, &key, k, layer));
+            if !n.tool.is_empty() {
+                let about = crate::tools::shown(&n.tool, &s.mcp.servers).about;
+                out = out.children(help_line(&about, k));
+            }
+        }
+        for p in tool_params(s, at, n, &key, k, layer) {
             out = out.child(p);
         }
     }
@@ -785,21 +1042,35 @@ fn card(
             continue;
         }
         let target = Target::Field(at.clone(), i);
-        let names = names_for(s, ed, at, spec.key, spec.refs, &target, &key, k, layer);
         let f_at = at.clone();
-        out = out.child(field(
+        let box_id = format!("wfe-field-{key}-{i}");
+        let complete = (spec.refs != Refs::None).then(|| Complete {
+            at: at.clone(),
+            key: spec.key.to_owned(),
+            refs: spec.refs,
+            target: target.clone(),
+            anchor: box_id.clone(),
+        });
+        if let Some(c) = &complete {
+            finishing(s, c, edit, k, layer);
+        }
+        out = out.child(field_with(
             spec.label,
             edit,
-            &format!("wfe-field-{key}-{i}"),
+            &box_id,
             spec.hint,
             spec.lines,
-            names,
+            None,
+            complete,
             k,
             move |s: &mut App| s.editor_text(&Target::Field(f_at.clone(), i)),
         ));
         if spec.key == "cond" {
             out = out.child(expression_toggle(at, n, k));
         }
+    }
+    if n.kind == GENERATE {
+        out = out.children(reply_fields(at, n, &key, s, k, layer));
     }
     if n.kind == FOR_EACH || n.kind == PARALLEL {
         let on = n.go_on;
@@ -821,6 +1092,33 @@ fn card(
                         .build(k),
                 )
                 .child(text(label).font(k.ty.small).color(c.text_muted)),
+        );
+    }
+    if n.kind == SWITCH {
+        let on = n.all;
+        let flip = at.clone();
+        let label = "Run every case that matches, not only the first";
+        out = out.child(
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(
+                    row()
+                        .center_y()
+                        .gap(8.0)
+                        .child(
+                            Switch::new(on)
+                                .label(label)
+                                .hide_label()
+                                .on_toggle(move |s: &mut App| s.editor_toggle_all(&flip))
+                                .build(k),
+                        )
+                        .child(text(label).font(k.ty.small).color(c.text_muted)),
+                )
+                .children(help_line(
+                    "Each case is compared with the value above. To test different conditions, switch on true and write a condition in each case, such as score > 50.",
+                    k,
+                )),
         );
     }
     for (b, block) in n.blocks.iter().enumerate() {
@@ -903,15 +1201,7 @@ fn tool_field(s: &App, at: &Loc, n: &Node, key: &str, k: &Kit, layer: &mut Vec<E
 /// The arguments of a tool step as a form: a box for each, named in words, those the tool needs
 /// first and the rest under "Optional".
 #[allow(clippy::too_many_arguments)]
-fn tool_params(
-    s: &App,
-    ed: &Editor,
-    at: &Loc,
-    n: &Node,
-    key: &str,
-    k: &Kit,
-    layer: &mut Vec<El>,
-) -> Vec<El> {
+fn tool_params(s: &App, at: &Loc, n: &Node, key: &str, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
     let c = &k.c;
     let mut specs = s
         .step_tool_schema(&n.tool)
@@ -924,6 +1214,7 @@ fn tool_params(
                 key: name.clone(),
                 label: name.clone(),
                 about: String::new(),
+                help: String::new(),
                 kind: p.kind,
                 required: false,
                 options: Vec::new(),
@@ -952,6 +1243,7 @@ fn tool_params(
                 .w_full()
                 .gap(4.0)
                 .child(text(label).font(k.ty.small).color(c.text_muted))
+                .children(help_line(&p.help, k))
                 .child(row().child(pick(
                     box_key,
                     Menu::Param(at.clone(), p.key.clone()),
@@ -966,7 +1258,7 @@ fn tool_params(
                 )))
         } else if p.kind == ArgKind::Flag {
             let on = typed.trim() == "true";
-            row()
+            let switch = row()
                 .center_y()
                 .gap(8.0)
                 .child(
@@ -983,69 +1275,122 @@ fn tool_params(
                         })
                         .build(k),
                 )
-                .child(text(label).font(k.ty.small).color(c.text_muted))
+                .child(text(label).font(k.ty.small).color(c.text_muted));
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(switch)
+                .children(help_line(&p.help, k))
         } else {
             let target = Target::Param(at.clone(), p.key.clone(), kind);
-            let names = if kind == ArgKind::Text {
-                names_for(s, ed, at, &p.key, Refs::Braces, &target, &box_key, k, layer)
-            } else {
-                None
-            };
-            col().w_full().child(field(
-                &label,
-                given.map_or(&blank, |g| &g.edit),
-                &box_key,
-                &p.about,
-                p.lines,
-                names,
-                k,
-                move |s: &mut App| {
-                    s.editor_text(&Target::Param(at_for.clone(), name.clone(), kind))
-                },
-            ))
+            let complete = (kind == ArgKind::Text).then(|| Complete {
+                at: at.clone(),
+                key: p.key.clone(),
+                refs: Refs::Braces,
+                target: target.clone(),
+                anchor: box_key.clone(),
+            });
+            if let Some(c) = &complete {
+                finishing(s, c, given.map_or(&blank, |g| &g.edit), k, layer);
+            }
+            col()
+                .w_full()
+                .gap(4.0)
+                .child(field_with(
+                    &label,
+                    given.map_or(&blank, |g| &g.edit),
+                    &box_key,
+                    &p.about,
+                    p.lines,
+                    None,
+                    complete,
+                    k,
+                    move |s: &mut App| {
+                        s.editor_text(&Target::Param(at_for.clone(), name.clone(), kind))
+                    },
+                ))
+                .children(help_line(&p.help, k))
         };
         out.push(item);
     }
     out
 }
 
-/// The picker of what a box can use, when the box reads results: "Output of: `ls`", not the name
-/// the step keeps it under.
-#[allow(clippy::too_many_arguments)]
-fn names_for(
-    s: &App,
-    ed: &Editor,
-    at: &Loc,
-    box_key: &str,
-    refs: Refs,
-    target: &Target,
-    key: &str,
-    k: &Kit,
-    layer: &mut Vec<El>,
-) -> Option<El> {
-    if refs == Refs::None {
-        return None;
-    }
-    let found = ed.results(at, Some(box_key));
-    if found.is_empty() {
-        return None;
-    }
-    let list: Vec<&str> = found.iter().map(|f| f.label.as_str()).collect();
-    let (target_for, at_for, box_for) = (target.clone(), at.clone(), box_key.to_owned());
-    Some(pick(
-        format!("wfe-names-{key}-{box_key}"),
-        Menu::Names(target.clone()),
-        &list,
-        None,
-        "Use a result",
-        false,
-        s,
+/// The fields an AI step answers with: none is plain text, some is an object of those fields that
+/// later steps can read as `name.field`, in a condition, a switch or a loop.
+fn reply_fields(at: &Loc, n: &Node, key: &str, s: &App, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
+    let c = &k.c;
+    let mut out = vec![
+        text("Answer as fields")
+            .font(k.ty.small_medium)
+            .color(c.text_muted),
+    ];
+    out.extend(help_line(
+        "Leave empty for plain text. With fields the AI must answer in this shape, and is asked again if it does not, so later steps can use result.field.",
         k,
-        layer,
-        move |s, label| {
-            s.editor_use(&target_for, &at_for, &box_for, refs == Refs::Braces, label);
-        },
-    ))
+    ));
+    let labels: Vec<&str> = FieldKind::ALL.iter().map(|f| f.label()).collect();
+    for (i, row_) in n.reply.iter().enumerate() {
+        let (pick_at, rm_at) = (at.clone(), at.clone());
+        let picker = pick(
+            format!("wfe-reply-kind-{key}-{i}"),
+            Menu::ReplyKind(at.clone(), i),
+            &labels,
+            Some(row_.kind.label()),
+            "Type",
+            false,
+            s,
+            k,
+            layer,
+            move |s, label| s.editor_set_reply_kind(&pick_at, i, label),
+        );
+        let name_at = at.clone();
+        out.push(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(col().grow(1.0).child(field(
+                    "Field name",
+                    &row_.name,
+                    &format!("wfe-reply-{key}-{i}"),
+                    "score",
+                    1,
+                    None,
+                    k,
+                    move |s: &mut App| s.editor_text(&Target::Reply(name_at.clone(), i)),
+                )))
+                .child(row().pt(18.0).child(picker))
+                .child(
+                    row().pt(18.0).child(
+                        small("Remove", ButtonVariant::Ghost)
+                            .on_press(move |s: &mut App| s.editor_remove_reply(&rm_at, i))
+                            .build(k)
+                            .key(format!("wfe-reply-remove-{key}-{i}")),
+                    ),
+                ),
+        );
+    }
+    let add_at = at.clone();
+    out.push(
+        row().child(
+            small("Add a field", ButtonVariant::Outline)
+                .on_press(move |s: &mut App| s.editor_add_reply(&add_at))
+                .build(k)
+                .key(format!("wfe-add-reply-{key}")),
+        ),
+    );
+    out
+}
+
+/// What a tool's argument is for, in small type under its name; nothing when it says nothing.
+fn help_line(help: &str, k: &Kit) -> Option<El> {
+    (!help.is_empty()).then(|| {
+        text(help.to_owned())
+            .font(k.ty.small)
+            .color(k.c.text_faint)
+            .wrap()
+    })
 }
 
 /// An `if` or `while` condition as "[result] [is] [value]".

@@ -128,6 +128,11 @@ pub struct App {
     pub wf_inputs: Vec<(String, TextEdit)>,
     pub wf_jobs: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub wf_notice: Option<String>,
+    /// The Workflows page's search box and how its list is ordered.
+    pub wf_search: rune::TextEdit,
+    /// The editor's "Discover fields": the model chosen for it and how it is going.
+    pub wf_mapper: crate::flow_editor::Mapper,
+    pub wf_sort: crate::workflow::Sort,
     pub wf_confirm: bool,
     /// The workflow being made or changed, and which of its pop-up lists is open.
     pub wf_editor: Option<crate::workflow::editor::Editor>,
@@ -136,8 +141,16 @@ pub struct App {
     /// The editor's graph view: which view shows, what is selected, the camera.
     pub wf_graph: crate::flow_graph::GraphView,
     pub wf_menu: Option<crate::workflow::editor::Menu>,
+    /// What is typed in the search of the panel that lists the steps to add.
+    pub wf_pick: rune::TextEdit,
+    /// The Logs panel under the graph is open, and which of its rows was pressed last.
+    pub wf_logs_open: bool,
+    pub wf_suggest: crate::flow_editor::Suggest,
+    pub wf_log_pick: Option<usize>,
     /// Stands in for a box that is no longer there when something is typed into it.
     pub wf_stray: TextEdit,
+    /// Stands in for the trigger's timing when no editor is open.
+    pub wf_stray_timing: crate::schedules::form::TimingForm,
     /// Whether the workflow editor shows each step's id, result name and raw boxes.
     pub wf_advanced: bool,
     /// The list of tools a workflow step can use, shared by every step's field: it is open for the
@@ -332,12 +345,20 @@ impl App {
             wf_inputs: Vec::new(),
             wf_jobs: std::collections::HashMap::new(),
             wf_notice: None,
+            wf_search: rune::TextEdit::new(""),
+            wf_mapper: crate::flow_editor::Mapper::default(),
+            wf_sort: crate::workflow::Sort::default(),
             wf_confirm: false,
             wf_editor: None,
             wf_test: crate::flow_editor::TestRun::default(),
             wf_graph: crate::flow_graph::GraphView::default(),
             wf_menu: None,
+            wf_pick: rune::TextEdit::new(""),
+            wf_logs_open: true,
+            wf_suggest: Default::default(),
+            wf_log_pick: None,
             wf_stray: TextEdit::new(""),
+            wf_stray_timing: crate::schedules::form::TimingForm::new(),
             wf_advanced: false,
             wf_tool_picker: Default::default(),
             wf_tool_closed: Default::default(),

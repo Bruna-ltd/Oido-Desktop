@@ -43,8 +43,9 @@ Non-functional
 - **Survives the app closing** where it waits for you (approval), and says so where it cannot
   (everything else keeps today's "the app was closed" failure).
 
-Out of scope: schedule or channel triggers inside a flow, a free node canvas, flows shared between
-agents, flow versions and history.
+Out of scope: channel or webhook triggers, several triggers in one flow, a free node canvas, flows
+shared between agents, flow version history (there is one draft and one published copy, see
+ADR-9).
 
 ## Architecture
 
@@ -76,7 +77,7 @@ parse unchanged). New kinds and fields, all optional:
 | kind | fields | meaning |
 |---|---|---|
 | `if` | `cond`, `then`, `else` | run one child list |
-| `switch` | `on`, `cases: [{when, steps}]`, `default` | first matching case; `default` if none |
+| `switch` | `on`, `cases: [{when, steps}]`, `default`, `all` | first matching case, or every matching case in order when `all` is true; `default` only if none match |
 | `for_each` | `over`, `as`, `steps`, `on_error` | binds a list of per-item results |
 | `while` | `cond`, `steps`, `max` | repeats while true, at most `max` times |
 | `parallel` | `branches: [{name, steps}]`, `on_error` | binds a map name → result |
@@ -210,7 +211,10 @@ is the one non-deterministic tool step and is marked as such.
   the body bound (nothing else changes between rounds). A loop still true after `max` rounds fails
   the run rather than stopping quietly.
 - `index` counts from 0; the run log's round numbers count from 1.
-- `switch` compares by equality only (a whole number equals the same number written with a point).
+- `generate` with `reply: [{name, kind}]` (kinds `text`, `number`, `yes_no`, `list`) asks the model for a JSON object of those fields and gives back that object, so later steps can use `result.field` in conditions, switches and loops. A number written as text, "yes" for true and a single value for a list are taken as meant; any other mismatch sends the reply back to the model, with what was wrong, up to 2 more times, then fails the step. `decide` re-asks the same way when the answer is not one of its options.
+- **Discover fields.** After a top-level step has been tried, its card offers a model picker (the workflow's agent's model unless one is chosen) and a Discover fields button. The model is shown the step's real result (cut to 6000 characters, through the guard like any step's model call) and names its top-level fields; only names the result really has are kept, and their kinds come from the real values. They are kept on the step as `found` (never run by the engine) and offered by name in Use a result, as `result.field`. A result that is text, a list or a single value has no fields to find.
+- `switch` compares by equality only (a whole number equals the same number written with a point). To test a different condition in each case, switch on `true` and write a condition in each `when`; with `all` set every case that holds runs, as with n8n's "send data to all matching outputs".
+- The editor's condition operators are is, is not, contains, does not contain, starts with, ends with, matches the pattern, is empty, is not empty, is more than, is at least, is less than, is at most. "Matches the pattern" is a regular expression (`text.matches("^a+")` in an expression), bounded in size.
 - A `set` step's values each see what was there before it, not one another.
 - The editor checks on adding, removing or moving a step, on Save, and on its Check button, not on
   every keystroke. Tool arguments are one JSON box. A chat draft is saved first, then edited.
@@ -246,10 +250,11 @@ is the one non-deterministic tool step and is marked as such.
   workflows use). Renaming or deleting a workflow another one runs is found when that one next
   runs or is saved, not at the moment. Outside text: the other workflow is held only if what it
   was given is outside text; what it fetches itself comes back as outside text as usual.
-- `delegate` is a `tool` step with the tool `delegate` and arguments `agent` (a team member of the
-  workflow's agent, fixed text, any case) and `task` (text; `{{...}}` allowed). The editor offers
-  it only when the agent has a team. A member the workflow names is made ready before the run
-  starts (so one that is not on the team, or has no model, is said up front). It takes the task as
+- `delegate` is a `tool` step with the tool `delegate` and arguments `agent` (an agent by name,
+  fixed text, any case: one of the workflow's own team first, else any agent in the roster),
+  `task` (text; `{{...}}` allowed) and `background` (yes: start it and go on). The editor shows it
+  as the **Ask an agent** step. An agent the workflow names is made ready before the run starts
+  (so one that does not exist, or has no model, is said up front). It takes the task as
   in a chat: fresh, with its own brief, model, tools and folder, unattended, up to 20 model calls.
   Stop ends it. The answer is the step's result, as text. Each task is filed as a run of the
   member's own under the Runs page. It goes through the guard like any acting step: if its task
@@ -554,3 +559,47 @@ editor now hides that behind plain words, and the expert forms are one press awa
 
 Not done yet: the `switch` and `for each` boxes are still typed
 expressions, and a new workflow still starts blank.
+
+## Triggers and publishing (ADR-9)
+
+A workflow has a **draft** (what the editor changes and a test run uses) and a **published** copy
+(what runs for real). Publishing copies the draft over the published copy.
+
+- **Trigger** is a field of the definition, not a step: `Manual` (the default) or
+  `Schedule { timing, inputs }`, with the same timings as the Schedules page (`once`, `every`,
+  daily/weekly, cron). The engine never reads it. In the graph it is the node at the top, and
+  pressing it opens its form.
+- **Published runs everything live**: an agent's `run_workflow`, the page's Run button, a `flow`
+  step calling it, a schedule. A workflow that was never published, or was unpublished, answers
+  "not published". The editor's **Execute workflow** (test run) always runs the draft.
+- **Publishing a schedule trigger** writes one row in `schedules` (`from_trigger = 1`). Publishing
+  again updates that row, so its fires stay with it; a manual trigger, or unpublishing, removes it.
+  The Schedules page shows it, lets you pause it and run it now, and sends you to the workflow to
+  change it.
+- **Checks before going live**: the steps validate, every workflow it calls is itself published
+  with no cycle, a schedule's inputs bind (a required input has a value) and its timing still has a
+  next time. Nothing changes if one fails.
+- **Where each starts**: workflows that existed before, ones saved from a chat and the examples
+  start published. One made in the editor starts as a draft.
+- **Revert** puts the published copy back as the draft; **Unpublish** takes it down and keeps the
+  draft.
+- **Left out on purpose**: version history, a webhook or channel trigger, running the draft of a
+  workflow that another workflow calls (a call always runs the callee's published copy, so saving a
+  draft that calls an unpublished one is refused).
+
+## Ask an agent (ADR-10)
+
+The `delegate` step is no longer limited to the workflow's own team, and has its own entry in the
+Add step list.
+
+- **Any agent**: the step names an agent of the roster (its own team members win a name clash). The
+  agent starts fresh and unattended, with its own brief, model, tools and folder, through the same
+  guard, and its run is filed on the Runs page. This widens ADR-7, which kept delegation inside
+  the agent: the agent a flow calls may have tools the flow's own agent does not, so what it may
+  do is decided by its own settings and the guard, not by the workflow.
+- **Wait or not**: by default the step waits and its result is the agent's answer. With
+  **Background** on, it starts the agent on a worker and the flow goes on at once; the step's result
+  is only a note that it was handed over, so no later step can use an answer. Stopping the flow does
+  not stop a background agent, and its run is filed when it ends (an app that closes first loses it).
+- **Stored as** the existing `delegate` tool step, so the engine, the guard and saved workflows are
+  unchanged; "Ask an agent" is how the editor names it.

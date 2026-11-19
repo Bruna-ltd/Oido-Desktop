@@ -78,6 +78,16 @@ pub trait Extension: Sync {
     fn tools(&self) -> Vec<ToolDef>;
     /// Runs one tool and says what happened in words for the model.
     fn call(&self, tool: &str, args: &Value, api: &google::Api) -> Result<String, Failure>;
+    /// What a workflow step gets from a tool that has fields: the same answer as an object, so
+    /// later steps can use `result.field`. `None` for a tool that answers in words only.
+    fn data(
+        &self,
+        _tool: &str,
+        _args: &Value,
+        _api: &google::Api,
+    ) -> Option<Result<Value, Failure>> {
+        None
+    }
 }
 
 /// Every extension, in the order the page lists them.

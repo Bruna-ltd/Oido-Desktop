@@ -11,23 +11,34 @@ pub enum Op {
     Is,
     IsNot,
     Contains,
+    NotContains,
     StartsWith,
+    EndsWith,
+    /// The text fits a regular expression.
+    Matches,
     IsEmpty,
     IsNotEmpty,
     MoreThan,
+    AtLeast,
     LessThan,
+    AtMost,
 }
 
 /// The operators, in the order a list shows them.
-pub const OPS: [Op; 8] = [
+pub const OPS: [Op; 13] = [
     Op::Is,
     Op::IsNot,
     Op::Contains,
+    Op::NotContains,
     Op::StartsWith,
+    Op::EndsWith,
+    Op::Matches,
     Op::IsEmpty,
     Op::IsNotEmpty,
     Op::MoreThan,
+    Op::AtLeast,
     Op::LessThan,
+    Op::AtMost,
 ];
 
 impl Op {
@@ -36,11 +47,16 @@ impl Op {
             Op::Is => "is",
             Op::IsNot => "is not",
             Op::Contains => "contains",
+            Op::NotContains => "does not contain",
             Op::StartsWith => "starts with",
+            Op::EndsWith => "ends with",
+            Op::Matches => "matches the pattern",
             Op::IsEmpty => "is empty",
             Op::IsNotEmpty => "is not empty",
             Op::MoreThan => "is more than",
+            Op::AtLeast => "is at least",
             Op::LessThan => "is less than",
+            Op::AtMost => "is at most",
         }
     }
 
@@ -94,17 +110,29 @@ pub fn build(left: &str, op: Op, right: &str) -> Option<String> {
         Op::Is => format!("{l} == {lit}"),
         Op::IsNot => format!("{l} != {lit}"),
         Op::Contains => format!("{l}.contains({lit})"),
+        Op::NotContains => format!("!{l}.contains({lit})"),
         Op::StartsWith => format!("{l}.starts_with({lit})"),
+        Op::EndsWith => format!("{l}.ends_with({lit})"),
+        Op::Matches => format!("{l}.matches({lit})"),
         Op::IsEmpty => format!("{l} == \"\""),
         Op::IsNotEmpty => format!("{l} != \"\""),
         Op::MoreThan => format!("{l} > {lit}"),
+        Op::AtLeast => format!("{l} >= {lit}"),
         Op::LessThan => format!("{l} < {lit}"),
+        Op::AtMost => format!("{l} <= {lit}"),
     })
 }
 
 /// Reads an expression back into its parts, if it is one [`build`] writes.
 pub fn parse(src: &str) -> Option<(String, Op, String)> {
     let src = src.trim();
+    // "does not contain" is written with a `!` in front of the whole call.
+    if let Some(inner) = src.strip_prefix('!') {
+        return match parse(inner)? {
+            (left, Op::Contains, right) => Some((left, Op::NotContains, right)),
+            _ => None,
+        };
+    }
     let (left, rest) = src.split_once(".trimmed()")?;
     if !is_path(left) {
         return None;
@@ -113,6 +141,8 @@ pub fn parse(src: &str) -> Option<(String, Op, String)> {
     for (op, call) in [
         (Op::Contains, ".contains("),
         (Op::StartsWith, ".starts_with("),
+        (Op::EndsWith, ".ends_with("),
+        (Op::Matches, ".matches("),
     ] {
         if let Some(arg) = rest.strip_prefix(call).and_then(|r| r.strip_suffix(')')) {
             return Some((left.to_owned(), op, unliteral(arg)?));
@@ -121,6 +151,9 @@ pub fn parse(src: &str) -> Option<(String, Op, String)> {
     for (op, sign) in [
         (Op::Is, "=="),
         (Op::IsNot, "!="),
+        // The two-sign ones first, or `>=` would be read as `>` and a value starting with `=`.
+        (Op::AtLeast, ">="),
+        (Op::AtMost, "<="),
         (Op::MoreThan, ">"),
         (Op::LessThan, "<"),
     ] {
@@ -183,5 +216,19 @@ mod tests {
         ] {
             assert_eq!(parse(src), None, "{src:?}");
         }
+    }
+
+    #[test]
+    fn the_new_operators_write_what_the_engine_reads() {
+        assert_eq!(
+            build("x", Op::NotContains, "a").unwrap(),
+            r#"!x.trimmed().contains("a")"#
+        );
+        assert_eq!(build("n", Op::AtLeast, "3").unwrap(), "n.trimmed() >= 3");
+        assert_eq!(
+            parse("n.trimmed() <= 3"),
+            Some(("n".into(), Op::AtMost, "3".into()))
+        );
+        assert_eq!(parse("!a.trimmed() == 1"), None);
     }
 }

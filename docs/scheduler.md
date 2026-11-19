@@ -4,7 +4,8 @@ Agents and workflows run on a schedule: once, every N minutes or hours, daily or
 or on a cron expression. You manage schedules on a Schedules screen, and an agent can manage its
 own through a `schedule` tool, with your approval for anything it creates or changes.
 
-Status: agreed 2026-11-10, not built.
+Status: built. A workflow's schedule trigger also makes a schedule when it is published (see
+`docs/workflow-builder.md`, ADR-9).
 
 ## What it does
 

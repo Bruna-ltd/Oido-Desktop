@@ -3,9 +3,10 @@
 use rusqlite::OptionalExtension;
 
 use super::{Result, Store};
+use crate::schedule::Schedule;
 use crate::workflow::definition::Definition;
 use crate::workflow::pause::Snapshot;
-use crate::workflow::{Draft, Pause, RunRecord, RunStatus, Saved};
+use crate::workflow::{Draft, Pause, Published, RunRecord, RunStatus, Saved};
 
 fn definition(text: &str) -> Result<Definition> {
     Ok(serde_json::from_str(text)?)
@@ -22,6 +23,11 @@ impl Store {
                 &w.goal,
                 serde_json::to_string(&w.definition)?,
                 w.created_at,
+                w.published
+                    .as_ref()
+                    .map(|p| serde_json::to_string(&p.definition))
+                    .transpose()?,
+                w.published.as_ref().map(|p| p.at),
             ))?;
         Ok(())
     }
@@ -49,11 +55,20 @@ impl Store {
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, i64>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, agent_id, name, goal, def, created_at) = row?;
+            let (id, agent_id, name, goal, def, created_at, live, live_at) = row?;
+            let published = match (live, live_at) {
+                (Some(text), Some(at)) => Some(Published {
+                    definition: definition(&text)?,
+                    at,
+                }),
+                _ => None,
+            };
             out.push(Saved {
                 id,
                 agent_id,
@@ -61,9 +76,35 @@ impl Store {
                 goal,
                 definition: definition(&def)?,
                 created_at,
+                published,
             });
         }
         Ok(out)
+    }
+
+    /// Makes `published` the live copy of a workflow, or takes it down with `None`, and in the
+    /// same step puts `schedule` (the one its trigger made) in place or, with `None`, removes it.
+    pub fn set_published(
+        &self,
+        id: &str,
+        published: Option<&Published>,
+        schedule: Option<&Schedule>,
+    ) -> Result<()> {
+        let text = published
+            .map(|p| serde_json::to_string(&p.definition))
+            .transpose()?;
+        let tx = self.conn.unchecked_transaction()?;
+        self.conn
+            .prepare_cached(self.sql("SetPublished")?)?
+            .execute((id, text, published.map(|p| p.at)))?;
+        self.conn
+            .prepare_cached(self.sql("DeleteTriggerSchedules")?)?
+            .execute((id, schedule.map(|s| s.id.as_str())))?;
+        if let Some(s) = schedule {
+            self.put_schedule(s)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete_workflow(&self, id: &str) -> Result<()> {
@@ -351,6 +392,7 @@ mod tests {
             goal: "Does it.".into(),
             definition: def(),
             created_at: 5,
+            published: None,
         }
     }
 

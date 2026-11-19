@@ -172,6 +172,7 @@ mod tests {
             ]}))
             .unwrap(),
             created_at: 0,
+            published: None,
         };
         Editor::from_saved(&w)
     }

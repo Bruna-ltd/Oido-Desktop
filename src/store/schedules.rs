@@ -27,6 +27,7 @@ impl Store {
                 s.enabled,
                 s.next_at,
                 s.created_at,
+                s.from_trigger,
             ))?;
         Ok(())
     }
@@ -45,6 +46,7 @@ impl Store {
                 r.get::<_, bool>(7)?,
                 r.get::<_, Option<i64>>(8)?,
                 r.get::<_, i64>(9)?,
+                r.get::<_, bool>(10)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -60,6 +62,7 @@ impl Store {
                 enabled,
                 next_at,
                 created_at,
+                from_trigger,
             ) = row?;
             let target = match workflow_id {
                 Some(id) => Target::Workflow {
@@ -77,6 +80,7 @@ impl Store {
                 enabled,
                 next_at,
                 created_at,
+                from_trigger,
             });
         }
         Ok(out)
@@ -251,6 +255,7 @@ mod tests {
                 ..Definition::default()
             },
             created_at: 0,
+            published: None,
         })
         .unwrap();
         (db, session)

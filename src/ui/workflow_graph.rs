@@ -3,20 +3,21 @@
 //! `workflow/layout.rs`; what a key or the camera does is `flow_graph.rs`.
 
 use rune::{
-    Drag, El, Key, KeyEvent, LineCap, MagnifyEvent, Path, PointerEvent, PointerPress, Shape,
-    WheelEvent, canvas, col, el, icon, row, text,
+    Align, Drag, El, Icon, Key, KeyEvent, LineCap, MagnifyEvent, Path, PointerEvent, PointerPress,
+    Shape, WheelEvent, canvas, col, el, icon, row, text,
 };
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, MenuItem, context_menu, glyphs};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, IconButton, Kit, MenuItem, context_menu, glyphs,
+};
 
-use super::workflow_editor::add_menu;
+use super::icons;
 use crate::app::App;
 use crate::workflow::editor::{Editor, Loc, Menu};
-use crate::workflow::engine::StepLog;
 use crate::workflow::layout::{
     Dir, Form, Gap, Item, Label, Layout, NODE_H, NODE_W, Rect, Wire, layout,
 };
 use crate::workflow::pause::Decision;
-use crate::workflow::trace::{NodeRun, State, loc_of, problems_by_id, runs_by_step};
+use crate::workflow::trace::{NodeRun, State, problems_by_id, runs_by_step};
 
 /// The width of the form beside the drawing.
 pub const INSPECTOR_W: f32 = 380.0;
@@ -65,24 +66,48 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
             Form::Frame => world,
             Form::Step => {
                 let faded = carried.as_ref() == Some(&item.loc);
-                world.child(step(
-                    item,
-                    selected.as_ref() == Some(&item.loc),
-                    faded,
-                    compact,
-                    &look(item),
-                    k,
-                ))
+                world
+                    .child(step(
+                        item,
+                        selected.as_ref() == Some(&item.loc),
+                        faded,
+                        &look(item),
+                        k,
+                    ))
+                    .child(caption(
+                        &item.rect,
+                        &item.title,
+                        look(item).second(item),
+                        compact,
+                        Some(item.loc.clone()),
+                        faded,
+                        k,
+                    ))
             }
-            Form::Empty => world.child(slot(item, s, k, layer)),
+            Form::Empty => world.child(slot(item, k)),
         };
     }
     for label in &l.labels {
         world = world.child(chip(label, k));
     }
-    world = world.child(start(&l.start, k));
+    let chosen = g.on_trigger && selected.is_none();
+    world = world
+        .child(start(&l.start, ed.trigger.schedule, chosen, k))
+        .child(caption(
+            &l.start,
+            if ed.trigger.schedule {
+                "Schedule"
+            } else {
+                "Manual"
+            },
+            ("Trigger", false),
+            compact,
+            None,
+            false,
+            k,
+        ));
     for gap in l.gaps.iter().filter(|g| shows(s, g, selected.as_ref())) {
-        world = world.child(add_button(s, gap, k, layer));
+        world = world.child(add_button(gap, k));
     }
     world = world.children(carrying(s, &l, k));
 
@@ -126,11 +151,98 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
             }
         })
         .on_press(|s: &mut App| s.select_step(None))
+        .child(dots(s, k))
         .child(world)
+        .child(execute(s, k))
+        .child(controls(ed, k))
         .child(menu(s, k, layer))
 }
 
-/// A key in the drawing: arrows move the selection; Option and an arrow moves the step; Delete
+/// Runs the workflow as it stands, for real, big and in the middle of the bottom edge of the
+/// drawing.
+fn execute(s: &App, k: &Kit) -> El {
+    let running = s.wf_test.running.is_some();
+    let button = Button::new(if running { "Stop" } else { "Execute workflow" })
+        .variant(ButtonVariant::Submit)
+        .control_size(ControlSize::ExtraLarge)
+        .icon(if running {
+            &super::icons::STOP
+        } else {
+            &icons::NODE_FLASK
+        })
+        .help("Runs the draft with its steps for real. Nothing is published or saved.");
+    let button = if running {
+        button.on_press(|s: &mut App| s.stop_test())
+    } else {
+        button.on_press(|s: &mut App| s.test_editor())
+    };
+    row()
+        .key("wfg-execute")
+        .pin(Some(0.0), None, Some(0.0), Some(24.0))
+        .justify_center()
+        .child(button.build(k))
+}
+
+/// Undo, redo, fit and zoom, in the corner of the canvas.
+fn controls(ed: &Editor, k: &Kit) -> El {
+    let button = |i: &'static Icon, label: &str, key: &str, off: bool| {
+        IconButton::new(i)
+            .control_size(ControlSize::Small)
+            .disabled(off)
+            .build(k)
+            .key(key.to_owned())
+            .label(label.to_owned())
+            .help(label.to_owned())
+    };
+    let what = |label: &str, did: Option<&str>| match did {
+        Some(w) => format!("{label} {}", w.to_lowercase()),
+        None => format!("Nothing to {}", label.to_lowercase()),
+    };
+    let rule = || el().w(1.0).h(16.0).fill(k.c.border_muted);
+    row()
+        .key("wfg-controls")
+        .pin(Some(16.0), None, None, Some(24.0))
+        .gap(4.0)
+        .center_y()
+        .padding(4.0)
+        .radius(k.radius.md)
+        .fill(k.c.layer_01)
+        .border(1.0, k.c.border_base)
+        .child(
+            button(
+                &icons::NODE_UNDO,
+                &what("Undo", ed.undoes()),
+                "wfg-undo",
+                ed.undoes().is_none(),
+            )
+            .on_press(|s: &mut App| s.undo_editor()),
+        )
+        .child(
+            button(
+                &icons::NODE_REDO,
+                &what("Redo", ed.redoes()),
+                "wfg-redo",
+                ed.redoes().is_none(),
+            )
+            .on_press(|s: &mut App| s.redo_editor()),
+        )
+        .child(rule())
+        .child(
+            button(&icons::NODE_FIT, "Fit to view", "wfg-fit", false)
+                .on_press(|s: &mut App| s.fit_graph()),
+        )
+        .child(
+            button(&icons::NODE_ZOOM_IN, "Zoom in", "wfg-zoom-in", false)
+                .on_press(|s: &mut App| s.zoom_graph_centre(0.2)),
+        )
+        .child(
+            button(&icons::NODE_ZOOM_OUT, "Zoom out", "wfg-zoom-out", false)
+                .on_press(|s: &mut App| s.zoom_graph_centre(-0.2)),
+        )
+}
+
+/// A key in the drawing: arrows move the selection (left and right along the flow, up and down
+/// between lists); Option and left or right moves the step; Delete
 /// removes it; Ctrl-D copies it; Ctrl-Z and Shift-Ctrl-Z undo and redo; `/` opens the list to add one.
 fn graph_key(s: &mut App, e: &KeyEvent) -> bool {
     let m = e.mods;
@@ -140,14 +252,15 @@ fn graph_key(s: &mut App, e: &KeyEvent) -> bool {
             s.redo_editor();
         }
         (Key::Command('d'), true, false, false) => s.duplicate_selected(),
-        (Key::Up, false, false, true) => s.shift_selected(-1),
-        (Key::Down, false, false, true) => s.shift_selected(1),
+        (Key::Left, false, false, true) => s.shift_selected(-1),
+        (Key::Right, false, false, true) => s.shift_selected(1),
         (Key::Delete | Key::Backspace, false, false, false) => s.delete_selected(),
         (Key::Text(t), false, false, false) if t == "/" => s.open_add_menu(),
-        (Key::Up, false, false, false) => s.move_selection(Dir::Up),
-        (Key::Down, false, false, false) => s.move_selection(Dir::Down),
-        (Key::Left, false, false, false) => s.move_selection(Dir::Left),
-        (Key::Right, false, false, false) => s.move_selection(Dir::Right),
+        (Key::Left, false, false, false) => s.move_selection(Dir::Up),
+        (Key::Right, false, false, false) => s.move_selection(Dir::Down),
+        (Key::Up, false, false, false) => s.move_selection(Dir::Left),
+        (Key::Down, false, false, false) => s.move_selection(Dir::Right),
+        (Key::Enter, false, false, false) => s.open_node(),
         (Key::Escape, false, false, false) => s.select_step(None),
         _ => return false,
     }
@@ -181,13 +294,13 @@ fn menu(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             .on_select(on(&at, App::duplicate_selected)),
     )
     .item(
-        MenuItem::new("Move up")
-            .shortcut("Alt+Up")
+        MenuItem::new("Move back")
+            .shortcut("Alt+Left")
             .on_select(on(&at, |s| s.shift_selected(-1))),
     )
     .item(
-        MenuItem::new("Move down")
-            .shortcut("Alt+Down")
+        MenuItem::new("Move forward")
+            .shortcut("Alt+Right")
             .on_select(on(&at, |s| s.shift_selected(1))),
     )
     .separator()
@@ -215,28 +328,31 @@ fn end_of_top(s: &App) -> usize {
     s.wf_editor.as_ref().map_or(0, |ed| ed.steps.len())
 }
 
-/// The button on a wire that opens the list of steps to add there.
-fn add_button(s: &App, g: &Gap, k: &Kit, layer: &mut Vec<El>) -> El {
-    let (place, index) = (g.place.clone(), g.index);
+/// The button on a wire that opens the panel of steps to add there.
+fn add_button(g: &Gap, k: &Kit) -> El {
+    let menu = Menu::AddAt(g.place.clone(), g.index);
     let key = format!(
-        "wfg-add-{}-{index}",
+        "wfg-add-{}-{}",
         loc_key(&Loc {
             place: g.place.clone(),
             index: 0
-        })
+        }),
+        g.index
     );
-    el().pin(Some(g.at[0] - 14.0), Some(g.at[1] - 14.0), None, None)
+    let e = el()
+        .key(key)
+        .pin(Some(g.at[0] - 14.0), Some(g.at[1] - 14.0), None, None)
         .size(28.0, 28.0)
         .center()
-        .child(add_menu(
-            key,
-            Menu::AddAt(g.place.clone(), g.index),
-            "+",
-            s,
-            k,
-            layer,
-            move |s, label| s.editor_add_at(&place, index, label),
-        ))
+        .radius(8.0)
+        .fill(k.c.layer_01)
+        .border(1.0, k.c.border_strong)
+        .role("button")
+        .label("Add a step here")
+        .help("Add a step here")
+        .on_press(move |s: &mut App| s.open_picker(menu.clone()))
+        .child(icon(&icons::NODE_PLUS, 14.0).color(k.c.text_base));
+    k.interactive(e)
 }
 
 /// What is drawn over the drawing while a step is carried: where it would land, the frame it
@@ -256,7 +372,7 @@ fn carrying(s: &App, l: &Layout, k: &Kit) -> Vec<El> {
             );
         }
         let m = &drop.marker;
-        let line = if m.h > 4.0 {
+        let line = if m.h.min(m.w) > 4.0 {
             // An empty list's slot is outlined, not drawn through.
             pinned(el().key("wfg-marker"), m)
                 .radius(k.radius.md)
@@ -273,10 +389,10 @@ fn carrying(s: &App, l: &Layout, k: &Kit) -> Vec<El> {
         .map(|i| i.title.clone())
         .unwrap_or_default();
     let ghost = Rect {
-        x: drag.point[0] - drag.grab[0].min(NODE_W - 8.0),
-        y: drag.point[1] - drag.grab[1].min(NODE_H - 8.0),
-        w: NODE_W,
-        h: NODE_H,
+        x: drag.point[0] - drag.grab[0].min(NODE_H - 8.0),
+        y: drag.point[1] - drag.grab[1].min(NODE_W - 8.0),
+        w: NODE_H,
+        h: NODE_W,
     };
     out.push(
         pinned(row().key("wfg-ghost"), &ghost)
@@ -308,9 +424,11 @@ fn wires(l: &Layout, selected: Option<&Loc>, k: &Kit) -> El {
     let mut plain = Path::new();
     let mut lit = Path::new();
     for w in &l.wires {
+        let near =
+            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 0.5 && (a[1] - b[1]).abs() < 0.5;
         let on = touching.is_some_and(|r| {
-            let (top, bottom) = ([r.centre_x(), r.y], [r.centre_x(), r.bottom()]);
-            w.to == top || w.from == bottom
+            let mid = r.y + r.h / 2.0;
+            near(w.to, [r.x, mid]) || near(w.from, [r.x + r.w, mid])
         });
         let into = if on { &mut lit } else { &mut plain };
         *into = curve(std::mem::take(into), w);
@@ -324,15 +442,15 @@ fn wires(l: &Layout, selected: Option<&Loc>, k: &Kit) -> El {
         .size(l.width, l.height)
 }
 
-/// One wire added to `path`: straight down when it is in line, else an S through the middle.
+/// One wire added to `path`: straight across when it is in line, else an S through the middle.
 fn curve(path: Path, w: &Wire) -> Path {
     let (a, b) = (w.from, w.to);
     let path = path.move_to(a);
-    if (a[0] - b[0]).abs() < 0.5 {
+    if (a[1] - b[1]).abs() < 0.5 {
         return path.line_to(b);
     }
-    let mid = (a[1] + b[1]) / 2.0;
-    path.cubic_to([a[0], mid], [b[0], mid], b)
+    let mid = (a[0] + b[0]) / 2.0;
+    path.cubic_to([mid, a[1]], [mid, b[1]], b)
 }
 
 fn pinned(e: El, r: &Rect) -> El {
@@ -415,31 +533,43 @@ impl Look<'_> {
     }
 }
 
-/// One step's box: what it does, and its id with what it keeps the result as.
-fn step(item: &Item, selected: bool, faded: bool, compact: bool, look: &Look, k: &Kit) -> El {
+/// The picture on a step's square: the one for its kind of step.
+pub(super) fn picture(kind: &str) -> &'static Icon {
+    use crate::workflow::definition::{
+        CODE, DECIDE, FLOW, FOR_EACH, GENERATE, IF, PARALLEL, SET, SWITCH, TOOL, TRY, WAIT, WHILE,
+    };
+    use crate::workflow::editor::AGENT;
+    match kind {
+        TOOL => &icons::NODE_TOOL,
+        GENERATE => &icons::NODE_AI,
+        AGENT => &icons::NODE_AGENT,
+        IF => &icons::NODE_IF,
+        FOR_EACH => &icons::NODE_LOOP,
+        WAIT => &icons::NODE_WAIT,
+        PARALLEL => &icons::NODE_PARALLEL,
+        DECIDE => &icons::NODE_DECIDE,
+        SWITCH => &icons::NODE_SWITCH,
+        WHILE => &icons::NODE_WHILE,
+        TRY => &icons::NODE_TRY,
+        FLOW => &super::icons::WORKFLOWS,
+        SET => &icons::NODE_SET,
+        CODE => &icons::NODE_CODE,
+        _ => &icons::NODE_TOOL,
+    }
+}
+
+/// The corner radius of a node's square.
+const NODE_RADIUS: f32 = 14.0;
+
+/// One step as n8n draws a node: a square with the picture of its kind of step. Its words are
+/// under it, in [`caption`].
+fn step(item: &Item, selected: bool, faded: bool, look: &Look, k: &Kit) -> El {
     let c = &k.c;
     let at = item.loc.clone();
-    let mut words = col().grow(1.0).min_w(0.0).gap(1.0).child(
-        text(item.title.clone())
-            .font(k.ty.ui_medium)
-            .color(c.text_base)
-            .truncate(),
-    );
-    if !compact {
-        let (line, bad) = look.second(item);
-        words = words.child(
-            text(line.to_owned())
-                .font(k.ty.small)
-                .color(if bad { c.warning.icon } else { c.text_muted })
-                .truncate(),
-        );
-    }
     let edge = look.edge(k);
-    let mut e = pinned(row().key(format!("wfg-{}", loc_key(&item.loc))), &item.rect)
-        .px(12.0)
-        .gap(8.0)
-        .center_y()
-        .radius(k.radius.md)
+    let mut e = pinned(col().key(format!("wfg-{}", loc_key(&item.loc))), &item.rect)
+        .center()
+        .radius(NODE_RADIUS)
         .fill(if selected { c.layer_03 } else { c.layer_01 })
         .border(
             if selected || edge.is_some() { 2.0 } else { 1.0 },
@@ -453,30 +583,81 @@ fn step(item: &Item, selected: bool, faded: bool, compact: bool, look: &Look, k:
         .label(accessible(item, look))
         .help(tip(item, look))
         .opacity(if faded { 0.4 } else { 1.0 })
-        .on_press(move |s: &mut App| s.select_step(Some(at.clone())));
+        .on_press(move |s: &mut App| s.press_step(at.clone()));
     if item.model {
-        // A model works here: dashed, and a spark, so it is not mistaken for a fixed step.
-        e = e
-            .border_dash(5.0, 3.0)
-            .child(icon(&glyphs::SPARKLE, 14.0).color(c.text_muted));
+        // A model works here: dashed, so it is not mistaken for a fixed step.
+        e = e.border_dash(5.0, 3.0);
     }
-    e = e.child(words);
+    // A tool of an extension or a known server shows that service's picture, as n8n shows a
+    // service's logo; any other step shows the picture of its kind.
+    let logo = (item.kind == crate::workflow::definition::TOOL)
+        .then(|| super::logo::of_tool(&item.tool, 44.0, k))
+        .flatten();
+    e = e.child(logo.unwrap_or_else(|| icon(picture(&item.kind), 40.0).color(c.text_base)));
     if let Some(mark) = look.mark(k) {
-        e = e.child(mark);
+        e = e.child(mark.pin(None, None, Some(8.0), Some(6.0)));
     }
     k.interactive(e)
 }
 
-/// The frame around a step that holds other steps, with its title bar.
+/// The words under a node's square: what the step does, then a smaller line. Pressing them
+/// selects the step too.
+fn caption(
+    r: &Rect,
+    title: &str,
+    second: (&str, bool),
+    compact: bool,
+    at: Option<Loc>,
+    faded: bool,
+    k: &Kit,
+) -> El {
+    let c = &k.c;
+    let wide = Rect {
+        x: r.x - 20.0,
+        y: r.y + r.h + 6.0,
+        w: r.w + 40.0,
+        h: 46.0,
+    };
+    let (line, bad) = second;
+    let mut e = pinned(col(), &wide)
+        .gap(1.0)
+        .opacity(if faded { 0.4 } else { 1.0 })
+        .child(
+            text(title.to_owned())
+                .font(k.ty.ui_medium)
+                .color(c.text_base)
+                .wrap()
+                .max_lines(2)
+                .align(Align::Center)
+                .w_full(),
+        );
+    if !compact {
+        e = e.child(
+            text(line.to_owned())
+                .font(k.ty.small)
+                .color(if bad { c.warning.icon } else { c.text_muted })
+                .truncate()
+                .align(Align::Center)
+                .w_full(),
+        );
+    }
+    match at {
+        Some(at) => e.on_press(move |s: &mut App| s.press_step(at.clone())),
+        None => e.on_press(|s: &mut App| s.select_trigger()),
+    }
+}
+
+/// The frame around a step that holds other steps, with its title on top.
 fn frame(item: &Item, selected: bool, faded: bool, look: &Look, k: &Kit) -> El {
     let c = &k.c;
     let at = item.loc.clone();
     let mut bar = row()
         .w_full()
-        .h(crate::workflow::layout::HEAD)
-        .px(12.0)
+        .h(crate::workflow::layout::PAD)
+        .px(14.0)
         .gap(8.0)
         .center_y()
+        .child(icon(picture(&item.kind), 16.0).color(c.text_muted))
         .child(
             text(item.title.clone())
                 .font(k.ty.ui_medium)
@@ -509,33 +690,29 @@ fn frame(item: &Item, selected: bool, faded: bool, look: &Look, k: &Kit) -> El {
         .label(accessible(item, look))
         .help(tip(item, look))
         .opacity(if faded { 0.4 } else { 1.0 })
-        .on_press(move |s: &mut App| s.select_step(Some(at.clone())))
+        .on_press(move |s: &mut App| s.press_step(at.clone()))
         .child(bar);
     k.interactive(e)
 }
 
 /// Where a list with nothing in it will take its first step: press it to choose one.
-fn slot(item: &Item, s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+fn slot(item: &Item, k: &Kit) -> El {
     let c = &k.c;
-    let place = item.loc.place.clone();
-    let target = place.clone();
-    pinned(
+    let menu = Menu::AddAt(item.loc.place.clone(), 0);
+    let e = pinned(
         row().key(format!("wfg-slot-{}", loc_key(&item.loc))),
         &item.rect,
     )
-    .radius(k.radius.md)
-    .border(1.0, c.border_base)
+    .radius(NODE_RADIUS)
+    .border(1.0, c.border_strong)
     .border_dash(4.0, 3.0)
     .center()
-    .child(add_menu(
-        format!("wfg-slot-add-{}", loc_key(&item.loc)),
-        Menu::AddAt(place, 0),
-        "Nothing here yet: add a step",
-        s,
-        k,
-        layer,
-        move |s, label| s.editor_add_at(&target, 0, label),
-    ))
+    .role("button")
+    .label("Nothing here yet: add a step")
+    .help("Add a step")
+    .on_press(move |s: &mut App| s.open_picker(menu.clone()))
+    .child(icon(&icons::NODE_PLUS, 22.0).color(c.text_muted));
+    k.interactive(e)
 }
 
 /// The name of a column.
@@ -553,13 +730,60 @@ fn chip(label: &Label, k: &Kit) -> El {
         )
 }
 
-fn start(r: &Rect, k: &Kit) -> El {
+/// The Trigger node: what starts the workflow. Pressing it opens its form.
+fn start(r: &Rect, schedule: bool, selected: bool, k: &Kit) -> El {
     let c = &k.c;
-    pinned(row().key("wfg-start"), r)
-        .radius(k.radius.md)
-        .fill(c.layer_03)
+    let what = if schedule { "Schedule" } else { "Manual" };
+    let e = pinned(col().key("wfg-start"), r)
         .center()
-        .child(text("Start").font(k.ty.small).color(c.text_base))
+        .radius(NODE_RADIUS)
+        .fill(if selected { c.layer_03 } else { c.layer_01 })
+        .border(
+            if selected { 2.0 } else { 1.0 },
+            if selected { c.bg_accent } else { c.border_base },
+        )
+        .role("button")
+        .label(format!(
+            "Trigger: {what}. Press to change what starts this workflow."
+        ))
+        .help("What starts this workflow")
+        .on_press(|s: &mut App| s.select_trigger())
+        .child(
+            icon(
+                if schedule {
+                    &icons::NODE_SCHEDULE
+                } else {
+                    &icons::NODE_MANUAL
+                },
+                36.0,
+            )
+            .color(c.text_base),
+        );
+    k.interactive(e)
+}
+
+/// The dotted ground of the canvas.
+fn dots(s: &App, k: &Kit) -> El {
+    const STEP: f32 = 28.0;
+    let [_, _, w, h] = s.wf_graph.viewport;
+    let (w, h) = (
+        if w > 0.0 { w } else { 1600.0 },
+        if h > 0.0 { h } else { 1000.0 },
+    );
+    let mut shape = Shape::new();
+    let mut y = STEP / 2.0;
+    while y < h {
+        let mut x = STEP / 2.0;
+        while x < w {
+            shape = shape.line([x, y], [x + 0.1, y], 2.2, LineCap::Round, k.c.border_strong);
+            x += STEP;
+        }
+        y += STEP;
+    }
+    canvas(shape)
+        .key("wfg-dots")
+        .pin(Some(0.0), Some(0.0), None, None)
+        .size(w, h)
 }
 
 /// A line above the drawing while a run is on it: which run, how far it got, and, if it waits for
@@ -651,56 +875,6 @@ pub fn banner(s: &App, ed: &Editor, k: &Kit) -> Option<El> {
     )
 }
 
-/// What the shown run did at the selected step, round by round, under its form.
-pub fn run_panel(s: &App, ed: &Editor, at: &Loc, k: &Kit) -> Option<El> {
-    let c = &k.c;
-    let shown = s.shown_run()?;
-    let mine: Vec<&StepLog> = shown
-        .lines
-        .iter()
-        .filter(|l| loc_of(ed, &l.path).as_ref() == Some(at))
-        .collect();
-    if mine.is_empty() {
-        return None;
-    }
-    let mut out = col()
-        .key("wfg-run-panel")
-        .w_full()
-        .gap(6.0)
-        .padding(12.0)
-        .radius(k.radius.md)
-        .border(1.0, c.border_muted)
-        .child(
-            text(format!("{}: this step", shown.label))
-                .font(k.ty.ui_medium)
-                .color(c.text_base),
-        );
-    for line in mine {
-        let head = [line.round_note(), Some(format!("{} ms", line.ms))]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let (body, bad) = match (&line.error, line.running) {
-            (Some(e), _) => (e.clone(), true),
-            (None, true) => ("Still running.".to_owned(), false),
-            (None, false) if line.output.is_empty() => ("Nothing came back.".to_owned(), false),
-            (None, false) => (line.output.clone(), false),
-        };
-        let (cut, more) = crate::runs::clip(&body, 800);
-        out = out
-            .child(text(head).font(k.ty.small).color(c.text_muted))
-            .child(
-                text(if more { format!("{cut}…") } else { cut })
-                    .font(k.ty.mono)
-                    .color(if bad { c.warning.icon } else { c.text_base })
-                    .wrap()
-                    .selectable(true),
-            );
-    }
-    Some(out)
-}
-
 /// The hint on a step: its line, and under it what is wrong or why it failed, which a small
 /// drawing leaves off the box.
 fn tip(item: &Item, look: &Look) -> String {
@@ -760,6 +934,7 @@ mod tests {
             ]}))
             .unwrap(),
             created_at: 0,
+            published: None,
         };
         app.wf_editor = Some(Editor::from_saved(&w));
         app
@@ -792,13 +967,13 @@ mod tests {
         let mut app = app();
         let press = |app: &mut App, k, cmd, shift, alt| graph_key(app, &key(k, cmd, shift, alt));
         assert!(
-            press(&mut app, Key::Down, false, false, false),
+            press(&mut app, Key::Right, false, false, false),
             "starts at the first step"
         );
-        assert!(press(&mut app, Key::Down, false, false, false));
+        assert!(press(&mut app, Key::Right, false, false, false));
         assert_eq!(app.selected_step().unwrap().index, 1);
         // Option-down moves the step, the selection with it.
-        assert!(press(&mut app, Key::Down, false, false, true));
+        assert!(press(&mut app, Key::Right, false, false, true));
         assert_eq!(
             (order(&app).as_str(), app.selected_step().unwrap().index),
             ("acb", 2)

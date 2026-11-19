@@ -24,7 +24,12 @@ pub enum Frame {
     /// A step: where its line is in the run log.
     Step { slot: usize },
     /// An `if` or `switch`: which of its lists was running (`then`, `else`, `case2`, `default`).
-    Branch { name: String },
+    /// `rest` are the lists still to run after it, when a `switch` runs every case that matches.
+    Branch {
+        name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rest: Vec<String>,
+    },
     /// A `for_each`: the list, the round in progress, and what the earlier rounds gave.
     Each {
         items: Vec<Value>,

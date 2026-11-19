@@ -1,13 +1,18 @@
 -- name: InsertWorkflow :exec
-INSERT INTO workflows (id, agent_id, name, goal, definition, created_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6);
+INSERT INTO workflows (id, agent_id, name, goal, definition, created_at, published, published_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
 
 -- The editor saves a workflow's name, goal and steps; its agent and runs stay.
 -- name: UpdateWorkflow :exec
 UPDATE workflows SET name = ?2, goal = ?3, definition = ?4 WHERE id = ?1;
 
 -- name: ListWorkflows :many
-SELECT id, agent_id, name, goal, definition, created_at FROM workflows ORDER BY name COLLATE NOCASE, rowid;
+SELECT id, agent_id, name, goal, definition, created_at, published, published_at
+FROM workflows ORDER BY name COLLATE NOCASE, rowid;
+
+-- Publishing copies the draft to the live copy; NULL unpublishes.
+-- name: SetPublished :exec
+UPDATE workflows SET published = ?2, published_at = ?3 WHERE id = ?1;
 
 -- name: DeleteWorkflow :exec
 DELETE FROM workflows WHERE id = ?1;
@@ -74,3 +79,8 @@ DELETE FROM workflow_waits WHERE run_id = ?1;
 -- name: DueWorkflowWaits :many
 SELECT w.run_id, r.workflow_id FROM workflow_waits w JOIN workflow_runs r ON r.id = w.run_id
 WHERE w.until IS NOT NULL AND w.until <= ?1 ORDER BY w.until;
+
+-- The schedules a workflow's trigger made, except the one publishing keeps (?2, NULL for none):
+-- a schedule's fires go with it, so a re-publish updates its row instead.
+-- name: DeleteTriggerSchedules :exec
+DELETE FROM schedules WHERE workflow_id = ?1 AND from_trigger = 1 AND id IS NOT ?2;

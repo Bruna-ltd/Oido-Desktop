@@ -12,7 +12,7 @@ use rune_kit::{
 use crate::app::{App, now};
 use crate::schedule::timing::{Days, when};
 use crate::schedule::{Fire, FireStatus, Schedule, Target};
-use crate::schedules::form::{Form, Kind, Source, When};
+use crate::schedules::form::{Form, Kind, Source, TimingForm, When};
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let page = &s.schedule_page;
@@ -180,15 +180,25 @@ fn detail(s: &App, k: &Kit) -> El {
         .child(line(target_words(s, &x.target)))
         .child(line(format!("When: {}", x.timing.describe(&Local))))
         .child(text(state(x)).font(k.ty.small).color(c.text_muted));
+    if x.from_trigger {
+        out = out.child(
+            text(
+                "Made by the workflow's schedule trigger. Change it in the workflow, then publish.",
+            )
+            .font(k.ty.small)
+            .color(c.text_muted)
+            .wrap(),
+        );
+    }
 
     let mut actions = row().gap(8.0).center_y().pt(6.0);
     actions = actions
-        .child(
+        .children((!x.from_trigger).then(|| {
             small_button("Edit", ButtonVariant::Outline)
                 .on_press(|s: &mut App| s.edit_schedule())
                 .build(k)
-                .key("schedule-edit"),
-        )
+                .key("schedule-edit")
+        }))
         .child(
             small_button(
                 if x.enabled { "Pause" } else { "Resume" },
@@ -205,7 +215,9 @@ fn detail(s: &App, k: &Kit) -> El {
                 .build(k)
                 .key("schedule-run"),
         );
-    actions = if page.confirm {
+    actions = if x.from_trigger {
+        actions
+    } else if page.confirm {
         actions
             .child(
                 small_button("Delete it for good", ButtonVariant::Outline)
@@ -302,7 +314,7 @@ fn fire_row(f: &Fire, k: &Kit) -> El {
 // ---- the form
 
 /// A labelled one-line text field.
-fn input(
+pub(super) fn input(
     label: &str,
     edit: &TextEdit,
     key: &str,
@@ -346,7 +358,7 @@ fn input(
         )
 }
 
-fn labelled(label: &str, control: El, k: &Kit) -> El {
+pub(super) fn labelled(label: &str, control: El, k: &Kit) -> El {
     col()
         .w_full()
         .gap(4.0)
@@ -525,53 +537,9 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
     };
 
     // When it fires.
-    let labels: Vec<&str> = When::ALL.iter().map(|w| w.label()).collect();
-    let at = When::ALL.iter().position(|w| *w == f.when);
-    out = out.child(labelled(
-        "When",
-        SegmentedControl::new(&labels, at)
-            .label("When")
-            .fit()
-            .on_pick(|s: &mut App, i: usize, _| {
-                if let Some(w) = When::ALL.get(i) {
-                    s.schedule_page.form_mut().when = *w;
-                }
-            })
-            .build(k)
-            .key("schedule-when"),
-        k,
-    ));
-    out = match f.when {
-        When::Days => out
-            .child(input("At", &f.at, "at", "09:00", k, |s: &mut App| {
-                &mut s.schedule_page.form_mut().at
-            }))
-            .child(labelled("On", days(f.days, k), k)),
-        When::Every => out.child(input(
-            "Every (minutes)",
-            &f.every,
-            "every",
-            "60",
-            k,
-            |s: &mut App| &mut s.schedule_page.form_mut().every,
-        )),
-        When::Once => out.child(input(
-            "On",
-            &f.once,
-            "once",
-            "2026-11-12 09:00",
-            k,
-            |s: &mut App| &mut s.schedule_page.form_mut().once,
-        )),
-        When::Cron => out.child(input(
-            "Cron (minute hour day month weekday)",
-            &f.cron,
-            "cron",
-            "0 9 * * 1-5",
-            k,
-            |s: &mut App| &mut s.schedule_page.form_mut().cron,
-        )),
-    };
+    out = out.child(timing_fields(&f.timing, "schedule-", k, |s: &mut App| {
+        &mut s.schedule_page.form_mut().timing
+    }));
 
     // What it would do, as read so far.
     if let Ok((_, _, _, timing)) = f.read(&s.workflows, now(), &Local) {
@@ -620,8 +588,71 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
     )
 }
 
+/// What a timing is made of, as boxes: how often, then what that takes. `form` finds the
+/// [`TimingForm`] being edited; `prefix` keeps the boxes' keys apart from another form's.
+pub(super) fn timing_fields(
+    f: &TimingForm,
+    prefix: &str,
+    k: &Kit,
+    form: fn(&mut App) -> &mut TimingForm,
+) -> El {
+    let key = |name: &str| format!("{prefix}{name}");
+    let labels: Vec<&str> = When::ALL.iter().map(|w| w.label()).collect();
+    let at = When::ALL.iter().position(|w| *w == f.when);
+    let out = col().w_full().gap(14.0).child(labelled(
+        "When",
+        SegmentedControl::new(&labels, at)
+            .label("When")
+            .fit()
+            .on_pick(move |s: &mut App, i: usize, _| {
+                if let Some(w) = When::ALL.get(i) {
+                    form(s).when = *w;
+                }
+            })
+            .build(k)
+            .key(key("when")),
+        k,
+    ));
+    match f.when {
+        When::Days => out
+            .child(input(
+                "At",
+                &f.at,
+                &key("at"),
+                "09:00",
+                k,
+                move |s: &mut App| &mut form(s).at,
+            ))
+            .child(labelled("On", days(f.days, prefix, k, form), k)),
+        When::Every => out.child(input(
+            "Every (minutes)",
+            &f.every,
+            &key("every"),
+            "60",
+            k,
+            move |s: &mut App| &mut form(s).every,
+        )),
+        When::Once => out.child(input(
+            "On",
+            &f.once,
+            &key("once"),
+            "2026-11-12 09:00",
+            k,
+            move |s: &mut App| &mut form(s).once,
+        )),
+        When::Cron => out.child(input(
+            "Cron (minute hour day month weekday)",
+            &f.cron,
+            &key("cron"),
+            "0 9 * * 1-5",
+            k,
+            move |s: &mut App| &mut form(s).cron,
+        )),
+    }
+}
+
 /// A toggle per weekday, Monday first.
-fn days(chosen: Days, k: &Kit) -> El {
+fn days(chosen: Days, prefix: &str, k: &Kit, form: fn(&mut App) -> &mut TimingForm) -> El {
     row().gap(6.0).children(Days::week().map(|(d, name)| {
         Button::new(name)
             .variant(if chosen.contains(d) {
@@ -630,8 +661,8 @@ fn days(chosen: Days, k: &Kit) -> El {
                 ButtonVariant::Outline
             })
             .control_size(ControlSize::Small)
-            .on_press(move |s: &mut App| s.schedule_page.form_mut().days.toggle(d))
+            .on_press(move |s: &mut App| form(s).days.toggle(d))
             .build(k)
-            .key(format!("schedule-day-{d}"))
+            .key(format!("{prefix}day-{d}"))
     }))
 }

@@ -147,6 +147,26 @@ pub(crate) fn parse(args: &str) -> (String, String) {
     (get("agent"), get("task"))
 }
 
+/// The arguments of a workflow step that hands a task to an agent: `spec`'s, over the agents it may
+/// name, and whether to go on without waiting for the answer.
+pub(crate) fn step_schema(agents: &[Agent]) -> Value {
+    let mut schema = spec(agents).schema;
+    schema["properties"]["background"] = json!({
+        "type": "boolean",
+        "title": "Don't wait for the answer",
+        "description": "Start it and go on without waiting for its answer. It runs on its own, and no later step gets an answer from it."
+    });
+    schema
+}
+
+/// Whether a workflow step's call says not to wait for the answer.
+pub(crate) fn in_background(args: &str) -> bool {
+    serde_json::from_str::<Value>(args)
+        .ok()
+        .and_then(|v| v.get("background").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// A line saying what a call is, for lists: who, and the first line of the task.
 pub fn summary(args: &str) -> String {
     let (agent, task) = parse(args);
@@ -521,6 +541,20 @@ impl Crew {
     }
 }
 
+impl Crew {
+    /// Starts `task` on a worker of its own and does not wait for it. The run is filed when it
+    /// ends. Stopping the workflow does not stop it: it is on its own.
+    pub(crate) fn start(&self, task: &str, outside: Option<&str>) {
+        let crew = self.clone();
+        let (task, outside) = (task.to_owned(), outside.map(str::to_owned));
+        std::thread::spawn(move || {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let taken = crew.take(&task, outside.as_deref(), &cancel);
+            crate::app::on_ui_thread(move |app| app.record_taken(taken));
+        });
+    }
+}
+
 /// Fills in how a member's run ended.
 fn settle(run: &mut Run, out: &Outcome) {
     let t = out.tokens;
@@ -695,8 +729,9 @@ impl App {
         Ok((run, job))
     }
 
-    /// The team members of `lead_id` that a workflow hands tasks to, each ready to take them.
-    /// `workflow` is what their runs are filed under and where a card they raise goes.
+    /// The agents a workflow of `lead_id` hands tasks to, each ready to take them: one of its own
+    /// team by that name, else any agent. `workflow` is what their runs are filed under and where a
+    /// card they raise goes.
     pub(crate) fn crew_for(
         &self,
         lead_id: &str,
@@ -710,15 +745,20 @@ impl App {
         names
             .iter()
             .map(|name| {
+                let named = |m: &&Agent| m.name.eq_ignore_ascii_case(name);
                 let member = lead
                     .subagents
                     .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(name))
+                    .find(named)
+                    .or_else(|| {
+                        self.roster
+                            .list
+                            .iter()
+                            .flat_map(|a| std::iter::once(a).chain(a.subagents.iter()))
+                            .find(named)
+                    })
                     .ok_or_else(|| {
-                        format!(
-                            "This workflow hands work to {name:?}, who is not on {}'s team.",
-                            lead.name
-                        )
+                        format!("This workflow hands work to {name:?}, and no agent has that name.")
                     })?;
                 let (_, job) = self.member_job(
                     member,

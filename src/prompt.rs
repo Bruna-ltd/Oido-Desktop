@@ -141,7 +141,7 @@ pub fn add(list: &mut Vec<Attachment>, a: Attachment) {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Attachment {
-    /// A text file and what it held when it was attached.
+    /// A text file (or a PDF's text) and what it held when it was attached.
     File {
         name: String,
         text: String,
@@ -209,6 +209,9 @@ impl Attachment {
         if image::guess_format(&bytes).is_ok() {
             return Image::fit(name, &bytes).map(Attachment::Image);
         }
+        if bytes.starts_with(b"%PDF-") {
+            return pdf_attachment(name, &bytes);
+        }
         if size > MAX_TEXT_BYTES {
             return Err(format!(
                 "{name} is too long to attach whole ({}). Ask the agent to read the part you need.",
@@ -225,6 +228,35 @@ impl Attachment {
             )),
         }
     }
+}
+
+/// A PDF's words. Scanned PDFs hold pictures of pages, not words, so they have none to give.
+pub fn pdf_text(name: &str, bytes: &[u8]) -> Result<String, String> {
+    // The parser panics on some malformed files; that is a file it cannot read, not a crash.
+    let text = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes))
+        .map_err(|_| ())
+        .and_then(|r| r.map_err(|_| ()))
+        .map_err(|()| format!("{name} is a PDF that could not be read."))?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(format!("{name} has no text in it (a scan?)."));
+    }
+    Ok(text.to_owned())
+}
+
+/// A PDF's words as a text attachment.
+fn pdf_attachment(name: &str, bytes: &[u8]) -> Result<Attachment, String> {
+    let text = pdf_text(name, bytes)?;
+    if text.len() as u64 > MAX_TEXT_BYTES {
+        return Err(format!(
+            "{name} is too long to attach whole ({} of text). Ask the agent to read the part you need.",
+            megabytes(text.len() as u64)
+        ));
+    }
+    Ok(Attachment::File {
+        name: name.to_owned(),
+        text,
+    })
 }
 
 impl Image {
@@ -275,6 +307,37 @@ impl Image {
 
 fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// A one-page PDF that says "Hello PDF", for tests.
+#[cfg(test)]
+pub(crate) fn test_pdf() -> String {
+    let stream = "BT /F1 24 Tf 72 700 Td (Hello PDF) Tj ET";
+    let objects = [
+        "<</Type/Catalog/Pages 2 0 R>>".to_owned(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_owned(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+             /Resources<</Font<</F1 5 0 R>>>>>>"
+            .to_owned(),
+        format!("<</Length {}>>\nstream\n{stream}\nendstream", stream.len()),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_owned(),
+    ];
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf += &format!("{} 0 obj\n{o}\nendobj\n", i + 1);
+    }
+    let xref = pdf.len();
+    pdf += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+    for off in offsets {
+        pdf += &format!("{off:010} 00000 n \n");
+    }
+    pdf += &format!(
+        "trailer<</Root 1 0 R/Size {}>>\nstartxref\n{xref}\n%%EOF",
+        objects.len() + 1
+    );
+    pdf
 }
 
 #[cfg(test)]
@@ -363,6 +426,20 @@ mod tests {
                 .unwrap_err()
                 .contains("could not be read")
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_pdf_attaches_as_its_text_and_a_broken_one_is_refused() {
+        let dir = std::env::temp_dir().join(format!("oido-prompt-{}", crate::model::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.pdf"), test_pdf()).unwrap();
+        std::fs::write(dir.join("bad.pdf"), "%PDF-1.4 junk").unwrap();
+        let read = |n: &str| Attachment::read(&dir.join(n), n);
+        assert!(
+            matches!(read("a.pdf"), Ok(Attachment::File { text, .. }) if text.contains("Hello PDF"))
+        );
+        assert!(read("bad.pdf").unwrap_err().contains("PDF"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

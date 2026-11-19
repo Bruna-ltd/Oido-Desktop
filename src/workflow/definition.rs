@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{expr, template};
+use crate::schedule::timing::Timing;
 
 pub const TOOL: &str = "tool";
 pub const GENERATE: &str = "generate";
@@ -43,6 +44,7 @@ pub const MAX_STEPS: usize = 50;
 /// Containers inside containers.
 pub const MAX_DEPTH: usize = 5;
 const MAX_OPTIONS: usize = 20;
+const MAX_REPLY_FIELDS: usize = 20;
 /// A loop's most rounds when it names no limit, and the most it may name.
 pub const DEFAULT_ROUNDS: u32 = 100;
 pub const MAX_ROUNDS: u32 = 1000;
@@ -75,6 +77,29 @@ pub struct Definition {
     /// What shows a run did its job, in plain words.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub success: String,
+    /// What starts a published copy of this workflow. The engine never reads it.
+    #[serde(default, skip_serializing_if = "Trigger::is_manual")]
+    pub trigger: Trigger,
+}
+
+/// What starts a workflow on its own. A manual one waits for you or an agent.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    #[default]
+    Manual,
+    /// Runs on a timing, with these values for its inputs, while the app is open.
+    Schedule {
+        timing: Timing,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        inputs: Map<String, Value>,
+    },
+}
+
+impl Trigger {
+    pub fn is_manual(&self) -> bool {
+        matches!(self, Trigger::Manual)
+    }
 }
 
 /// A value a run starts with. One with no default is required.
@@ -86,6 +111,47 @@ pub struct Input {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// What kind of value one field of an AI reply holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldKind {
+    #[default]
+    Text,
+    Number,
+    /// True or false.
+    YesNo,
+    /// A list of text.
+    List,
+}
+
+impl FieldKind {
+    pub const ALL: [FieldKind; 4] = [Self::Text, Self::Number, Self::YesNo, Self::List];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Number => "number",
+            Self::YesNo => "yes or no",
+            Self::List => "list of text",
+        }
+    }
+}
+
+/// One field of the reply a `generate` step asks the model for.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct Field {
+    pub name: String,
+    #[serde(default)]
+    pub kind: FieldKind,
+    /// What it holds inside, when it is an object or a list of objects (found from the real value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub of: Vec<Field>,
 }
 
 /// One case of a `switch`: the steps run when its value equals the one switched on.
@@ -137,6 +203,17 @@ pub struct Step {
     pub cases: Vec<Case>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default: Vec<Step>,
+    /// generate: the fields to answer with. With none the result is text; with some it is an
+    /// object of these fields, checked, so later steps can use `name.field`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reply: Vec<Field>,
+    /// The fields this step's result was found to have, by a model looking at a real one. Only
+    /// the editor reads it, to offer them by name; the engine never does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<Field>,
+    /// switch: run every case that matches, in order, not only the first.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub all: bool,
     // for_each
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<String>,
@@ -194,7 +271,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 27] = [
+        let fields: [(&str, bool); 29] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -205,6 +282,8 @@ impl Step {
             ("on", self.on.is_some()),
             ("cases", !self.cases.is_empty()),
             ("default", !self.default.is_empty()),
+            ("all", self.all),
+            ("reply", !self.reply.is_empty()),
             ("over", self.over.is_some()),
             ("as", self.item.is_some()),
             ("on_error", self.on_error.is_some()),
@@ -234,10 +313,10 @@ impl Step {
 fn takes(kind: &str) -> &'static [&'static str] {
     match kind {
         TOOL => &["tool", "args"],
-        GENERATE => &["instruction"],
+        GENERATE => &["instruction", "reply"],
         DECIDE => &["question", "options", "input"],
         IF => &["cond", "then", "else"],
-        SWITCH => &["on", "cases", "default"],
+        SWITCH => &["on", "cases", "default", "all"],
         FOR_EACH => &["over", "as", "on_error", "steps"],
         WHILE => &["cond", "max", "steps"],
         SET => &["values"],
@@ -321,6 +400,20 @@ struct Check<'a> {
 }
 
 impl Check<'_> {
+    /// What to say when the box for `field` is empty.
+    fn missing(field: &str) -> String {
+        match field {
+            "over" => "it needs the list to repeat over".to_owned(),
+            "cond" => "it needs a condition".to_owned(),
+            "on" => "it needs the value to choose by".to_owned(),
+            "when" => "a case needs the value it is for".to_owned(),
+            other => match other.strip_prefix("value ") {
+                Some(name) => format!("{name} needs a value"),
+                None => format!("it needs a {other}"),
+            },
+        }
+    }
+
     /// Names an expression may use here: the inputs, what is bound so far, and `extra`.
     fn names<'v>(vis: &'v [String], extra: &[&'v str]) -> Vec<&'v str> {
         std::iter::once("inputs")
@@ -331,7 +424,7 @@ impl Check<'_> {
 
     fn expression(&mut self, at: &str, field: &str, src: Option<&str>, names: &[&str]) {
         match src {
-            None | Some("") => self.bad.push(format!("{at}: a {field} is needed")),
+            None | Some("") => self.bad.push(format!("{at}: {}", Self::missing(field))),
             Some(src) => {
                 if let Err(why) = expr::check(names, src) {
                     self.bad.push(format!("{at}: {field} {src:?}: {why}"));
@@ -488,12 +581,27 @@ impl Check<'_> {
                     }
                 }
             }
-            GENERATE => match s.instruction.as_deref() {
-                None | Some("") => self
-                    .bad
-                    .push(format!("{at}: a generate step needs an instruction")),
-                Some(t) => refs.extend(template::find_refs(t)),
-            },
+            GENERATE => {
+                match s.instruction.as_deref() {
+                    None | Some("") => self
+                        .bad
+                        .push(format!("{at}: a generate step needs an instruction")),
+                    Some(t) => refs.extend(template::find_refs(t)),
+                }
+                let names: BTreeSet<&str> = s.reply.iter().map(|f| f.name.as_str()).collect();
+                if s.reply.len() > MAX_REPLY_FIELDS {
+                    self.bad.push(format!(
+                        "{at}: a reply may have up to {MAX_REPLY_FIELDS} fields"
+                    ));
+                } else if s.reply.iter().any(|f| !name_ok(&f.name, false)) {
+                    self.bad.push(format!(
+                        "{at}: each reply field needs a name of letters, digits and underscores"
+                    ));
+                } else if names.len() != s.reply.len() {
+                    self.bad
+                        .push(format!("{at}: the reply fields must have different names"));
+                }
+            }
             DECIDE => {
                 match s.question.as_deref() {
                     None | Some("") => self
@@ -1055,6 +1163,7 @@ pub fn plain(s: &Step) -> String {
 
 /// One line of a workflow laid out as it nests: how deep, where it is (the path a run's step
 /// log uses, or a branch's), and what to say.
+#[cfg(test)]
 #[derive(Clone, PartialEq, Debug)]
 pub struct Row {
     pub depth: usize,
@@ -1063,6 +1172,7 @@ pub struct Row {
 }
 
 /// The steps as an outline, with a line for each branch of an `if` or `switch`.
+#[cfg(test)]
 pub fn outline(steps: &[Step]) -> Vec<Row> {
     fn walk(steps: &[Step], block: &str, depth: usize, out: &mut Vec<Row>) {
         for (i, s) in steps.iter().enumerate() {

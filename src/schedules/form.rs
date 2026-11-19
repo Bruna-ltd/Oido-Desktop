@@ -39,6 +39,104 @@ impl When {
     }
 }
 
+/// When a schedule fires, as typed. A schedule's form has one, and so does a workflow's schedule
+/// trigger.
+#[derive(Debug)]
+pub struct TimingForm {
+    pub when: When,
+    pub once: TextEdit,
+    pub every: TextEdit,
+    /// An "every" timing keeps its grid when edited.
+    pub every_start: Option<i64>,
+    pub at: TextEdit,
+    pub days: Days,
+    pub cron: TextEdit,
+}
+
+impl TimingForm {
+    /// Every day at 09:00.
+    pub fn new() -> TimingForm {
+        TimingForm {
+            when: When::Days,
+            once: TextEdit::new(""),
+            every: TextEdit::new("60"),
+            every_start: None,
+            at: TextEdit::new("09:00"),
+            days: Days::EVERY,
+            cron: TextEdit::new(""),
+        }
+    }
+
+    /// The form filled in from `timing`.
+    pub fn of<Tz: TimeZone>(timing: &Timing, tz: &Tz) -> TimingForm
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let mut f = TimingForm::new();
+        match timing {
+            Timing::Once(t) => {
+                f.when = When::Once;
+                let at = tz.timestamp_opt(*t, 0).earliest();
+                f.once = TextEdit::new(
+                    at.map_or_else(String::new, |d| d.format("%Y-%m-%d %H:%M").to_string()),
+                );
+            }
+            Timing::Every { start, secs } => {
+                f.when = When::Every;
+                f.every = TextEdit::new((secs / 60).to_string());
+                f.every_start = Some(*start);
+            }
+            t @ Timing::Cron { expr, .. } => match t.preset() {
+                Some(at) => {
+                    f.when = When::Days;
+                    f.at = TextEdit::new(format!("{:02}:{:02}", at.hour, at.minute));
+                    f.days = at.days;
+                }
+                None => {
+                    f.when = When::Cron;
+                    f.cron = TextEdit::new(expr);
+                }
+            },
+        }
+        f
+    }
+
+    /// The timing as typed. Errs, in words, on anything unreadable. `now` starts an "every" one
+    /// that has no grid yet.
+    pub fn read<Tz: TimeZone>(&self, now: i64, tz: &Tz) -> Result<Timing, String> {
+        match self.when {
+            When::Once => Ok(Timing::Once(local_time(&self.once.text, tz)?)),
+            When::Every => {
+                let minutes: i64 = self
+                    .every
+                    .text
+                    .trim()
+                    .parse()
+                    .map_err(|_| "Give the minutes as a whole number.")?;
+                Timing::every(self.every_start.unwrap_or(now), minutes.saturating_mul(60))
+            }
+            When::Days => {
+                if self.days.is_empty() {
+                    return Err("Choose at least one day.".to_owned());
+                }
+                let (hour, minute) = clock(&self.at.text)?;
+                Timing::at(AtTime {
+                    hour,
+                    minute,
+                    days: self.days,
+                })
+            }
+            When::Cron => Timing::cron(&self.cron.text),
+        }
+    }
+}
+
+impl Default for TimingForm {
+    fn default() -> TimingForm {
+        TimingForm::new()
+    }
+}
+
 /// Where the form came from, which says what saving it does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -58,14 +156,7 @@ pub struct Form {
     pub prompt: TextEdit,
     pub workflow_id: Option<String>,
     pub inputs: Vec<(String, TextEdit)>,
-    pub when: When,
-    pub once: TextEdit,
-    pub every: TextEdit,
-    /// An "every" schedule keeps its grid when edited.
-    pub every_start: Option<i64>,
-    pub at: TextEdit,
-    pub days: Days,
-    pub cron: TextEdit,
+    pub timing: TimingForm,
     pub agent_open: bool,
     pub workflow_open: bool,
     /// Why the last save did not go through.
@@ -83,13 +174,7 @@ impl Form {
             prompt: TextEdit::new(""),
             workflow_id: None,
             inputs: Vec::new(),
-            when: When::Days,
-            once: TextEdit::new(""),
-            every: TextEdit::new("60"),
-            every_start: None,
-            at: TextEdit::new("09:00"),
-            days: Days::EVERY,
-            cron: TextEdit::new(""),
+            timing: TimingForm::new(),
             agent_open: false,
             workflow_open: false,
             notice: None,
@@ -116,31 +201,7 @@ impl Form {
                 }
             }
         }
-        match &s.timing {
-            Timing::Once(t) => {
-                f.when = When::Once;
-                let at = tz.timestamp_opt(*t, 0).earliest();
-                f.once = TextEdit::new(
-                    at.map_or_else(String::new, |d| d.format("%Y-%m-%d %H:%M").to_string()),
-                );
-            }
-            Timing::Every { start, secs } => {
-                f.when = When::Every;
-                f.every = TextEdit::new((secs / 60).to_string());
-                f.every_start = Some(*start);
-            }
-            t @ Timing::Cron { expr, .. } => match t.preset() {
-                Some(at) => {
-                    f.when = When::Days;
-                    f.at = TextEdit::new(format!("{:02}:{:02}", at.hour, at.minute));
-                    f.days = at.days;
-                }
-                None => {
-                    f.when = When::Cron;
-                    f.cron = TextEdit::new(expr);
-                }
-            },
-        }
+        f.timing = TimingForm::of(&s.timing, tz);
         f
     }
 
@@ -194,30 +255,7 @@ impl Form {
                 Target::Workflow { id, inputs }
             }
         };
-        let timing = match self.when {
-            When::Once => Timing::Once(local_time(&self.once.text, tz)?),
-            When::Every => {
-                let minutes: i64 = self
-                    .every
-                    .text
-                    .trim()
-                    .parse()
-                    .map_err(|_| "Give the minutes as a whole number.")?;
-                Timing::every(self.every_start.unwrap_or(now), minutes.saturating_mul(60))?
-            }
-            When::Days => {
-                if self.days.is_empty() {
-                    return Err("Choose at least one day.".to_owned());
-                }
-                let (hour, minute) = clock(&self.at.text)?;
-                Timing::at(AtTime {
-                    hour,
-                    minute,
-                    days: self.days,
-                })?
-            }
-            When::Cron => Timing::cron(&self.cron.text)?,
-        };
+        let timing = self.timing.read(now, tz)?;
         Ok((agent, name, target, timing))
     }
 }
@@ -245,6 +283,7 @@ mod tests {
                 ..Definition::default()
             },
             created_at: 0,
+            published: None,
         }
     }
 
@@ -299,7 +338,7 @@ mod tests {
         f.prompt = TextEdit::new("Plan my day");
         let (_, _, _, timing) = f.read(&wfs, 0, &Utc).unwrap();
         assert_eq!(timing.describe(&Utc), "every day at 09:00");
-        f.days = Days::NONE;
+        f.timing.days = Days::NONE;
         assert!(f.read(&wfs, 0, &Utc).unwrap_err().contains("day"));
         f.kind = Kind::Workflow;
         assert_eq!(f.read(&wfs, 0, &Utc).unwrap_err(), "Choose a workflow.");

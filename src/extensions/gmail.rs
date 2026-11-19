@@ -148,9 +148,13 @@ impl Extension for Gmail {
         ]
     }
 
+    fn data(&self, tool: &str, args: &Value, api: &Api) -> Option<Result<Value, Failure>> {
+        (tool == "search").then(|| search_data(args, api))
+    }
+
     fn call(&self, tool: &str, args: &Value, api: &Api) -> Result<String, Failure> {
         match tool {
-            "search" => search(args, api),
+            "search" => search(args, api).map(|found| render_found(&found)),
             "read_message" => {
                 let msg = api.get(
                     &format!("{BASE}/messages/{}", id_arg(args)?),
@@ -486,7 +490,8 @@ fn id_arg(args: &Value) -> Result<&str, Failure> {
     }
 }
 
-fn search(args: &Value, api: &Api) -> Result<String, Failure> {
+/// The messages a search finds, each with the fields a later step can use, and where to go on from.
+fn search(args: &Value, api: &Api) -> Result<Value, Failure> {
     let max = args["max_results"]
         .as_u64()
         .unwrap_or(DEFAULT_RESULTS)
@@ -506,10 +511,7 @@ fn search(args: &Value, api: &Api) -> Result<String, Failure> {
         .flatten()
         .filter_map(|m| m["id"].as_str())
         .collect();
-    if ids.is_empty() {
-        return Ok("No messages found.".to_owned());
-    }
-    let mut lines = Vec::new();
+    let mut messages = Vec::new();
     for id in ids {
         let msg = api.get(
             &format!("{BASE}/messages/{id}"),
@@ -520,12 +522,42 @@ fn search(args: &Value, api: &Api) -> Result<String, Failure> {
                 ("metadataHeaders", "Date"),
             ],
         )?;
-        lines.push(summary_line(&msg));
+        messages.push(found_message(&msg));
     }
+    let mut out = json!({"messages": messages});
     if let Some(next) = found["nextPageToken"].as_str() {
+        out["next_page_token"] = json!(next);
+    }
+    Ok(out)
+}
+
+/// A message as a search lists it: the fields a later step can use.
+fn found_message(msg: &Value) -> Value {
+    json!({
+        "id": msg["id"].as_str().unwrap_or("?"),
+        "date": header(msg, "Date"),
+        "from": header(msg, "From"),
+        "subject": header(msg, "Subject"),
+        "snippet": msg["snippet"].as_str().map(decode_entities).unwrap_or_default(),
+    })
+}
+
+/// What a workflow step gets from a search: the messages as a list, each with its fields.
+fn search_data(args: &Value, api: &Api) -> Result<Value, Failure> {
+    search(args, api)
+}
+
+/// A search in words, for a model: a message on two lines each.
+fn render_found(found: &Value) -> String {
+    let messages = found["messages"].as_array().map_or(&[][..], Vec::as_slice);
+    if messages.is_empty() {
+        return "No messages found.".to_owned();
+    }
+    let mut lines: Vec<String> = messages.iter().map(summary_line).collect();
+    if let Some(next) = found["next_page_token"].as_str() {
         lines.push(format!("More results: search again with page_token={next}"));
     }
-    Ok(lines.join("\n"))
+    lines.join("\n")
 }
 
 /// A message on two lines: who, when and what about, then the start of it.
@@ -533,13 +565,10 @@ fn summary_line(msg: &Value) -> String {
     format!(
         "{} · {} · {} · {}\n   {}",
         msg["id"].as_str().unwrap_or("?"),
-        header(msg, "Date"),
-        header(msg, "From"),
-        header(msg, "Subject"),
-        msg["snippet"]
-            .as_str()
-            .map(decode_entities)
-            .unwrap_or_default()
+        msg["date"].as_str().unwrap_or_default(),
+        msg["from"].as_str().unwrap_or_default(),
+        msg["subject"].as_str().unwrap_or_default(),
+        msg["snippet"].as_str().unwrap_or_default()
     )
 }
 
@@ -707,10 +736,17 @@ mod tests {
                 {"name": "Subject", "value": "Hi"}
             ]}
         });
+        let found = found_message(&msg);
+        assert_eq!(found["subject"], "Hi");
         assert_eq!(
-            summary_line(&msg),
+            summary_line(&found),
             "m3 · Mon, 3 Nov 2025 · a@b.c · Hi\n   Tom & Jerry's"
         );
+        assert_eq!(
+            render_found(&json!({"messages": [found], "next_page_token": "t9"})),
+            "m3 · Mon, 3 Nov 2025 · a@b.c · Hi\n   Tom & Jerry's\nMore results: search again with page_token=t9"
+        );
+        assert_eq!(render_found(&json!({"messages": []})), "No messages found.");
     }
 
     #[test]
