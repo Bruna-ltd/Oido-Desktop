@@ -55,6 +55,8 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 regex = "1.13"
 # Workflow expressions and the code step: a small embedded script engine with no file, network or process access. `sync` so a run can use it from its own thread.
 rhai = { version = "1.27", features = ["serde", "sync", "no_module"] }
+# A PDF attached to a message: its text is pulled out and sent like a text file.
+pdf-extract = "0.12"
 
 # Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with its scroll
 # speed raised on Linux, where the system gives no acceleration: a mouse wheel notch scrolls 180
