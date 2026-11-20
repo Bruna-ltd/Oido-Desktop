@@ -5,7 +5,8 @@
 use rune::{El, ScrollSpec, Tx, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Switch, TextInput};
 
-use super::settings::{section, setting};
+use super::logo;
+use super::settings::{section, section_with, setting};
 use crate::app::{App, now};
 use crate::channels::{Kind, Paired, Pairing, Status, slack};
 use crate::picker::{Item, MultiPicker};
@@ -27,7 +28,12 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         if c.get(kind).connected() {
             rows.push(agents_row(s, kind, k, layer));
         }
-        page = page.child(section(kind.title(), rows, k));
+        page = page.child(section_with(
+            kind.title(),
+            Some(logo::channel(kind, 20.0)),
+            rows,
+            k,
+        ));
     }
     let pending: Vec<El> = Kind::ALL
         .into_iter()

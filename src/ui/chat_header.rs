@@ -183,9 +183,21 @@ fn tabs(s: &App, a: &Agent, k: &Kit) -> El {
         .py(8.0)
         .gap(4.0)
         .center_y()
-        .children(arrow(&icons::CHEVRON_LEFT, "Earlier chats", "tabs-left", -TABS_STEP, at > 0.5))
+        .children(arrow(
+            &icons::CHEVRON_LEFT,
+            "Earlier chats",
+            "tabs-left",
+            -TABS_STEP,
+            at > 0.5,
+        ))
         .child(strip)
-        .children(arrow(&icons::CHEVRON_RIGHT, "Later chats", "tabs-right", TABS_STEP, at < max - 0.5))
+        .children(arrow(
+            &icons::CHEVRON_RIGHT,
+            "Later chats",
+            "tabs-right",
+            TABS_STEP,
+            at < max - 0.5,
+        ))
         .child(
             IconButton::new(&icons::PLUS)
                 .variant(IconButtonVariant::GhostMuted)
@@ -225,7 +237,7 @@ fn tab(
     }
     // A chat a paired person carries on from a channel: what is written here goes to them too.
     if let Some(kind) = on_channel {
-        e = e.child(icon(&icons::CHANNELS, 12.0).color(ink).help(format!(
+        e = e.child(super::logo::channel(kind, 14.0).help(format!(
             "Carried on from {}: replies here go there too",
             kind.title()
         )));

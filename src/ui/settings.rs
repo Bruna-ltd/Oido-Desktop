@@ -272,6 +272,11 @@ fn status_line(u: &Updates) -> String {
 
 /// A titled group of setting rows on one card, rules between them.
 pub(super) fn section(title: &str, rows: Vec<El>, k: &Kit) -> El {
+    section_with(title, None, rows, k)
+}
+
+/// A [`section`] with a picture before its title.
+pub(super) fn section_with(title: &str, lead: Option<El>, rows: Vec<El>, k: &Kit) -> El {
     let c = &k.c;
     let mut card = col()
         .w_full()
@@ -291,10 +296,16 @@ pub(super) fn section(title: &str, rows: Vec<El>, k: &Kit) -> El {
         .role("group")
         .label(title.to_owned())
         .child(
-            text(title.to_owned())
-                .font(k.ty.body_medium)
-                .color(c.text_base)
-                .px(4.0),
+            row()
+                .gap(8.0)
+                .center_y()
+                .px(4.0)
+                .children(lead)
+                .child(
+                    text(title.to_owned())
+                        .font(k.ty.body_medium)
+                        .color(c.text_base),
+                ),
         )
         .child(card)
 }
