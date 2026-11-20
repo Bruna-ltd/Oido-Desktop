@@ -130,7 +130,7 @@ impl Evaluator {
             let dynamic = rhai::serde::to_dynamic(value).map_err(|e| e.to_string())?;
             vars.push_dynamic(name.as_str(), dynamic);
         }
-        let result = work(&self.engine, &mut vars).map_err(|e| failure(&e))?;
+        let result = work(&self.engine, &mut vars).map_err(|e| with_hint(src, failure(&e)))?;
         rhai::serde::from_dynamic(&result)
             .map_err(|_| format!("`{}` gave something a workflow cannot keep", one_line(src)))
     }
@@ -170,6 +170,42 @@ fn failure(e: &EvalAltResult) -> String {
     }
 }
 
+/// `why` a script or expression failed, with what to write instead when `src` has a habit from
+/// JavaScript, which is what models reach for first.
+fn with_hint(src: &str, why: String) -> String {
+    let mut hints: Vec<String> = Vec::new();
+    if let Some(name) = why
+        .split("Undefined variable: ")
+        .nth(1)
+        .and_then(|rest| rest.split([' ', '\n']).next())
+        .filter(|n| !n.is_empty() && !src.contains(&format!("let {n}")))
+        && src.contains(&format!("{name} = "))
+    {
+        hints.push(format!("declare it first: `let {name} = …`"));
+    }
+    let habits = [
+        (
+            "=>",
+            "a function is written `|x| x.name == \"a\"`, not `x => …`",
+        ),
+        ("?.", "there is no `?.`; test with `if x != () { … }`"),
+        (".length", "the size is `.len()`, not `.length`"),
+        ("===", "equal is `==`"),
+        ("null", "nothing is `()`, not `null`"),
+    ];
+    hints.extend(
+        habits
+            .iter()
+            .filter(|(habit, _)| src.contains(habit))
+            .map(|(_, say)| (*say).to_owned()),
+    );
+    if hints.is_empty() {
+        why
+    } else {
+        format!("{why} (Rhai, not JavaScript: {})", hints.join("; "))
+    }
+}
+
 /// Whether `src` reads as a script and names only `visible` values (and what it declares).
 /// Nothing is run.
 pub fn check_script(visible: &[&str], src: &str) -> Result<(), String> {
@@ -184,7 +220,7 @@ pub fn check_script(visible: &[&str], src: &str) -> Result<(), String> {
     engine
         .compile_with_scope(&vars, src)
         .map(|_| ())
-        .map_err(|e: ParseError| e.to_string())
+        .map_err(|e: ParseError| with_hint(src, e.to_string()))
 }
 
 /// Whether `src` reads as an expression and names only `visible` values. Nothing is run.
@@ -200,7 +236,7 @@ pub fn check(visible: &[&str], src: &str) -> Result<(), String> {
     engine
         .compile_expression_with_scope(&vars, src)
         .map(|_| ())
-        .map_err(|e: ParseError| e.to_string())
+        .map_err(|e: ParseError| with_hint(src, e.to_string()))
 }
 
 #[cfg(test)]
@@ -305,6 +341,20 @@ mod tests {
         let long = format!("[{}].len()", vec!["1"; 5000].join(","));
         let why = e.eval(&scope(), &long).unwrap_err();
         assert!(why.contains("too long"), "{why}");
+    }
+
+    #[test]
+    fn a_failure_says_what_to_write_instead_of_a_habit_from_javascript() {
+        let told = check_script(&[], "items = []\nitems.push(1)\nitems.length").unwrap_err();
+        assert!(
+            told.contains("let items = …") && told.contains(".len()"),
+            "{told}"
+        );
+        let told = check_script(&["xs"], "xs.find(h => h.a == 1)").unwrap_err();
+        assert!(told.contains("|x|"), "{told}");
+        // Nothing is added when no habit shows.
+        let told = check_script(&[], "1 +").unwrap_err();
+        assert!(!told.contains("Rhai, not"), "{told}");
     }
 
     #[test]

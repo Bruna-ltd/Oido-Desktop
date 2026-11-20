@@ -134,3 +134,20 @@ not be sent at all.
   one.
 - If you send a message while a summary is being written, it waits and goes after the reply, as
   it does for any reply in progress.
+
+## Keeping a big read out of the chat: `script`
+
+Every agent has the `script` tool (as it has the managing tools: `schedule`, `mcp_servers`,
+`agents`; none of them is chosen per agent now). The agent passes `steps`, the same steps as a
+saved workflow, and they run at once on a worker with the workflow engine: tool steps (shell, web,
+files, MCP, delegate), Rhai `code` steps, loops, and `generate` / `decide` steps that ask the
+agent's model one narrow thing about one item. Only the last step's value goes back to the chat,
+cut at 8,000 bytes; what the steps read never enters the context.
+
+- Nothing is saved and no run record is kept. A step that fails ends the script and the agent is
+  told which and why.
+- `wait` and `flow` steps are refused: a script cannot pause or hand on to a saved workflow.
+- Guard: every step goes through the same review as a workflow's. If the chat had outside text in
+  view when the agent wrote the steps, every step is held for it, as the agent's own call would be.
+  The result counts as outside text.
+- Model calls made by `generate` and `decide` are counted as workflow usage of the agent.

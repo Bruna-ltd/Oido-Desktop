@@ -16,6 +16,7 @@ const DEFAULT_MODEL: &str = "models.default";
 const APPEARANCE: &str = "appearance";
 const AUTO_UPDATE: &str = "updates.auto";
 pub const RUN_SCHEDULES: &str = "schedules.run";
+pub const ROUTE_BULK: &str = "router.bulk";
 
 /// What the app starts with: what the store holds, or on the very first launch the built-in
 /// providers (written once, so deleting all of it stays deleted).
@@ -72,6 +73,19 @@ pub fn run_schedules(store: Option<&Store>) -> bool {
             None
         })
         .unwrap_or(true)
+}
+
+/// Whether TypeSafe sorts each message first (Settings → Context). Off unless turned on.
+pub fn route_bulk(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return false;
+    };
+    db.setting::<bool>(ROUTE_BULK)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the router setting: {e}");
+            None
+        })
+        .unwrap_or(false)
 }
 
 fn try_load(db: &Store) -> store::Result<(Roster, Providers)> {

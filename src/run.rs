@@ -266,6 +266,7 @@ impl App {
             || self.commands.contains_key(sid)
             || self.delegating.contains_key(sid)
             || self.summarizing.contains_key(sid)
+            || self.routing.contains(sid)
     }
 
     /// Puts your message in chat `sid`, which need not be the open one, and starts the reply.
@@ -277,6 +278,7 @@ impl App {
         let Some(position) = agent.sessions.iter().position(|s| s.id == sid) else {
             return;
         };
+        let text = prompt.text.clone();
         let chat = &mut agent.sessions[position];
         let naming = chat.title == "New chat" && chat.messages.is_empty();
         if naming {
@@ -300,7 +302,49 @@ impl App {
                 db.save_session(&agent_id, &named, position)
             });
         }
-        self.begin_in(sid);
+        self.begin_fresh(sid, &text);
+    }
+
+    /// Starts the reply to a new message. With sorting on, TypeSafe reads the message first and
+    /// the run starts when it has: as a list-and-judge task, or as any other. Without it, or when
+    /// TypeSafe cannot be asked, the run starts at once as it always did.
+    fn begin_fresh(&mut self, sid: &str, message: &str) {
+        self.bulk.remove(sid);
+        let key = (self.route_bulk && self.typesafe_connected())
+            .then(|| {
+                let db = self.store.as_ref()?;
+                db.provider_key(crate::providers::TYPESAFE).ok().flatten()
+            })
+            .flatten()
+            .filter(|_| !message.trim().is_empty() && !self.busy_in(sid));
+        let Some(key) = key else {
+            self.begin_in(sid);
+            return;
+        };
+        self.routing.insert(sid.to_owned());
+        self.refresh_status_of(sid);
+        let (sid, message) = (sid.to_owned(), message.to_owned());
+        self.spawn(
+            move || crate::delegate::is_bulk(crate::typesafe::BASE, &key, &message),
+            move |app, bulk| {
+                // Stopped meanwhile: the run does not start.
+                if !app.routing.remove(&sid) {
+                    return;
+                }
+                if bulk {
+                    app.bulk.insert(sid.clone());
+                }
+                app.begin_in(&sid);
+            },
+        );
+    }
+
+    /// Settings: TypeSafe sorts each message first, or does not.
+    pub fn set_route_bulk(&mut self, on: bool) {
+        self.route_bulk = on;
+        self.save("the router setting", |db| {
+            db.set_setting(crate::persist::ROUTE_BULK, &on)
+        });
     }
 
     /// Asks again after a reply that was stopped or failed: that reply goes, and a new run
@@ -403,6 +447,21 @@ impl App {
         let carries_on = (resumed || !asked && trailing.iter().all(|t| t.role == Role::Tool))
             && self.traces.contains_key(&sid);
         let (brief, skills) = self.brief_of(agent);
+        let brief = crate::delegate::lead_brief(&brief);
+        let mut tools = crate::delegate::tools_for(
+            agent,
+            &skills,
+            self.typesafe_connected(),
+            &crate::mcp::specs(&self.mcp.servers),
+        );
+        // A list-and-judge task reads through a script, not a call at a time.
+        let brief = if self.bulk.contains(&sid) {
+            let (kept, hidden) = crate::delegate::without_readers(tools);
+            tools = kept;
+            crate::delegate::bulk_brief(&brief, &hidden, self.typesafe_connected())
+        } else {
+            brief
+        };
         let system = Some(brief.clone()).filter(|p| !p.trim().is_empty());
         // The chat's secrets, numbered from its start, so each keeps its placeholder.
         let mut hidden = self.guard.chat_hidden(
@@ -421,12 +480,7 @@ impl App {
             context: Some(context.clone()),
             think: think_of(self.effort).filter(|_| can_think),
             turns: turns.clone(),
-            tools: crate::delegate::tools_for(
-                agent,
-                &skills,
-                self.typesafe_connected(),
-                &crate::mcp::specs(&self.mcp.servers),
-            ),
+            tools,
             cache_key: Some(sid.clone()),
         };
         // A chat carried on privately from a channel can send files there.
@@ -1160,6 +1214,9 @@ impl App {
     /// Ends the chat's reply as stopped, if it has one being written.
     pub(crate) fn cancel_session(&mut self, sid: &str) {
         self.resuming.remove(sid);
+        if self.routing.remove(sid) {
+            self.refresh_status_of(sid);
+        }
         if let Some(flag) = self.summarizing.remove(sid) {
             flag.store(true, Ordering::Relaxed);
             if let Some(t) = self.traces.get_mut(sid) {
@@ -1360,6 +1417,10 @@ impl App {
         let sid = sid.to_owned();
         if name == crate::tools::RUN_WORKFLOW {
             self.start_workflow_call(&sid, &id, &args);
+            return true;
+        }
+        if name == crate::tools::SCRIPT {
+            self.start_script_call(&sid, &id, &args);
             return true;
         }
         if name == crate::connector::jev::NAME {
@@ -2164,12 +2225,24 @@ mod tests {
     }
 
     #[test]
+    fn sorting_on_without_typesafe_connected_starts_the_run_at_once_as_before() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(&db, vec![(200, "text/event-stream", STREAM)]);
+        app.route_bulk = true;
+        app.composer.edit = TextEdit::new("list my mail");
+        app.send();
+        assert!(app.routing.is_empty() && app.bulk.is_empty());
+        let request = seen.recv().unwrap();
+        assert!(request.contains("list my mail") && !request.contains("This task reads many"));
+    }
+
+    #[test]
     fn a_message_starts_a_run_and_the_streamed_reply_is_written_saved_and_recorded() {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![(200, "text/event-stream", STREAM)]);
         app.effort = Effort::Off;
         app.composer.edit = TextEdit::new("hi there");
-        // An agent with a team is always offered `delegate`; this one has none.
+        // Every agent is offered `delegate`, for its helper at least; this one has no team.
         app.roster.current_mut().unwrap().subagents.clear();
         app.send();
 
@@ -2181,8 +2254,8 @@ mod tests {
         assert!(request.contains("authorization: bearer sk-box"));
         assert!(request.contains("\"stream\":true") && request.contains("hi there"));
         assert!(
-            request.contains("\"tools\"") && !request.contains("\"delegate\""),
-            "the built-in tools, and no delegate without a team"
+            request.contains("\"tools\"") && request.contains("\"helper\""),
+            "the built-in tools, and delegate offering the helper without a team"
         );
 
         let Message::Assistant {
@@ -2997,13 +3070,18 @@ data: [DONE]
             assert!(request.contains(tool), "{tool} is offered");
         }
         assert!(
-            !request.contains("typesafe_"),
+            !request.contains("\"name\":\"typesafe_"),
             "TypeSafe's are still chosen"
         );
-        for tool in crate::tools::MANAGE {
+        for tool in [
+            crate::schedule::tool::NAME,
+            crate::mcp::tool::NAME,
+            crate::agent_tool::NAME,
+            crate::tools::SCRIPT,
+        ] {
             assert!(
-                !request.contains(&format!("\"name\":\"{tool}\"")),
-                "{tool} manages the app, so it is chosen too"
+                request.contains(&format!("\"name\":\"{tool}\"")),
+                "{tool} is every agent's"
             );
         }
     }
@@ -3287,5 +3365,56 @@ data: [DONE]
             "{back}"
         );
         assert!(!app.busy());
+    }
+
+    #[test]
+    fn an_agent_with_no_team_hands_a_task_to_a_throwaway_helper_that_has_its_tools_but_cannot_hand_on()
+     {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    "text/event-stream",
+                    delegate_stream("helper", "top 3 repos"),
+                ),
+                (200, "text/event-stream", STREAM),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        app.roster.current_mut().unwrap().subagents.clear();
+        let agents = app.roster.list.len();
+        app.composer.edit = TextEdit::new("what is trending");
+        app.send();
+        let lead = seen.recv().unwrap();
+        assert!(
+            lead.contains("make one `script` call instead"),
+            "the lead is told in its system prompt to hand work on: {lead}"
+        );
+        let member = seen.recv().unwrap();
+        assert!(
+            member.contains("top 3 repos") && !member.contains("what is trending"),
+            "it sees only its task: {member}"
+        );
+        for tool in ["shell", "write_file", "web_fetch"] {
+            assert!(
+                member.contains(&format!("\"name\":\"{tool}\"")),
+                "a helper has {tool}"
+            );
+        }
+        for tool in ["delegate", "ask_user_question", "agents", "process"] {
+            assert!(
+                !member.contains(&format!("\"name\":\"{tool}\"")),
+                "a helper has no {tool}"
+            );
+        }
+        let back = seen.recv().unwrap();
+        assert!(back.contains("dg1") && back.contains("hello!"), "{back}");
+        assert!(!app.busy() && app.delegating.is_empty());
+        assert!(
+            app.roster.list.len() == agents && app.roster.current().unwrap().subagents.is_empty(),
+            "nothing is left on the roster"
+        );
     }
 }

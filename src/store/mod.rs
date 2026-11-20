@@ -872,6 +872,13 @@ mod tests {
 
     #[test]
     fn migrating_keeps_the_managing_tools_on_agents_made_before_but_not_on_team_members() {
+        // What migration 26 gave agents made before: the tools are every agent's now, but a saved
+        // list still names them.
+        const MANAGE: [&str; 3] = [
+            crate::schedule::tool::NAME,
+            crate::mcp::tool::NAME,
+            crate::agent_tool::NAME,
+        ];
         let mcp = crate::mcp::tool::NAME;
         let (dir, s) = migrated_from(
             25,
@@ -883,13 +890,13 @@ mod tests {
         let agents = s.load_agents().unwrap();
         let mut want = vec!["mcp__x__y".to_owned(), mcp.to_owned()];
         want.extend(
-            crate::tools::MANAGE
+            MANAGE
                 .iter()
                 .filter(|t| **t != mcp)
                 .map(|t| (*t).to_owned()),
         );
         assert_eq!(agents[0].tools, want, "added once each, after what it had");
-        for m in crate::tools::MANAGE {
+        for m in MANAGE {
             assert!(agents[0].tools.iter().any(|t| t == m), "{m}");
         }
         assert!(agents[0].subagents[0].tools.is_empty());

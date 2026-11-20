@@ -104,6 +104,11 @@ pub struct App {
         std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Chats that carry on in the same run once their summary is written.
     pub resuming: std::collections::HashSet<String>,
+    /// Whether TypeSafe sorts each message first (Settings), the chats it is sorting now, and the
+    /// chats whose run is a list-and-judge task, where tools that read are left to scripts.
+    pub route_bulk: bool,
+    pub routing: std::collections::HashSet<String>,
+    pub bulk: std::collections::HashSet<String>,
     /// Summaries opened in a chat, by chat and position.
     pub summaries_open: std::collections::HashSet<(String, usize)>,
     /// Replies whose thinking you opened or closed yourself, by chat and position: open or not.
@@ -330,6 +335,9 @@ impl App {
             delegating: std::collections::HashMap::new(),
             summarizing: std::collections::HashMap::new(),
             resuming: std::collections::HashSet::new(),
+            route_bulk: persist::route_bulk(store.as_ref()),
+            routing: std::collections::HashSet::new(),
+            bulk: std::collections::HashSet::new(),
             summaries_open: std::collections::HashSet::new(),
             thinking_open: std::collections::HashMap::new(),
             viewing: None,

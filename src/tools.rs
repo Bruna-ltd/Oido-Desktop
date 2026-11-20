@@ -12,6 +12,7 @@ pub const SHELL: &str = "shell";
 pub const PROCESS: &str = "process";
 pub const TEACH: &str = "teach_workflow";
 pub const RUN_WORKFLOW: &str = "run_workflow";
+pub const SCRIPT: &str = "script";
 pub const DELEGATE: &str = "delegate";
 /// Reads one of the agent's skills (see [`crate::skills`]).
 pub const SKILL: &str = "skill";
@@ -43,6 +44,7 @@ pub fn registered() -> Vec<ToolSpec> {
                 "required": ["name"]
             }),
         },
+        crate::flows::script_spec(),
         crate::schedule::tool::spec(),
         crate::mcp::tool::spec(),
         crate::agent_tool::spec(),
@@ -159,24 +161,14 @@ fn ask() -> ToolSpec {
     }
 }
 
-/// The app's own tools that manage the app itself: its schedules, MCP servers and agents. Few
-/// chats need them and their descriptions are long, so an agent has them only when chosen.
-pub const MANAGE: [&str; 3] = [
-    crate::schedule::tool::NAME,
-    crate::mcp::tool::NAME,
-    crate::agent_tool::NAME,
-];
-
 /// Whether a tool is one of the app's own, which every agent has without choosing it. TypeSafe's,
-/// the browser's, the managing ones ([`MANAGE`]) and MCP servers' tools are chosen per agent.
+/// the browser's and MCP servers' tools are chosen per agent.
 pub fn is_builtin(name: &str) -> bool {
     static BUILTIN: LazyLock<Vec<String>> = LazyLock::new(|| {
         registered()
             .into_iter()
             .map(|t| t.name)
-            .filter(|n| {
-                !needs_typesafe(n) && !crate::connector::is_tool(n) && !MANAGE.contains(&n.as_str())
-            })
+            .filter(|n| !needs_typesafe(n) && !crate::connector::is_tool(n))
             .collect()
     });
     BUILTIN.iter().any(|n| n == name)
@@ -214,6 +206,7 @@ pub fn offered(chosen: &[String], typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolS
 pub fn is_job(name: &str) -> bool {
     name == SHELL
         || name == RUN_WORKFLOW
+        || name == SCRIPT
         || name == crate::web::NAME
         || crate::connector::is_tool(name)
         || needs_typesafe(name)
@@ -244,6 +237,7 @@ pub fn summary(name: &str, args: &str) -> String {
             .ok()
             .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| args.to_owned()),
+        SCRIPT => crate::flows::script_summary(args),
         TEACH => "Save this as a workflow".to_owned(),
         crate::schedule::tool::NAME => crate::schedule::tool::summary(args),
         crate::mcp::tool::NAME => crate::mcp::tool::summary(args),
@@ -274,8 +268,6 @@ fn process_summary(args: &str) -> String {
 pub const DEFAULTS: &str = "Defaults";
 /// The group TypeSafe's tools are listed under.
 pub const TYPESAFE: &str = "TypeSafe";
-/// The group the app's managing tools ([`MANAGE`]) are listed under.
-pub const MANAGING: &str = "Manage Oido";
 
 /// How a tool is shown to the person, apart from the name the model calls it by: a plain label, a
 /// line on what it does, and the group it is listed under (the app's own, TypeSafe, or the MCP
@@ -307,8 +299,6 @@ pub fn shown(name: &str, servers: &[crate::mcp::Server]) -> Shown {
     if let Some((label, about)) = own(name) {
         let group = if needs_typesafe(name) {
             TYPESAFE
-        } else if MANAGE.contains(&name) {
-            MANAGING
         } else {
             DEFAULTS
         };
@@ -353,6 +343,10 @@ fn own(name: &str) -> Option<(&'static str, &'static str)> {
             "Turns what it just did into a workflow you can run again.",
         ),
         RUN_WORKFLOW => ("Run workflows", "Runs one of your saved workflows by name."),
+        SCRIPT => (
+            "Run a script of steps",
+            "Fetches, filters and judges data in steps that run on their own, and brings back only the result.",
+        ),
         crate::schedule::tool::NAME => (
             "Schedule itself",
             "Sets prompts or workflows to run at set times; new ones need your approval.",
@@ -561,22 +555,19 @@ mod tests {
     }
 
     #[test]
-    fn the_tools_that_manage_the_app_are_offered_only_when_chosen() {
-        let names = |chosen: &[&str]| -> Vec<String> {
-            let chosen: Vec<String> = chosen.iter().map(|c| (*c).to_owned()).collect();
-            offered(&chosen, false, &[])
-                .into_iter()
-                .map(|t| t.name)
-                .collect()
-        };
-        for m in MANAGE {
-            assert!(knows(m) && !is_builtin(m), "{m}");
-            assert!(
-                !names(&[]).iter().any(|n| n == m),
-                "{m} without choosing it"
-            );
-            assert!(names(&[m]).iter().any(|n| n == m), "{m} once chosen");
-            assert_eq!(shown(m, &[]).group, MANAGING);
+    fn the_tools_that_manage_the_app_and_run_scripts_are_every_agents_without_choosing() {
+        let names: Vec<String> = offered(&[], false, &[])
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for t in [
+            crate::schedule::tool::NAME,
+            crate::mcp::tool::NAME,
+            crate::agent_tool::NAME,
+            SCRIPT,
+        ] {
+            assert!(is_builtin(t) && names.iter().any(|n| n == t), "{t}");
+            assert_eq!(shown(t, &[]).group, DEFAULTS, "{t}");
         }
     }
 

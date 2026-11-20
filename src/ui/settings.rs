@@ -34,6 +34,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(24.0)
                 .child(section("Appearance", vec![theme_row(s, k, layer)], k))
                 .child(section("Schedules", vec![schedules_row(s, k)], k))
+                .child(section("Context", vec![router_row(s, k)], k))
                 .child(section("Browser", browser_rows(s, k), k))
                 .child(section("Usage", vec![clear_usage_row(s, k)], k))
                 .child(section(
@@ -226,6 +227,20 @@ fn browser_rows(s: &App, k: &Kit) -> Vec<El> {
             k,
         ),
     ]
+}
+
+fn router_row(s: &App, k: &Kit) -> El {
+    setting(
+        "route-bulk",
+        "Sort messages with TypeSafe",
+        "TypeSafe reads each message you send first. When it asks to read and judge many items, the agent reads them in a script, so they stay out of the chat. Needs TypeSafe connected; your message goes to TypeSafe.",
+        Switch::new(s.route_bulk)
+            .label("Sort messages with TypeSafe")
+            .hide_label()
+            .on_toggle(|s: &mut App| s.set_route_bulk(!s.route_bulk))
+            .build(k),
+        k,
+    )
 }
 
 fn schedules_row(s: &App, k: &Kit) -> El {
