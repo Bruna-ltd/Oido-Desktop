@@ -129,25 +129,63 @@ fn spend(s: &App, a: &Agent, k: &Kit) -> Option<El> {
     )
 }
 
+/// How far one press of an arrow moves the pills.
+const TABS_STEP: f32 = 200.0;
+const TABS: &str = "chat-tabs";
+
+/// The chats as pills in a strip that scrolls sideways when they overflow, with an arrow at each
+/// end that has more to show. "New chat" stays put at the right.
 fn tabs(s: &App, a: &Agent, k: &Kit) -> El {
     let many = a.sessions.len() > 1;
+    let [at, max] = s.tabs_scroll.get();
+    let seen = s.tabs_scroll.clone();
+    // The scroll viewport stretches its one child to its own width, so the pills sit in a row of
+    // their own and keep their natural size.
+    let strip = row()
+        .key(TABS)
+        .grow(1.0)
+        .min_w(0.0)
+        .scroll_x()
+        .scroll_edge_fade(16.0)
+        .on_scroll_offset(move |p| seen.set([p.offset[0], p.max[0]]))
+        .child(
+            row()
+                .gap(4.0)
+                .center_y()
+                .children(a.sessions.iter().enumerate().map(|(i, t)| {
+                    tab(
+                        i,
+                        &t.title,
+                        i == a.active,
+                        a.status == AgentStatus::Running,
+                        many,
+                        s.on_channel(&t.id),
+                        k,
+                    )
+                })),
+        );
+    let arrow = |glyph, label: &str, key: &str, by: f32, shown: bool| {
+        shown.then(|| {
+            IconButton::new(glyph)
+                .variant(IconButtonVariant::GhostMuted)
+                .label(label.to_owned())
+                .build(k)
+                .key(key.to_owned())
+                .on_press_tx(move |s: &mut App, tx| {
+                    let [at, _] = s.tabs_scroll.get();
+                    tx.scroll_to(TABS, (at + by).max(0.0), 0.0);
+                })
+        })
+    };
     row()
         .w_full()
         .px(12.0)
         .py(8.0)
         .gap(4.0)
         .center_y()
-        .children(a.sessions.iter().enumerate().map(|(i, t)| {
-            tab(
-                i,
-                &t.title,
-                i == a.active,
-                a.status == AgentStatus::Running,
-                many,
-                s.on_channel(&t.id),
-                k,
-            )
-        }))
+        .children(arrow(&icons::CHEVRON_LEFT, "Earlier chats", "tabs-left", -TABS_STEP, at > 0.5))
+        .child(strip)
+        .children(arrow(&icons::CHEVRON_RIGHT, "Later chats", "tabs-right", TABS_STEP, at < max - 0.5))
         .child(
             IconButton::new(&icons::PLUS)
                 .variant(IconButtonVariant::GhostMuted)

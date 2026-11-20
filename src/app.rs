@@ -247,6 +247,8 @@ pub struct App {
     /// The window has the keyboard focus, so the person is looking at it: no notifications then.
     pub focused: bool,
     /// The side panes as last seen, to save them when they change.
+    /// Where the chat tabs have scrolled to, and the furthest they can: read by the arrows.
+    pub tabs_scroll: std::rc::Rc<std::cell::Cell<[f32; 2]>>,
     pub(crate) panes_seen: std::cell::Cell<Option<persist::Panes>>,
 }
 
@@ -418,6 +420,7 @@ impl App {
 
             store,
             focused: false,
+            tabs_scroll: Default::default(),
             panes_seen: Default::default(),
         };
         persist::restore_folds(&mut app);

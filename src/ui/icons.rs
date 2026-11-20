@@ -97,6 +97,8 @@ lucide!(
     "oido-edit",
     r#"<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>"#
 );
+icon!(CHEVRON_LEFT, "oido-chevron-left", r#"<path d="M10 3.5L5.5 8L10 12.5"/>"#);
+icon!(CHEVRON_RIGHT, "oido-chevron-right", r#"<path d="M6 3.5L10.5 8L6 12.5"/>"#);
 icon!(PLUS, "oido-plus", r#"<path d="M8 3.5V12.5M3.5 8H12.5"/>"#);
 icon!(
     STOP,
