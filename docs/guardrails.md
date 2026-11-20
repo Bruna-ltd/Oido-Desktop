@@ -71,6 +71,24 @@ Erasing a disk (`mkfs`, `wipefs`, `dd of=/dev/…`), a fork bomb and `rm --no-pr
 outright. The patterns catch the common shapes; a command can always be written another way, so this
 is a net, not a wall.
 
+**Blocked places** (`guard/blocked.rs`; always on, not a pack). Folders and files you list on the
+Guardrails screen, and more per agent under its advanced settings ("Never touch"), typed or chosen
+with **Add…** (a browser over folders and files), that no tool a
+model drives may reach, in a chat, a team member's task, a schedule or a workflow step. Each place
+stops everything, only reading and sending, or only changing and deleting. A place covers everything
+under it and is matched by where it really is (`..`, `~` and links worked out). A refusal has no
+"allow once": change the list. Until you change it, the list holds keys and logins (`~/.ssh`,
+`~/.gnupg`, `~/.aws`), browser profiles and this app's own database. Checked by:
+
+- file tools and `send_file`: the `path`;
+- `shell`: every word in the command that names a place (it cannot tell reading from changing, so any
+  mention counts);
+- MCP tools: every text in the arguments that looks like a path.
+
+A command can still reach a place by a name the guard cannot read: a variable, a pattern (`~/.s*`), or
+`cd` there and use relative paths. It is a net, not a wall. Your own attaching or opening files in the
+app is not stopped, only what a model does.
+
 **Ask before acting on outside text** (`Pack::Taint`, `guard/taint.rs`). Text from outside can carry
 instructions meant to steer the agent (prompt injection). No pattern can tell them apart from
 ordinary text, so instead: while any outside text is in what a model is sent, every call it makes
@@ -156,6 +174,7 @@ network addresses (`localhost`, `192.168…`, `*.local`) in a reply are left out
 | Packs, trips, the guarded request, reviewing a call | `src/guard/mod.rs` |
 | Finding and hiding secrets | `src/guard/secrets.rs` |
 | Risky commands and paths | `src/guard/actions.rs` |
+| Blocked places | `src/guard/blocked.rs` |
 | Outside text, and which calls act | `src/guard/taint.rs` |
 | Reviewing a reply's calls, holding, deciding and timing them out; taint of a model call | `src/guard/gate.rs` |
 | Go-aheads for work nobody watches | `src/guard/ask.rs` |
@@ -163,8 +182,9 @@ network addresses (`localhost`, `192.168…`, `*.local`) in a reply are left out
 | Limits and topics for channel messages | `src/guard/intake.rs` |
 | What a reply to a channel must not carry | `src/guard/replies.rs` |
 | Trip cards and the Guardrails screen | `src/ui/guard.rs` |
-| Which packs are on; how long a go-ahead is waited for; blocked words; channel limits | settings `guard.packs`, `guard.wait`, `guard.words`, `guard.channel_limits` |
+| Which packs are on; how long a go-ahead is waited for; blocked words; blocked places; channel limits | settings `guard.packs`, `guard.wait`, `guard.words`, `guard.blocked`, `guard.channel_limits` |
 | An agent's channel topics | `agents.channel_topics` (migration 020) |
+| An agent's own blocked places | `agents.blocked` (migration 029) |
 | A call's trip, and whether its result is outside text | kept with the call in the chat (`ToolCall::trip`, `ToolCall::outside`) |
 | Trusted folders and people | `agents.trust_workdir`, `channel_users.trusted` (migration 019) |
 

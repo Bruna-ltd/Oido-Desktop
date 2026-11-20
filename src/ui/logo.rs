@@ -139,6 +139,18 @@ pub fn provider(id: &str, color: &str, k: &Kit) -> Option<El> {
     )
 }
 
+/// A channel's own logo, drawn `side` points across.
+pub fn channel(kind: crate::channels::Kind, side: f32) -> El {
+    use crate::channels::Kind;
+    let svg: &'static [u8] = match kind {
+        Kind::Telegram => include_bytes!("../../assets/channels/telegram.svg"),
+        Kind::Slack => include_bytes!("../../assets/channels/slack.svg"),
+        Kind::WhatsApp => include_bytes!("../../assets/channels/whatsapp.svg"),
+    };
+    let image = LOGOS.with(|l| l.borrow_mut().art(svg).pixels().clone());
+    row().size(side, side).pixels(&image)
+}
+
 /// The picture of the preset at `url`, as a tile; `None` for a server that is not one.
 pub fn tile(url: &str, k: &Kit) -> Option<El> {
     let (name, logo) = logo_for(url)?;

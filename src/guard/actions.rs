@@ -24,6 +24,8 @@ pub struct Finding {
 pub struct Place {
     pub root: PathBuf,
     pub home: Option<PathBuf>,
+    /// The places the agent acting here has blocked for itself (see [`super::blocked`]).
+    pub blocked: Vec<super::blocked::Blocked>,
 }
 
 struct Rule {
@@ -152,6 +154,7 @@ pub fn title(rule: &str) -> &'static str {
         "shell.power" => "Stops the computer",
         "shell.services" => "Changes services or scheduled jobs",
         "shell.delete" => "Deletes widely",
+        "path.blocked" => "Reaches a blocked place",
         _ => "Risky action",
     }
 }
@@ -276,7 +279,7 @@ fn wide(target: &str, recursive: bool, at: &Place) -> Option<String> {
 }
 
 /// The words of one command, quotes taken off; good enough to see what `rm` is given.
-fn words(segment: &str) -> Vec<String> {
+pub(super) fn words(segment: &str) -> Vec<String> {
     let mut out = Vec::new();
     let (mut word, mut quote, mut any) = (String::new(), None, false);
     for c in segment.chars() {
@@ -303,7 +306,7 @@ fn words(segment: &str) -> Vec<String> {
 }
 
 /// `path` with `.` and `..` worked out, without looking at the disk (it may not exist yet).
-fn normalize(path: &Path) -> PathBuf {
+pub(super) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {
@@ -325,6 +328,7 @@ mod tests {
         Place {
             root: PathBuf::from("/home/ada/project"),
             home: Some(PathBuf::from("/home/ada")),
+            blocked: Vec::new(),
         }
     }
 

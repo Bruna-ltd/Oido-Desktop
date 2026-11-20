@@ -289,6 +289,23 @@ fn answer(body: &str, looked_in: Option<(u32, u32)>) -> Result<String, String> {
     Ok(a.to_string())
 }
 
+/// How likely it is that `question` is true of `content`, from 0 to 1. Blocks on the network, so
+/// call it from a worker thread.
+pub fn probability(
+    base: &str,
+    key: &str,
+    content: &str,
+    question: &str,
+    timeout: Duration,
+) -> Result<f64, String> {
+    let args = json!({"content": content, "question": question});
+    let body = systemone(base, key, &request(YES_NO, &args, &[])?, false, timeout)?;
+    let answer: Value = serde_json::from_str(&answer(&body, None)?).map_err(|e| e.to_string())?;
+    answer["yes_probability"]
+        .as_f64()
+        .ok_or_else(|| "the answer had no probability.".to_owned())
+}
+
 /// Asks TypeSafe, in words for the agent: the answer as JSON, or `Error: …`. Images are read from
 /// inside `root`, the agent's working folder. Blocks on the network and the disk, so call it from
 /// a worker thread.
@@ -453,6 +470,25 @@ mod tests {
         let (base, _) = serve(vec![(401, "{}")]);
         let told = run(&format!("{base}/v1"), "bad", None, YES_NO, args);
         assert!(told.contains("did not accept the key"), "{told}");
+    }
+
+    #[test]
+    fn a_question_about_text_gives_back_its_probability() {
+        let (base, seen) = serve(vec![(
+            200,
+            r#"{"answers":{"q":{"type":"noul","noul":0.85}}}"#,
+        )]);
+        let p = probability(
+            &format!("{base}/v1"),
+            "k",
+            "list my mail",
+            "Is it?",
+            TIMEOUT,
+        );
+        assert_eq!(p, Ok(0.85));
+        assert!(seen.recv().unwrap().contains("list my mail"));
+        let (base, _) = serve(vec![(500, "{}")]);
+        assert!(probability(&format!("{base}/v1"), "k", "x", "q", TIMEOUT).is_err());
     }
 
     #[test]

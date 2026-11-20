@@ -9,6 +9,8 @@ use crate::models::ModelRef;
 use crate::providers::{self, Providers};
 use crate::store::{self, Store, Verified};
 use crate::theme::Appearance;
+use rune_kit::shell::PaneState;
+use serde::{Deserialize, Serialize};
 
 const SEEDED: &str = "seeded";
 const SELECTED: &str = "agents.selected";
@@ -16,6 +18,17 @@ const DEFAULT_MODEL: &str = "models.default";
 const APPEARANCE: &str = "appearance";
 const AUTO_UPDATE: &str = "updates.auto";
 pub const RUN_SCHEDULES: &str = "schedules.run";
+pub const ROUTE_BULK: &str = "router.bulk";
+const PANES: &str = "panes";
+const SIDEBAR_FOLDS: &str = "sidebar.folds";
+
+/// What is folded away in the agents sidebar: its two sections, and the agents whose team is.
+#[derive(Default, Serialize, Deserialize)]
+struct Folds {
+    pinned: bool,
+    others: bool,
+    teams: Vec<String>,
+}
 
 /// What the app starts with: what the store holds, or on the very first launch the built-in
 /// providers (written once, so deleting all of it stays deleted).
@@ -72,6 +85,82 @@ pub fn run_schedules(store: Option<&Store>) -> bool {
             None
         })
         .unwrap_or(true)
+}
+
+/// Whether TypeSafe sorts each message first (Settings → Context). Off unless turned on.
+pub fn route_bulk(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return false;
+    };
+    db.setting::<bool>(ROUTE_BULK)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the router setting: {e}");
+            None
+        })
+        .unwrap_or(false)
+}
+
+/// Whether each side pane shows, and how wide: what the window was left with.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Panes {
+    sidebar: (bool, f32),
+    inspector: (bool, f32),
+}
+
+impl Panes {
+    fn of(app: &App) -> Panes {
+        let w = |p: &PaneState| (p.is_open(), p.width());
+        Panes {
+            sidebar: w(&app.sidebar),
+            inspector: w(&app.inspector),
+        }
+    }
+}
+
+fn wear(pane: &mut PaneState, (open, width): (bool, f32)) {
+    pane.set_width(width);
+    if !open {
+        *pane = pane.collapsed();
+    }
+}
+
+impl App {
+    /// Saves the side panes when they differ from what was last seen. The panes change inside
+    /// the toolkit (a button, a drag, a key, a peek), so the view checks once a frame.
+    pub fn sync_panes(&self) {
+        let now = Panes::of(self);
+        if self
+            .panes_seen
+            .replace(Some(now))
+            .is_some_and(|was| was != now)
+        {
+            self.save("the panes", |db| db.set_setting(PANES, &now));
+        }
+    }
+}
+
+/// Folds the agents sidebar back the way it was left.
+pub(crate) fn restore_folds(app: &mut App) {
+    let Some(db) = &app.store else { return };
+    let folds = db
+        .setting::<Folds>(SIDEBAR_FOLDS)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the sidebar: {e}");
+            None
+        })
+        .unwrap_or_default();
+    app.pinned_closed = folds.pinned;
+    app.others_closed = folds.others;
+    app.roster.collapsed = folds.teams;
+    let saved = db.setting::<Panes>(PANES).unwrap_or_else(|e| {
+        eprintln!("oido: could not read the panes: {e}");
+        None
+    });
+    if let Some(p) = saved {
+        wear(&mut app.sidebar, p.sidebar);
+        wear(&mut app.inspector, p.inspector);
+    }
+    app.panes_seen.set(Some(Panes::of(app)));
 }
 
 fn try_load(db: &Store) -> store::Result<(Roster, Providers)> {
@@ -215,6 +304,31 @@ impl App {
     pub fn toggle_pin(&mut self, id: &str) {
         self.roster.toggle_pin(id);
         self.save_agent_row(&Target::agent(id));
+    }
+
+    /// Remembers which sections and teams of the agents sidebar are folded.
+    pub(crate) fn save_folds(&self) {
+        let folds = Folds {
+            pinned: self.pinned_closed,
+            others: self.others_closed,
+            teams: self.roster.collapsed.clone(),
+        };
+        self.save("the sidebar", |db| db.set_setting(SIDEBAR_FOLDS, &folds));
+    }
+
+    pub fn toggle_team(&mut self, id: &str) {
+        self.roster.toggle_team(id);
+        self.save_folds();
+    }
+
+    pub fn toggle_pinned_section(&mut self) {
+        self.pinned_closed ^= true;
+        self.save_folds();
+    }
+
+    pub fn toggle_others_section(&mut self) {
+        self.others_closed ^= true;
+        self.save_folds();
     }
 
     /// Wears `appearance` and remembers it.

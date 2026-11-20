@@ -14,6 +14,7 @@ use crate::picker::PickerState;
 use crate::providers::{ModelStatus, Providers};
 use crate::runs::{Run, Step};
 use crate::store::Store;
+use crate::ui;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
@@ -104,6 +105,11 @@ pub struct App {
         std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Chats that carry on in the same run once their summary is written.
     pub resuming: std::collections::HashSet<String>,
+    /// Whether TypeSafe sorts each message first (Settings), the chats it is sorting now, and the
+    /// chats whose run is a list-and-judge task, where tools that read are left to scripts.
+    pub route_bulk: bool,
+    pub routing: std::collections::HashSet<String>,
+    pub bulk: std::collections::HashSet<String>,
     /// Summaries opened in a chat, by chat and position.
     pub summaries_open: std::collections::HashSet<(String, usize)>,
     /// Replies whose thinking you opened or closed yourself, by chat and position: open or not.
@@ -166,6 +172,8 @@ pub struct App {
     pub queued: std::collections::HashMap<String, crate::prompt::Prompt>,
     /// The message just copied with its Copy button (chat id and place), and when: its icon shows a
     /// check for a moment.
+    /// The menu a right-click on chat text or the composer opened.
+    pub text_menu: Option<ui::text_menu::TextMenu>,
     pub copied: Option<(String, usize, std::time::Instant)>,
     /// The open chat's transcript is scrolled up away from its newest message.
     pub scrolled_up: bool,
@@ -179,6 +187,8 @@ pub struct App {
     pub model_picker: PickerState,
     /// The composer's working-folder browser.
     pub workdir_browser: crate::folders::Browser,
+    /// The browser that adds a blocked place on the Guardrails screen.
+    pub places_browser: crate::folders::Browser,
     pub pinned_closed: bool,
     pub others_closed: bool,
     /// The right rail shows labels beside its icons.
@@ -235,12 +245,18 @@ pub struct App {
     pub intake: std::collections::HashMap<String, Vec<i64>>,
     /// The blocked words as typed on the Guardrails screen, until saved.
     pub guard_words: TextEdit,
+    /// The blocked places on the Guardrails screen, as typed.
+    pub guard_blocked: TextEdit,
     /// The hub the Oido Browser Connector extension connects to, for the `browser` tool.
     pub connector: crate::connector::Connector,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
     pub store: Option<Store>,
     /// The window has the keyboard focus, so the person is looking at it: no notifications then.
     pub focused: bool,
+    /// The side panes as last seen, to save them when they change.
+    /// Where the chat tabs have scrolled to, and the furthest they can: read by the arrows.
+    pub tabs_scroll: std::rc::Rc<std::cell::Cell<[f32; 2]>>,
+    pub(crate) panes_seen: std::cell::Cell<Option<persist::Panes>>,
 }
 
 /// The running app, for worker threads to hand their results back through. Unset in tests and
@@ -330,6 +346,9 @@ impl App {
             delegating: std::collections::HashMap::new(),
             summarizing: std::collections::HashMap::new(),
             resuming: std::collections::HashSet::new(),
+            route_bulk: persist::route_bulk(store.as_ref()),
+            routing: std::collections::HashSet::new(),
+            bulk: std::collections::HashSet::new(),
             summaries_open: std::collections::HashSet::new(),
             thinking_open: std::collections::HashMap::new(),
             viewing: None,
@@ -367,6 +386,7 @@ impl App {
             parked: std::collections::HashMap::new(),
             queued: std::collections::HashMap::new(),
             file_index: None,
+            text_menu: None,
             copied: None,
             scrolled_up: false,
             answer_text: TextEdit::new(""),
@@ -374,6 +394,7 @@ impl App {
             effort: Effort::Off,
             model_picker: PickerState::default(),
             workdir_browser: crate::folders::Browser::default(),
+            places_browser: crate::folders::Browser::for_places(),
             pinned_closed: false,
             others_closed: false,
             rail_open: false,
@@ -404,11 +425,15 @@ impl App {
             waiting: Vec::new(),
             intake: std::collections::HashMap::new(),
             guard_words: TextEdit::new(""),
+            guard_blocked: TextEdit::new(""),
             connector: crate::connector::Connector::default(),
 
             store,
             focused: false,
+            tabs_scroll: Default::default(),
+            panes_seen: Default::default(),
         };
+        persist::restore_folds(&mut app);
         app.settle_interrupted_commands();
         app.reload_skills();
         app.load_workflows();
@@ -419,6 +444,7 @@ impl App {
         app.load_chat_usage();
         app.load_channels();
         app.guard_words = TextEdit::new(app.guard.words().join(", "));
+        app.guard_blocked = TextEdit::new(crate::guard::blocked::render(&app.guard.blocked()));
         app
     }
 
@@ -430,6 +456,16 @@ impl App {
                 ModelStatus::Ready(_)
             )
         })
+    }
+
+    /// What message `i` of the open chat says: your words, or the reply.
+    pub fn message_text(&self, i: usize) -> Option<String> {
+        let text = match self.current()?.chat().messages.get(i)? {
+            Message::User(p) => &p.text,
+            Message::Assistant { text, .. } => text,
+            _ => return None,
+        };
+        (!text.is_empty()).then(|| text.clone())
     }
 
     pub fn current(&self) -> Option<&Agent> {

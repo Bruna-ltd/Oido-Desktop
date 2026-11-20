@@ -544,10 +544,11 @@ impl Check<'_> {
                     Some(t)
                         if !STEP_TOOLS.contains(&t)
                             && !crate::mcp::is_tool(t)
+                            && !crate::typesafe::is_tool(t)
                             && t != crate::tools::DELEGATE =>
                     {
                         self.bad.push(format!(
-                            "{at}: {t:?} is not a tool a workflow can use; they are {}, or an MCP tool such as mcp__server__tool",
+                            "{at}: {t:?} is not a tool a workflow can use; they are {}, a TypeSafe tool such as typesafe_yes_no, or an MCP tool such as mcp__server__tool",
                             STEP_TOOLS.join(", ")
                         ));
                     }

@@ -50,36 +50,38 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
         line_height: 22.0,
         ..k.ty.body
     };
-    let field = text_input(&s.composer.edit, style)
-        .key("composer-input")
-        .w_full()
-        .color(c.text_base)
-        .placeholder(
-            if asked {
-                ASKED
-            } else if running {
-                BUSY
-            } else {
-                IDLE
-            },
-            c.text_faint,
-        )
-        .caret(c.text_base, k.selection())
-        .label("Message")
-        .on_edit(|s: &mut App| &mut s.composer.edit)
-        .on_input_key(|s: &mut App, key, _| s.composer_key(key))
-        .on_input_paste(|s: &mut App, content, _| {
-            if let Some(image) = content.image() {
-                s.attach_png(image.png().to_vec());
-                true
-            } else if !content.files().is_empty() {
-                s.attach_paths(content.files().to_vec());
-                true
-            } else {
-                false
-            }
-        })
-        .on_submit(|s: &mut App, _| s.send());
+    let field = super::text_menu::composer(
+        text_input(&s.composer.edit, style)
+            .key("composer-input")
+            .w_full()
+            .color(c.text_base)
+            .placeholder(
+                if asked {
+                    ASKED
+                } else if running {
+                    BUSY
+                } else {
+                    IDLE
+                },
+                c.text_faint,
+            )
+            .caret(c.text_base, k.selection())
+            .label("Message")
+            .on_edit(|s: &mut App| &mut s.composer.edit)
+            .on_input_key(|s: &mut App, key, _| s.composer_key(key))
+            .on_input_paste(|s: &mut App, content, _| {
+                if let Some(image) = content.image() {
+                    s.attach_png(image.png().to_vec());
+                    true
+                } else if !content.files().is_empty() {
+                    s.attach_paths(content.files().to_vec());
+                    true
+                } else {
+                    false
+                }
+            })
+            .on_submit(|s: &mut App, _| s.send()),
+    );
     let input = col()
         .w_full()
         .px(16.0)

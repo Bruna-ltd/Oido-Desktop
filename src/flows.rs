@@ -91,12 +91,19 @@ pub(crate) struct Prep {
     /// Whether the agent's working folder counts as the person's own, so what is read from it is
     /// not outside text.
     pub trust_folder: bool,
+    /// The places its agent has blocked for itself, beside the guard's.
+    pub blocked: Vec<crate::guard::Blocked>,
     /// The MCP tools the workflow calls, each with how to reach its server.
     pub mcp: Vec<McpTool>,
     /// The workflows its `flow` steps run, those they run too, and so on.
     pub flows: Vec<Saved>,
     /// The team members its `delegate` steps hand tasks to.
     pub crew: Vec<crate::delegate::Crew>,
+    /// Outside text whoever wrote the steps had in view: a model wrote them, so what they do is
+    /// held for it, as a call of that model's would be.
+    pub outside: Option<String>,
+    /// TypeSafe's key, when a step asks it.
+    pub typesafe: Option<zeroize::Zeroizing<String>>,
 }
 
 /// An MCP tool a workflow step calls.
@@ -119,6 +126,243 @@ type Ran = (
     Vec<(String, crate::mcp::oauth::Tokens)>,
     Vec<crate::delegate::Taken>,
 );
+
+/// The most a script gives back, in bytes: what it reads stays out of the chat, and so does what
+/// it makes too much of.
+const SCRIPT_RESULT: usize = 8_000;
+
+pub(crate) fn script_spec() -> crate::completion::ToolSpec {
+    crate::completion::ToolSpec {
+        name: crate::tools::SCRIPT.into(),
+        description: "Run steps on your own and get back only what the last one gives. Use it instead of calling tools one by one whenever you would fetch, read or list many things and then filter or judge them: what the steps read never enters your context. `steps` is a list of {\"id\", \"kind\", \"bind\"?, ...}. Kinds: `tool` {tool, args} calls a tool by name (shell, web_fetch, read_file, write_file, edit_file, delegate, an mcp__ tool, or while TypeSafe is connected typesafe_yes_no {content, question}, a quick yes/no with `yes_probability`); `code` {script} runs a Rhai script, its last value is the result; `generate` {instruction, reply?: [{name, kind: text|number|yes_no|list}]} asks the model one narrow thing; `decide` {question, options, input?}; `for_each` {over, as?, steps}; `parallel` {branches: [{name, steps}]}; `if` {cond, then, else}; `set` {values}; `try` {steps, retries?, catch?}. `bind` names a step's result (it is the step's `id` when you leave it out); later steps read it as {{name}} or {{name.field}} in text (`args` values such as \"id\": \"{{msg.id}}\", and `instruction`), and as plain `name` or `name.field` in Rhai fields (`over`, `cond`, `script`). Rhai is not JavaScript: declare with `let`, use `.len()` not `.length`, `.push(x)`, closures `|h| h.name == \"Subject\"` not `=>`, `if x != () {}` not `?.` or `||` defaults, and `for item in list { ... }`. In `for_each`, `item` is the current one. For a big list: `tool` to fetch, `code` to drop what plainly does not matter, `for_each` with a yes_no `generate` for what needs judgment, `code` to collect. End with a `code` step that returns a short result: the last step's value is all you get, cut at 8,000 characters. It cannot ask the person; a step a rule questions waits for them as usual.".into(),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "steps": {"type": "array", "items": {"type": "object"}, "description": "The steps, run in order."}
+            },
+            "required": ["steps"]
+        }),
+    }
+}
+
+/// A line saying what a script is, for lists: its steps.
+pub(crate) fn script_summary(args: &str) -> String {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let steps = v.get("steps").and_then(Value::as_array);
+    match steps {
+        Some(steps) => format!("{} steps", steps.len()),
+        None => args.to_owned(),
+    }
+}
+
+/// The steps of a script call as a definition, or why they cannot run. A script runs at once and
+/// on its own, so nothing in it may pause or hand on to a saved workflow.
+fn parse_script(args: &str) -> Result<Definition, String> {
+    let v: Value =
+        serde_json::from_str(args).map_err(|_| "the arguments were not JSON.".to_owned())?;
+    // Some models send the list as text holding JSON; it is read as the list it holds.
+    let mut steps = match v.get("steps") {
+        Some(Value::String(text)) => serde_json::from_str(text).map_err(|e| bad_json(text, &e))?,
+        Some(list) => list.clone(),
+        None => return Err("give `steps`, a list of steps.".to_owned()),
+    };
+    if let Some(inner) = steps.get("steps").filter(|_| steps.is_object()) {
+        steps = inner.clone();
+    }
+    if !steps.is_array() {
+        return Err("`steps` must be a JSON array of step objects.".to_owned());
+    }
+    name_results(&mut steps);
+    let mut known = std::collections::BTreeSet::from(["item".to_owned()]);
+    known_names(&steps, &mut known);
+    forgive(&mut steps, &known);
+    let def: Definition = serde_json::from_value(json!({ "steps": steps }))
+        .map_err(|e| format!("the steps are not valid: {e}"))?;
+    if def.steps.is_empty() {
+        return Err("`steps` is empty.".to_owned());
+    }
+    let mut refused = None;
+    crate::workflow::definition::each_step(&def.steps, &mut |s| {
+        if s.kind == crate::workflow::definition::WAIT
+            || s.kind == crate::workflow::definition::FLOW
+        {
+            refused.get_or_insert(s.kind.clone());
+        }
+    });
+    if let Some(kind) = refused {
+        return Err(format!("a script cannot use a {kind} step."));
+    }
+    crate::workflow::definition::validate(&def).map_err(|bad| bad.join(" "))?;
+    Ok(def)
+}
+
+/// Why text sent as `steps` is not JSON, with where: a model that is only told "not a list" sends
+/// the same text again.
+fn bad_json(text: &str, e: &serde_json::Error) -> String {
+    let at = text
+        .lines()
+        .take(e.line().saturating_sub(1))
+        .map(|l| l.len() + 1)
+        .sum::<usize>()
+        + e.column().saturating_sub(1);
+    let start = text.floor_char_boundary(at.saturating_sub(60));
+    let end = text.ceil_char_boundary((at + 20).min(text.len()));
+    format!(
+        "`steps` is not valid JSON: {e}, here: …{}… Check that every {{ and [ is closed; send `steps` as an array, not as text.",
+        &text[start..end]
+    )
+}
+
+/// Gives each step that has a result and no `bind` its `id` as the name, so a script that forgets
+/// `bind` still finds its results. Walks the steps inside steps, and not the arguments.
+fn name_results(v: &mut Value) {
+    match v {
+        Value::Array(list) => list.iter_mut().for_each(name_results),
+        Value::Object(step) => {
+            let valued = [
+                "tool", "generate", "decide", "code", "for_each", "parallel", "http",
+            ];
+            let named = step.get("id").and_then(Value::as_str).filter(|id| {
+                id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !id.starts_with(|c: char| c.is_ascii_digit())
+            });
+            let kind = step.get("kind").and_then(Value::as_str);
+            if let (Some(id), Some(kind)) = (named, kind)
+                && valued.contains(&kind)
+                && !step.contains_key("bind")
+            {
+                let id = id.to_owned();
+                step.insert("bind".into(), Value::String(id));
+            }
+            for (key, inner) in step.iter_mut() {
+                if !matches!(key.as_str(), "args" | "values") {
+                    name_results(inner);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names steps give their results, and the names `for_each` gives its items.
+fn known_names(v: &Value, out: &mut std::collections::BTreeSet<String>) {
+    match v {
+        Value::Array(list) => list.iter().for_each(|s| known_names(s, out)),
+        Value::Object(step) => {
+            for key in ["bind", "as"] {
+                out.extend(step.get(key).and_then(Value::as_str).map(str::to_owned));
+            }
+            for (key, inner) in step {
+                if !matches!(key.as_str(), "args" | "values") {
+                    known_names(inner, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Mends the two ways a script mixes up where `{{ }}` goes, which models do both ways: braces
+/// around a Rhai field (`over`, `cond`, `on`) are taken off, and a text value in `args` that is
+/// only the name of a result or item (`"msg.id"`) is put in braces, as it was meant.
+fn forgive(v: &mut Value, known: &std::collections::BTreeSet<String>) {
+    match v {
+        Value::Array(list) => {
+            show_what_was_read(list);
+            list.iter_mut().for_each(|s| forgive(s, known));
+        }
+        Value::Object(step) => {
+            for key in ["over", "cond", "on"] {
+                if let Some(Value::String(text)) = step.get_mut(key)
+                    && let Some(inner) = text
+                        .trim()
+                        .strip_prefix("{{")
+                        .and_then(|t| t.strip_suffix("}}"))
+                {
+                    *text = inner.trim_start_matches('=').trim().to_owned();
+                }
+            }
+            if let Some(args) = step.get_mut("args") {
+                wrap_names(args, known);
+            }
+            for (key, inner) in step.iter_mut() {
+                if !matches!(key.as_str(), "args" | "values") {
+                    forgive(inner, known);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A `generate` that names nothing in its instruction sees nothing: it is asked about an email or
+/// a page it was never shown, and says no to all. It is given the step before it, which is what
+/// was just read.
+fn show_what_was_read(steps: &mut [Value]) {
+    let mut read: Option<String> = None;
+    for step in steps {
+        let Some(map) = step.as_object_mut() else {
+            continue;
+        };
+        let kind = map
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if kind == "generate"
+            && let Some(name) = &read
+            && let Some(Value::String(text)) = map.get_mut("instruction")
+            && !text.contains("{{")
+        {
+            text.push_str(&format!("\n\n{{{{{name}}}}}"));
+        }
+        if matches!(kind.as_str(), "tool" | "code" | "http")
+            && let Some(bind) = map.get("bind").and_then(Value::as_str)
+        {
+            read = Some(bind.to_owned());
+        }
+    }
+}
+
+fn wrap_names(v: &mut Value, known: &std::collections::BTreeSet<String>) {
+    match v {
+        Value::String(text) => {
+            let path = text.split('.').all(|part| {
+                !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+            if path && known.contains(text.split('.').next().unwrap_or_default()) {
+                *text = format!("{{{{{text}}}}}");
+            }
+        }
+        Value::Array(list) => list.iter_mut().for_each(|s| wrap_names(s, known)),
+        Value::Object(map) => map.values_mut().for_each(|s| wrap_names(s, known)),
+        _ => {}
+    }
+}
+
+/// What a script's run says to the agent: its result, cut to size, or why it failed.
+fn script_finish(o: &Outcome) -> Finish {
+    match &o.ending {
+        Ending::Succeeded => {
+            let (shown, cut) = crate::runs::clip(o.output.trim(), SCRIPT_RESULT);
+            Finish::Done(match (shown.is_empty(), cut) {
+                (true, _) => "The script ran and gave no result.".to_owned(),
+                (false, false) => shown,
+                (false, true) => format!(
+                    "{shown}\n[cut: the result was {} bytes; make the last step return less]",
+                    o.output.trim().len()
+                ),
+            })
+        }
+        Ending::Failed { step, error } => {
+            Finish::Done(format!("The script failed at step {step}: {error}"))
+        }
+        Ending::Waiting { step, .. } => {
+            Finish::Done(format!("The script stopped at step {step}, which waits."))
+        }
+        Ending::Stopped => Finish::Stopped("The person stopped the script.".to_owned()),
+    }
+}
 
 pub(crate) fn ask(
     p: &Prep,
@@ -165,9 +409,12 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
     let place = crate::guard::Place {
         root: p.shell_dir.clone(),
         home: dirs::home_dir(),
+        blocked: p.blocked.clone(),
     };
     let run_tool = |name: &str, args: &Value, outside: Option<&str>| -> ToolOutcome {
-        // A step is one you saved, not one a model chose, so outside text does not hold it.
+        // A step is one you saved, not one a model chose, so outside text does not hold it, unless
+        // a model wrote the steps with outside text in view.
+        let outside = outside.or(p.outside.as_deref());
         let (_, found) = p.guard.review(
             &crate::guard::Hidden::default(),
             name,
@@ -258,6 +505,32 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
                     error: Some(why),
                     ..ToolOutcome::default()
                 },
+            };
+        }
+        if crate::typesafe::is_tool(name) {
+            let Some(key) = &p.typesafe else {
+                return ToolOutcome {
+                    error: Some("TypeSafe is not connected.".to_owned()),
+                    ..ToolOutcome::default()
+                };
+            };
+            let text = crate::typesafe::run(
+                crate::typesafe::BASE,
+                key,
+                p.workdir.as_deref(),
+                name,
+                &args.to_string(),
+            );
+            if text.starts_with("Error:") {
+                return ToolOutcome {
+                    error: Some(text),
+                    ..ToolOutcome::default()
+                };
+            }
+            // The answer is JSON, so later steps read its fields (`yes_probability`, …).
+            return ToolOutcome {
+                value: serde_json::from_str(&text).unwrap_or(Value::String(text)),
+                ..ToolOutcome::default()
             };
         }
         if name == crate::tools::SHELL {
@@ -393,6 +666,15 @@ impl App {
             .roster
             .agent_ref(agent_id)
             .ok_or("That agent is gone.")?;
+        self.prepare_model_for(agent, chosen)
+    }
+
+    /// The same for an agent that need not be in the roster, such as a lead's throwaway researcher.
+    pub(crate) fn prepare_model_for(
+        &self,
+        agent: &crate::agents::Agent,
+        chosen: Option<&crate::models::ModelRef>,
+    ) -> Result<Prep, String> {
         let ModelStatus::Ready(model) = self.providers.status(chosen.or(agent.model.as_ref()))
         else {
             return Err(format!(
@@ -416,9 +698,12 @@ impl App {
             guard: self.guard.clone(),
             asker: crate::guard::ask::Asker::nobody(),
             trust_folder: agent.trust_workdir,
+            blocked: agent.blocked.clone(),
             mcp: Vec::new(),
             flows: Vec::new(),
             crew: Vec::new(),
+            outside: None,
+            typesafe: None,
         })
     }
 
@@ -479,6 +764,18 @@ impl App {
                 target: self.mcp_target_for(&server.id)?,
                 account,
             });
+        }
+        if let Some(name) = used.iter().find(|t| crate::typesafe::is_tool(t)) {
+            let key = match (&self.store, self.typesafe_connected()) {
+                (Some(db), true) => db
+                    .provider_key(crate::providers::TYPESAFE)
+                    .map_err(|e| e.to_string())?,
+                _ => None,
+            };
+            let key = key.ok_or_else(|| {
+                format!("This workflow uses {name}, but TypeSafe is not connected. Connect it on the Providers page.")
+            })?;
+            prep.typesafe = Some(key);
         }
         let team = self.team_named(def, &prep.flows);
         prep.crew = self.crew_for(agent_id, own.unwrap_or_default(), &team)?;
@@ -1132,6 +1429,53 @@ impl App {
         }
     }
 
+    /// The agent ran a script of steps: it works on a worker like a workflow, and only its last
+    /// step's value goes back to the agent. Always handles the call, even to refuse it.
+    pub(crate) fn start_script_call(&mut self, sid: &str, call_id: &str, args: &str) {
+        let Some(agent_id) = self.roster.owner_of(sid).map(|a| a.id.clone()) else {
+            return;
+        };
+        let def = parse_script(args);
+        let prepared = def.and_then(|def| {
+            let mut prep = self.prep_run(
+                &def,
+                None,
+                &agent_id,
+                crate::guard::ask::Where::Chat(sid.to_owned()),
+                "script",
+            )?;
+            prep.outside = self.tainted.get(sid).cloned();
+            let inputs = engine::bind_inputs(&def, &Map::new())?;
+            Ok((def, prep, inputs))
+        });
+        let (def, prep, inputs) = match prepared {
+            Ok(p) => p,
+            Err(why) => {
+                self.resolve(sid, call_id, format!("Error: {why}"), true);
+                self.start_next_command(sid);
+                return;
+            }
+        };
+        let cancel = self.track(sid, call_id);
+        let (sid, id) = (sid.to_owned(), call_id.to_owned());
+        let model = ModelRef::new(&prep.provider, &prep.model);
+        let agent_name = self
+            .roster
+            .agent_ref(&agent_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        self.spawn_flow(prep, def, Go::Fresh(inputs), cancel, None, move |app, o| {
+            let who = Counted {
+                model: &model,
+                agent_id: &agent_id,
+                agent_name: &agent_name,
+                source: Source::Workflow,
+            };
+            app.count_flow_usage(now(), o.usage, &who);
+            app.command_done(&sid, &id, script_finish(&o));
+        });
+    }
+
     /// The agent called `run_workflow`: starts it as a background job like a command, so the
     /// result goes back to the agent when it ends. Always handles the call, even to refuse it.
     pub(crate) fn start_workflow_call(&mut self, sid: &str, call_id: &str, args: &str) {
@@ -1510,6 +1854,102 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn the_example_scripts_given_for_a_list_and_judge_task_are_valid_and_keep_the_best() {
+        for example in [
+            crate::delegate::BULK_EXAMPLE,
+            crate::delegate::BULK_EXAMPLE_TYPESAFE,
+        ] {
+            let json = example.replace("<list tool>", "mcp__gmail__search");
+            let def = parse_script(&json).unwrap();
+            // The last step, over rounds as the loop gives them.
+            let round = |n: usize, yes: bool| json!({"subject": format!("s{n}"), "from": "f", "important": yes, "p": if yes { 0.9 - n as f64 / 100.0 } else { 0.1 }});
+            let each: Vec<Value> = (0..8).map(|n| round(n, n % 4 != 3)).collect();
+            let scope = crate::workflow::template::Scope::from([("each".to_owned(), json!(each))]);
+            let ev = crate::workflow::expr::Evaluator::new(&Arc::new(AtomicBool::new(false)));
+            let top = ev
+                .run(&scope, def.steps[2].script.as_deref().unwrap())
+                .unwrap();
+            let subjects: Vec<&str> = top
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["subject"].as_str().unwrap())
+                .collect();
+            assert_eq!(subjects, ["s0", "s1", "s2", "s4", "s5"], "{example}");
+        }
+    }
+
+    #[test]
+    fn a_judging_step_that_names_nothing_is_shown_what_the_step_before_it_read() {
+        let def = parse_script(
+            r#"{"steps":[{"id":"each","kind":"for_each","over":"[1,2]","as":"n","steps":[
+                {"id":"read","kind":"code","script":"n"},
+                {"id":"judge","kind":"generate","instruction":"Is it big?"},
+                {"id":"judge2","kind":"generate","instruction":"Is {{read}} odd?"}]}]}"#,
+        )
+        .unwrap();
+        let body = &def.steps[0].steps;
+        assert_eq!(
+            body[1].instruction.as_deref(),
+            Some("Is it big?\n\n{{read}}")
+        );
+        assert_eq!(body[2].instruction.as_deref(), Some("Is {{read}} odd?"));
+    }
+
+    #[test]
+    fn steps_sent_as_text_holding_json_are_read_as_the_list() {
+        let steps = r#"[{"id":"a","kind":"code","script":"1"}]"#;
+        let as_text = json!({ "steps": steps }).to_string();
+        assert_eq!(parse_script(&as_text).unwrap().steps.len(), 1);
+        let wrapped = json!({ "steps": format!("{{\"steps\":{steps}}}") }).to_string();
+        assert_eq!(parse_script(&wrapped).unwrap().steps.len(), 1);
+        let bad = json!({ "steps": "not json" }).to_string();
+        assert!(parse_script(&bad).unwrap_err().contains("not valid JSON"));
+        // A step left open is shown where it is.
+        let open = json!({ "steps": r#"[{"id":"a","kind":"tool","args":{"x":1}, {"id":"b"}]"# })
+            .to_string();
+        let told = parse_script(&open).unwrap_err();
+        assert!(told.contains(r#"{"x":1}, {"#), "{told}");
+    }
+
+    #[test]
+    fn a_script_that_mixes_up_where_braces_go_is_mended() {
+        let def = parse_script(
+            r#"{"steps":[{"id":"list","kind":"code","script":"[1,2]"},
+                {"id":"each","kind":"for_each","over":"{{list}}","as":"n","steps":[
+                    {"id":"one","kind":"tool","tool":"shell","args":{"command":"echo n","note":"keep me"}}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(def.steps[1].over.as_deref(), Some("list"));
+        let args = def.steps[1].steps[0].args.as_ref().unwrap();
+        assert_eq!(args["command"], "echo n");
+        assert_eq!(args["note"], "keep me");
+        let def = parse_script(
+            r#"{"steps":[{"id":"list","kind":"code","script":"[1]"},
+                {"id":"each","kind":"for_each","over":"list","as":"n","steps":[
+                    {"id":"one","kind":"tool","tool":"shell","args":{"command":"n"}}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            def.steps[1].steps[0].args.as_ref().unwrap()["command"],
+            "{{n}}"
+        );
+    }
+
+    #[test]
+    fn a_script_step_without_bind_is_bound_to_its_id_even_inside_a_loop() {
+        let def = parse_script(
+            r#"{"steps":[{"id":"list","kind":"code","script":"[1,2]"},
+                {"id":"each","kind":"for_each","over":"list","steps":[
+                    {"id":"one","kind":"code","script":"item"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(def.steps[0].bind.as_deref(), Some("list"));
+        assert_eq!(def.steps[1].bind.as_deref(), Some("each"));
+        assert_eq!(def.steps[1].steps[0].bind.as_deref(), Some("one"));
+    }
+
     #[test]
     fn a_step_can_call_an_mcp_tool_and_a_tool_that_is_gone_or_off_stops_the_run_before_it_starts() {
         let script =
@@ -2076,6 +2516,78 @@ mod tests {
             .list_workflow_runs(&w.id, 10)
             .unwrap();
         assert_eq!((runs.len(), runs[0].started_by.as_str()), (1, "agent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_runs_its_steps_on_its_own_and_only_the_last_value_reaches_the_agent() {
+        let db = TempDb::new();
+        let steps = json!([
+            {"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "printf 'noi''se-one\\nkeep-two\\nnoi''se-three'"}, "bind": "out"},
+            {"id": "b", "kind": "code", "script": "out.stdout.split(\"\\n\").filter(|l| l.starts_with(\"keep\"))"}
+        ]);
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    EVENTS,
+                    call_stream("script", json!({ "steps": steps })),
+                ),
+                (200, EVENTS, text_stream("Done.")),
+            ],
+        );
+        app.composer.edit = TextEdit::new("filter it");
+        app.send();
+        assert!(
+            seen.recv().unwrap().contains("\"script\""),
+            "offered to every agent"
+        );
+        let second = seen.recv().unwrap();
+        assert!(second.contains("keep-two"), "{second}");
+        assert!(
+            !second.contains("noise-one") && !second.contains("noise-three"),
+            "what the steps read stays out of the chat: {second}"
+        );
+        assert!(app.commands.is_empty() && !app.busy());
+    }
+
+    #[test]
+    fn a_script_that_cannot_run_is_refused_in_words_the_agent_can_act_on() {
+        for (steps, said) in [
+            (json!([]), "empty"),
+            (
+                json!([{"id": "w", "kind": "wait", "seconds": 5}]),
+                "cannot use a wait step",
+            ),
+            (
+                json!([{"id": "t", "kind": "tool", "tool": "no_such_tool", "args": {}}]),
+                "not a tool a workflow can use",
+            ),
+            (
+                json!([{"id": "t", "kind": "tool", "tool": "typesafe_yes_no", "args": {"content": "x", "question": "q"}}]),
+                "typesafe is not connected",
+            ),
+        ] {
+            let db = TempDb::new();
+            let (mut app, seen) = app_with_server(
+                &db,
+                vec![
+                    (
+                        200,
+                        EVENTS,
+                        call_stream("script", json!({ "steps": steps })),
+                    ),
+                    (200, EVENTS, text_stream("Sorry.")),
+                ],
+            );
+            app.composer.edit = TextEdit::new("go");
+            app.send();
+            let _ = seen.recv().unwrap();
+            let second = seen.recv().unwrap();
+            assert!(second.contains(said), "{said}: {second}");
+            assert!(app.commands.is_empty());
+        }
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //! decided on its card, and the packs are switched on the Guardrails screen.
 
 use super::{
-    Action, Hidden, LIMITS, Limits, PACKS, Pack, Place, Trip, TripState, WAIT, WORDS, title,
+    Action, BLOCKED, Blocked, Hidden, LIMITS, Limits, PACKS, Pack, Place, Trip, TripState, WAIT,
+    WORDS, title,
 };
 use crate::app::App;
 use crate::completion::{Role, Turn};
@@ -22,6 +23,21 @@ impl App {
             .set_words(text.split(['\n', ',']).map(str::to_owned).collect());
         let words = self.guard.words().to_vec();
         self.save("the guardrails", |db| db.set_setting(WORDS, &words));
+    }
+
+    /// Sets the blocked places, and saves them.
+    pub fn set_blocked_places(&mut self, places: Vec<Blocked>) {
+        self.guard.set_blocked(places);
+        let saved = self.guard.blocked();
+        self.save("the guardrails", |db| db.set_setting(BLOCKED, &saved));
+    }
+
+    /// Adds `path` to the blocked places (everything under it, nothing allowed), and saves them.
+    pub fn block_place(&mut self, path: &str) {
+        let mut places = self.guard.blocked();
+        places.push(Blocked::new(path, super::blocked::Keep::Everything));
+        self.set_blocked_places(places);
+        self.guard_blocked = rune::TextEdit::new(super::blocked::render(&self.guard.blocked()));
     }
 
     /// Sets the limits on what one channel person may send, and saves them.
@@ -98,6 +114,11 @@ impl App {
         Place {
             root: self.workdir_of(sid),
             home: dirs::home_dir(),
+            blocked: self
+                .roster
+                .owner_of(sid)
+                .map(|a| a.blocked.clone())
+                .unwrap_or_default(),
         }
     }
 

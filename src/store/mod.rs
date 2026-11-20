@@ -108,7 +108,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 28] = [
+const MIGRATIONS: [&str; 29] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -137,6 +137,7 @@ const MIGRATIONS: [&str; 28] = [
     include_str!("../../db/migrations/026_manage_tools.sql"),
     include_str!("../../db/migrations/027_manage_tools_name.sql"),
     include_str!("../../db/migrations/028_workflow_publish.sql"),
+    include_str!("../../db/migrations/029_blocked_places.sql"),
 ];
 
 const QUERY_FILES: [&str; 11] = [
@@ -211,6 +212,14 @@ pub fn default_location() -> Result<Option<PathBuf>> {
         Ok(p) => Ok(Some(PathBuf::from(p))),
         Err(_) => default_path().map(Some),
     }
+}
+
+/// The folder the user's database is in; `None` for a throwaway one in memory.
+pub fn data_dir() -> Option<PathBuf> {
+    default_location()
+        .ok()
+        .flatten()
+        .and_then(|db| db.parent().map(PathBuf::from))
 }
 
 fn default_path() -> Result<PathBuf> {
@@ -872,6 +881,13 @@ mod tests {
 
     #[test]
     fn migrating_keeps_the_managing_tools_on_agents_made_before_but_not_on_team_members() {
+        // What migration 26 gave agents made before: the tools are every agent's now, but a saved
+        // list still names them.
+        const MANAGE: [&str; 3] = [
+            crate::schedule::tool::NAME,
+            crate::mcp::tool::NAME,
+            crate::agent_tool::NAME,
+        ];
         let mcp = crate::mcp::tool::NAME;
         let (dir, s) = migrated_from(
             25,
@@ -883,13 +899,13 @@ mod tests {
         let agents = s.load_agents().unwrap();
         let mut want = vec!["mcp__x__y".to_owned(), mcp.to_owned()];
         want.extend(
-            crate::tools::MANAGE
+            MANAGE
                 .iter()
                 .filter(|t| **t != mcp)
                 .map(|t| (*t).to_owned()),
         );
         assert_eq!(agents[0].tools, want, "added once each, after what it had");
-        for m in crate::tools::MANAGE {
+        for m in MANAGE {
             assert!(agents[0].tools.iter().any(|t| t == m), "{m}");
         }
         assert!(agents[0].subagents[0].tools.is_empty());

@@ -26,6 +26,7 @@ mod runs;
 pub(crate) mod schedules;
 mod settings;
 mod sidebar;
+pub mod text_menu;
 pub(crate) mod usage;
 mod workflow_editor;
 mod workflow_graph;
@@ -86,6 +87,7 @@ pub fn wait_for_reply_picture(src: &str, folder: &std::path::Path) {
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
+    s.sync_panes();
     let k = s.look.kit();
     // Menus, selects and dialogs mount above everything, so each screen adds to this.
     let mut layer = Vec::new();
@@ -103,7 +105,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Mcp => ("MCP".to_owned(), mcp::screen(s, cx, &k)),
         Route::Extensions => ("Extensions".to_owned(), extensions::screen(s, &k)),
         Route::Channels => ("Channels".to_owned(), channels::screen(s, &k, &mut layer)),
-        Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k)),
+        Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k, &mut layer)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
     };
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.
@@ -136,6 +138,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .iter()
         .any(|a| a.family_status() == crate::model::AgentStatus::Waiting);
     agent_form::confirm_delete(s, &k, &mut layer);
+    text_menu::build(s, &k, &mut layer);
     let sidebar = sidebar::build(s, &k, &mut layer);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar)

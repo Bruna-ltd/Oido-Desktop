@@ -34,6 +34,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(24.0)
                 .child(section("Appearance", vec![theme_row(s, k, layer)], k))
                 .child(section("Schedules", vec![schedules_row(s, k)], k))
+                .child(section("Context", vec![router_row(s, k)], k))
                 .child(section("Browser", browser_rows(s, k), k))
                 .child(section("Usage", vec![clear_usage_row(s, k)], k))
                 .child(section(
@@ -228,6 +229,20 @@ fn browser_rows(s: &App, k: &Kit) -> Vec<El> {
     ]
 }
 
+fn router_row(s: &App, k: &Kit) -> El {
+    setting(
+        "route-bulk",
+        "Sort messages with TypeSafe",
+        "TypeSafe reads each message you send first. When it asks to read and judge many items, the agent reads them in a script, so they stay out of the chat. Needs TypeSafe connected; your message goes to TypeSafe.",
+        Switch::new(s.route_bulk)
+            .label("Sort messages with TypeSafe")
+            .hide_label()
+            .on_toggle(|s: &mut App| s.set_route_bulk(!s.route_bulk))
+            .build(k),
+        k,
+    )
+}
+
 fn schedules_row(s: &App, k: &Kit) -> El {
     setting(
         "run-schedules",
@@ -257,6 +272,11 @@ fn status_line(u: &Updates) -> String {
 
 /// A titled group of setting rows on one card, rules between them.
 pub(super) fn section(title: &str, rows: Vec<El>, k: &Kit) -> El {
+    section_with(title, None, rows, k)
+}
+
+/// A [`section`] with a picture before its title.
+pub(super) fn section_with(title: &str, lead: Option<El>, rows: Vec<El>, k: &Kit) -> El {
     let c = &k.c;
     let mut card = col()
         .w_full()
@@ -276,10 +296,16 @@ pub(super) fn section(title: &str, rows: Vec<El>, k: &Kit) -> El {
         .role("group")
         .label(title.to_owned())
         .child(
-            text(title.to_owned())
-                .font(k.ty.body_medium)
-                .color(c.text_base)
-                .px(4.0),
+            row()
+                .gap(8.0)
+                .center_y()
+                .px(4.0)
+                .children(lead)
+                .child(
+                    text(title.to_owned())
+                        .font(k.ty.body_medium)
+                        .color(c.text_base),
+                ),
         )
         .child(card)
 }
