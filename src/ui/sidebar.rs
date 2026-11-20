@@ -22,7 +22,7 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             SidebarSection::new("Pinned")
                 .key("pinned")
                 .collapsed(s.pinned_closed)
-                .on_toggle(|s: &mut App, _| s.pinned_closed ^= true)
+                .on_toggle(|s: &mut App, _| s.toggle_pinned_section())
                 .rows(rows),
         );
     }
@@ -38,7 +38,7 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         SidebarSection::new("Agents")
             .key("agents")
             .collapsed(s.others_closed)
-            .on_toggle(|s: &mut App, _| s.others_closed ^= true)
+            .on_toggle(|s: &mut App, _| s.toggle_others_section())
             .action(new_agent)
             .rows(rows),
     );
@@ -137,7 +137,7 @@ fn controls(s: &App, a: &Agent, target: &Target, member: bool, k: &Kit, layer: &
                 } else {
                     "Show team members"
                 })
-                .on_press(move |s: &mut App| s.roster.toggle_team(&id))
+                .on_press(move |s: &mut App| s.toggle_team(&id))
                 .build(k)
                 .key(format!("team-{}", a.id)),
             );

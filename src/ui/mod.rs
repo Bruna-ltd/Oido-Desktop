@@ -86,6 +86,7 @@ pub fn wait_for_reply_picture(src: &str, folder: &std::path::Path) {
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
+    s.sync_panes();
     let k = s.look.kit();
     // Menus, selects and dialogs mount above everything, so each screen adds to this.
     let mut layer = Vec::new();

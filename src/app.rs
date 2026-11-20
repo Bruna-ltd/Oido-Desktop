@@ -246,6 +246,8 @@ pub struct App {
     pub store: Option<Store>,
     /// The window has the keyboard focus, so the person is looking at it: no notifications then.
     pub focused: bool,
+    /// The side panes as last seen, to save them when they change.
+    pub(crate) panes_seen: std::cell::Cell<Option<persist::Panes>>,
 }
 
 /// The running app, for worker threads to hand their results back through. Unset in tests and
@@ -416,7 +418,9 @@ impl App {
 
             store,
             focused: false,
+            panes_seen: Default::default(),
         };
+        persist::restore_folds(&mut app);
         app.settle_interrupted_commands();
         app.reload_skills();
         app.load_workflows();
