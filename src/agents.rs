@@ -36,6 +36,9 @@ pub struct Agent {
     /// What it answers about on channels; a channel message naming none of them is turned away
     /// (see `guard::intake`). Empty, it answers anything. Only you can change it.
     pub channel_topics: Vec<String>,
+    /// Folders and files no tool of this agent may reach, beside the ones blocked for every agent
+    /// (see `guard::blocked`). Only you can change it, never an agent.
+    pub blocked: Vec<crate::guard::Blocked>,
     /// For a team member: when its lead should hand it a task. The lead reads this to choose.
     pub description: String,
     pub active: usize,
@@ -59,6 +62,7 @@ impl Agent {
             workdir: None,
             trust_workdir: true,
             channel_topics: Vec::new(),
+            blocked: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", Vec::new())],
@@ -206,8 +210,12 @@ pub struct Form {
     pub trust_workdir: bool,
     /// Its channel topics, as typed: split on commas when saved.
     pub topics: TextEdit,
+    /// Its blocked places, as typed (see `guard::blocked::parse`).
+    pub blocked: TextEdit,
     pub description: TextEdit,
     pub folders: crate::folders::Browser,
+    /// The browser that adds a blocked place.
+    pub places: crate::folders::Browser,
     pub template: Option<usize>,
     pub advanced: bool,
     pub picker: bool,
@@ -230,8 +238,10 @@ impl Form {
             workdir: None,
             trust_workdir: true,
             topics: TextEdit::new(""),
+            blocked: TextEdit::new(""),
             description: TextEdit::new(""),
             folders: crate::folders::Browser::default(),
+            places: crate::folders::Browser::for_places(),
             template: None,
             advanced: false,
             picker: false,
@@ -495,12 +505,14 @@ impl Roster {
         form.workdir = a.workdir.clone();
         form.trust_workdir = a.trust_workdir;
         form.topics = TextEdit::new(a.channel_topics.join(", "));
+        form.blocked = TextEdit::new(crate::guard::blocked::render(&a.blocked));
         form.description = TextEdit::new(a.description.clone());
         form.advanced = !(a.skills.is_empty()
             && a.tools.is_empty()
             && a.workdir.is_none()
             && a.trust_workdir
-            && a.channel_topics.is_empty());
+            && a.channel_topics.is_empty()
+            && a.blocked.is_empty());
         form.name.focused = true;
         self.form = form;
         self.editing = Some(FormKind::Edit(t.clone()));
@@ -567,6 +579,7 @@ impl Roster {
             a.workdir = f.workdir.clone();
             a.trust_workdir = f.trust_workdir;
             a.channel_topics = crate::guard::topics(&f.topics.text);
+            a.blocked = crate::guard::blocked::parse(&f.blocked.text);
             a.description = f.description.text.trim().to_owned();
         };
         let target = match kind {

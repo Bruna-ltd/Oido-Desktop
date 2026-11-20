@@ -176,7 +176,7 @@ fn shown(s: &App, tool: &str, summary: &str) -> String {
 }
 
 /// The Guardrails screen: each pack of rules, with its switch.
-pub fn screen(s: &App, k: &Kit) -> El {
+pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let rows = Pack::ALL
         .iter()
         .map(|&pack| {
@@ -218,6 +218,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
                 )
                 .child(section("Rules", rows, k))
                 .child(section("Blocked words", vec![words_row(s, k)], k))
+                .child(section("Blocked places", vec![places_row(s, k, layer)], k))
                 .child(section(
                     "Channels",
                     vec![length_row(s, k), rate_row(s, k)],
@@ -372,6 +373,62 @@ fn words_row(s: &App, k: &Kit) -> El {
                         })
                         .build(k)
                         .key("guard-words-save"),
+                ),
+        )
+}
+
+/// The folders and files no agent's tool may reach.
+fn places_row(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    let c = &k.c;
+    let saved = crate::guard::blocked::render(&s.guard.blocked());
+    let changed = s.guard_blocked.text.trim() != saved;
+    col()
+        .key("setting-guard-places")
+        .w_full()
+        .padding(16.0)
+        .gap(10.0)
+        .child(
+            text("Folders and files no agent may read, change or send, whatever it is working on: its file tools, its commands (any word that names the place) and tools from MCP servers. Split by commas; add (reading) to stop only reading and sending, (changing) to stop only changing. A command can still reach a place by a name it cannot read, such as a variable or a pattern.")
+                .font(k.ty.small)
+                .color(c.text_muted)
+                .wrap(),
+        )
+        .child(
+            rune::row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    col().grow(1.0).min_w(0.0).child(
+                        TextInput::new(&s.guard_blocked)
+                            .placeholder("e.g. ~/.ssh, ~/Documents/taxes, /srv/keys (reading)")
+                            .label("Blocked places, split by commas")
+                            .on_edit(|s: &mut App| &mut s.guard_blocked)
+                            .build(k)
+                            .w_full()
+                            .key("guard-places-input"),
+                    ),
+                )
+                .child(super::folder_picker::add_place(
+                    s,
+                    super::folder_picker::Target::Places,
+                    k,
+                    layer,
+                ))
+                .child(
+                    Button::new("Save")
+                        .variant(ButtonVariant::Outline)
+                        .control_size(ControlSize::Small)
+                        .disabled(!changed)
+                        .on_press(|s: &mut App| {
+                            let places = crate::guard::blocked::parse(&s.guard_blocked.text);
+                            s.set_blocked_places(places);
+                            s.guard_blocked = rune::TextEdit::new(crate::guard::blocked::render(
+                                &s.guard.blocked(),
+                            ));
+                        })
+                        .build(k)
+                        .key("guard-places-save"),
                 ),
         )
 }

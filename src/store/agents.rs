@@ -74,6 +74,7 @@ impl Store {
                     workdir: r.get(11)?,
                     trust_workdir: r.get::<_, i64>(13)? != 0,
                     channel_topics: Vec::new(),
+                    blocked: Vec::new(),
                     description: r.get(12)?,
                     avatar: Avatar::from_columns(r.get(15)?, r.get(16)?),
                     active: 0,
@@ -86,13 +87,15 @@ impl Store {
                     r.get::<_, String>(8)?,
                     r.get::<_, i64>(9)?,
                     r.get::<_, String>(14)?,
+                    r.get::<_, String>(17)?,
                 ))
             })?;
             for row in rows {
-                let (parent, mut agent, skills, tools, active, topics) = row?;
+                let (parent, mut agent, skills, tools, active, topics, blocked) = row?;
                 agent.skills = serde_json::from_str(&skills)?;
                 agent.tools = serde_json::from_str(&tools)?;
                 agent.channel_topics = serde_json::from_str(&topics)?;
+                agent.blocked = serde_json::from_str(&blocked)?;
                 let mut chats = sessions.remove(&agent.id).unwrap_or_default();
                 if chats.is_empty() {
                     let first = chat("New chat", Vec::new());
@@ -142,6 +145,7 @@ impl Store {
                 serde_json::to_string(&a.channel_topics)?,
                 avatar_preset,
                 avatar_image,
+                serde_json::to_string(&a.blocked)?,
             ])?;
         Ok(())
     }
@@ -305,5 +309,12 @@ mod tests {
             db.load_agents().unwrap()[0].channel_topics,
             ["billing", "refunds"]
         );
+        assert!(db.load_agents().unwrap()[0].blocked.is_empty());
+        a.blocked = vec![crate::guard::Blocked::new(
+            "~/taxes",
+            crate::guard::blocked::Keep::Reading,
+        )];
+        db.save_agent(&a, None, 0).unwrap();
+        assert_eq!(db.load_agents().unwrap()[0].blocked, a.blocked);
     }
 }

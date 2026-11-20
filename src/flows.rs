@@ -91,6 +91,8 @@ pub(crate) struct Prep {
     /// Whether the agent's working folder counts as the person's own, so what is read from it is
     /// not outside text.
     pub trust_folder: bool,
+    /// The places its agent has blocked for itself, beside the guard's.
+    pub blocked: Vec<crate::guard::Blocked>,
     /// The MCP tools the workflow calls, each with how to reach its server.
     pub mcp: Vec<McpTool>,
     /// The workflows its `flow` steps run, those they run too, and so on.
@@ -407,6 +409,7 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
     let place = crate::guard::Place {
         root: p.shell_dir.clone(),
         home: dirs::home_dir(),
+        blocked: p.blocked.clone(),
     };
     let run_tool = |name: &str, args: &Value, outside: Option<&str>| -> ToolOutcome {
         // A step is one you saved, not one a model chose, so outside text does not hold it, unless
@@ -695,6 +698,7 @@ impl App {
             guard: self.guard.clone(),
             asker: crate::guard::ask::Asker::nobody(),
             trust_folder: agent.trust_workdir,
+            blocked: agent.blocked.clone(),
             mcp: Vec::new(),
             flows: Vec::new(),
             crew: Vec::new(),

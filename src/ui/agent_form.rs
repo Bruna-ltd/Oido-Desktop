@@ -562,7 +562,8 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(skills_field(s, k, layer))
                 .child(tools_field(s, k, layer))
                 .child(workdir_field(s, k, layer))
-                .child(topics_field(s, k)),
+                .child(topics_field(s, k))
+                .child(blocked_field(s, k, layer)),
         );
     }
     out
@@ -679,6 +680,45 @@ fn topics_field(s: &App, k: &Kit) -> El {
                 .on_edit(|s: &mut App| &mut s.roster.form.topics)
                 .build(k)
                 .key("channel-topics"),
+        )
+}
+
+/// Places this agent may not reach, beside the ones blocked for every agent.
+fn blocked_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            text("Never touch")
+                .font(k.ty.body_medium)
+                .color(k.c.text_base),
+        )
+        .child(hint(
+            "Folders and files this agent's tools may not reach, split by commas, on top of the places blocked for every agent on the Guardrails screen. Add (reading) to stop only reading, (changing) to stop only changing.",
+            k,
+        ))
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    col().grow(1.0).min_w(0.0).child(
+                        TextInput::new(&s.roster.form.blocked)
+                            .placeholder("e.g. ~/Documents/taxes, ../other-project")
+                            .label("Never touch")
+                            .on_edit(|s: &mut App| &mut s.roster.form.blocked)
+                            .build(k)
+                            .w_full()
+                            .key("blocked-places"),
+                    ),
+                )
+                .child(super::folder_picker::add_place(
+                    s,
+                    super::folder_picker::Target::FormPlaces,
+                    k,
+                    layer,
+                )),
         )
 }
 

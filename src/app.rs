@@ -187,6 +187,8 @@ pub struct App {
     pub model_picker: PickerState,
     /// The composer's working-folder browser.
     pub workdir_browser: crate::folders::Browser,
+    /// The browser that adds a blocked place on the Guardrails screen.
+    pub places_browser: crate::folders::Browser,
     pub pinned_closed: bool,
     pub others_closed: bool,
     /// The right rail shows labels beside its icons.
@@ -243,6 +245,8 @@ pub struct App {
     pub intake: std::collections::HashMap<String, Vec<i64>>,
     /// The blocked words as typed on the Guardrails screen, until saved.
     pub guard_words: TextEdit,
+    /// The blocked places on the Guardrails screen, as typed.
+    pub guard_blocked: TextEdit,
     /// The hub the Oido Browser Connector extension connects to, for the `browser` tool.
     pub connector: crate::connector::Connector,
     /// The local database. `None` when it could not be opened: the app then runs without saving.
@@ -390,6 +394,7 @@ impl App {
             effort: Effort::Off,
             model_picker: PickerState::default(),
             workdir_browser: crate::folders::Browser::default(),
+            places_browser: crate::folders::Browser::for_places(),
             pinned_closed: false,
             others_closed: false,
             rail_open: false,
@@ -420,6 +425,7 @@ impl App {
             waiting: Vec::new(),
             intake: std::collections::HashMap::new(),
             guard_words: TextEdit::new(""),
+            guard_blocked: TextEdit::new(""),
             connector: crate::connector::Connector::default(),
 
             store,
@@ -438,6 +444,7 @@ impl App {
         app.load_chat_usage();
         app.load_channels();
         app.guard_words = TextEdit::new(app.guard.words().join(", "));
+        app.guard_blocked = TextEdit::new(crate::guard::blocked::render(&app.guard.blocked()));
         app
     }
 

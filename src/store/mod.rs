@@ -108,7 +108,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 28] = [
+const MIGRATIONS: [&str; 29] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -137,6 +137,7 @@ const MIGRATIONS: [&str; 28] = [
     include_str!("../../db/migrations/026_manage_tools.sql"),
     include_str!("../../db/migrations/027_manage_tools_name.sql"),
     include_str!("../../db/migrations/028_workflow_publish.sql"),
+    include_str!("../../db/migrations/029_blocked_places.sql"),
 ];
 
 const QUERY_FILES: [&str; 11] = [
@@ -211,6 +212,14 @@ pub fn default_location() -> Result<Option<PathBuf>> {
         Ok(p) => Ok(Some(PathBuf::from(p))),
         Err(_) => default_path().map(Some),
     }
+}
+
+/// The folder the user's database is in; `None` for a throwaway one in memory.
+pub fn data_dir() -> Option<PathBuf> {
+    default_location()
+        .ok()
+        .flatten()
+        .and_then(|db| db.parent().map(PathBuf::from))
 }
 
 fn default_path() -> Result<PathBuf> {

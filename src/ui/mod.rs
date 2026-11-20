@@ -105,7 +105,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Mcp => ("MCP".to_owned(), mcp::screen(s, cx, &k)),
         Route::Extensions => ("Extensions".to_owned(), extensions::screen(s, &k)),
         Route::Channels => ("Channels".to_owned(), channels::screen(s, &k, &mut layer)),
-        Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k)),
+        Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k, &mut layer)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
     };
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.

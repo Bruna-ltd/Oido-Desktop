@@ -184,6 +184,7 @@ fn helper(lead: &Agent) -> Agent {
         model: lead.model.clone(),
         workdir: lead.workdir.clone(),
         trust_workdir: lead.trust_workdir,
+        blocked: lead.blocked.clone(),
         ..Agent::blank(new_id())
     }
 }
@@ -448,6 +449,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
     let place = crate::guard::Place {
         root: job.prep.shell_dir.clone(),
         home: dirs::home_dir(),
+        blocked: job.prep.blocked.clone(),
     };
     // Its calls whose results are outside text, and what each is; and what it has in view now.
     let mut came_in: std::collections::HashMap<String, String> = std::collections::HashMap::new();

@@ -38,6 +38,7 @@ pub fn sample_agents() -> Vec<Agent> {
             workdir: None,
             trust_workdir: true,
             channel_topics: Vec::new(),
+            blocked: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![
@@ -114,6 +115,7 @@ pub fn sample_agents() -> Vec<Agent> {
             workdir: None,
             trust_workdir: true,
             channel_topics: Vec::new(),
+            blocked: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat(
@@ -161,6 +163,7 @@ pub fn sample_agents() -> Vec<Agent> {
             workdir: None,
             trust_workdir: true,
             channel_topics: Vec::new(),
+            blocked: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],
@@ -180,6 +183,7 @@ pub fn sample_agents() -> Vec<Agent> {
             workdir: None,
             trust_workdir: true,
             channel_topics: Vec::new(),
+            blocked: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],
@@ -559,6 +563,12 @@ pub static SCENES: &[Scene] = &[
             length: 2000,
             per_hour: 30,
         });
+        s.route = Route::Guardrails;
+    }),
+    // The Guardrails screen with the browser open to add a blocked place.
+    ("guardrails-places", |s| {
+        s.guard_blocked = TextEdit::new(crate::guard::blocked::render(&s.guard.blocked()));
+        s.places_browser.show(None);
         s.route = Route::Guardrails;
     }),
     // A reply whose command waits for your go-ahead, after one a guardrail refused.

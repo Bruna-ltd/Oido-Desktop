@@ -13,9 +13,24 @@ pub struct Browser {
     /// Why it could not be read, when it could not.
     pub error: Option<String>,
     pub hidden: bool,
+    /// Whether files are listed too, to pick one (see [`Browser::for_places`]).
+    pub files: bool,
 }
 
 impl Browser {
+    /// A browser that lists files as well as folders: for choosing a place to block.
+    pub fn for_places() -> Self {
+        Self {
+            files: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether `name`, in the folder being looked at, is a folder (else a file).
+    pub fn is_dir(&self, name: &str) -> bool {
+        self.at.join(name).is_dir()
+    }
+
     /// Opens at `start` if it is a folder, else at the home folder.
     pub fn show(&mut self, start: Option<&Path>) {
         self.open = true;
@@ -29,7 +44,7 @@ impl Browser {
     }
 
     pub fn go(&mut self, path: PathBuf) {
-        match list(&path, self.hidden) {
+        match list(&path, self.hidden, self.files) {
             Ok(entries) => {
                 (self.at, self.entries, self.error) = (path, entries, None);
             }
@@ -54,18 +69,23 @@ impl Browser {
     }
 }
 
-/// The folders inside `path` (links to folders count), by name, ignoring case (then by case). Names that start
-/// with a dot are left out unless `hidden`.
-pub fn list(path: &Path, hidden: bool) -> Result<Vec<String>, String> {
-    let mut names: Vec<String> = std::fs::read_dir(path)
+/// The folders inside `path` (links to folders count), by name, ignoring case (then by case), and
+/// the files too when `files`, after the folders. Names that start with a dot are left out unless
+/// `hidden`.
+pub fn list(path: &Path, hidden: bool, files: bool) -> Result<Vec<String>, String> {
+    let mut names: Vec<(bool, String)> = std::fs::read_dir(path)
         .map_err(|e| e.kind().to_string())?
         .filter_map(Result::ok)
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| hidden || !n.starts_with('.'))
+        .map(|e| {
+            (
+                e.path().is_dir(),
+                e.file_name().to_string_lossy().into_owned(),
+            )
+        })
+        .filter(|(dir, n)| (files || *dir) && (hidden || !n.starts_with('.')))
         .collect();
-    names.sort_by_key(|n| (n.to_lowercase(), n.clone()));
-    Ok(names)
+    names.sort_by_key(|(dir, n)| (!dir, n.to_lowercase(), n.clone()));
+    Ok(names.into_iter().map(|(_, n)| n).collect())
 }
 
 #[cfg(test)]
@@ -85,12 +105,28 @@ mod tests {
     #[test]
     fn only_folders_are_listed_by_name_with_hidden_ones_on_request() {
         let root = tree();
-        assert_eq!(list(&root, false).unwrap(), ["Alpha", "alpha", "beta"]);
         assert_eq!(
-            list(&root, true).unwrap(),
+            list(&root, false, false).unwrap(),
+            ["Alpha", "alpha", "beta"]
+        );
+        assert_eq!(
+            list(&root, true, false).unwrap(),
             [".secret", "Alpha", "alpha", "beta"]
         );
-        assert!(list(&root.join("nowhere"), false).is_err());
+        assert!(list(&root.join("nowhere"), false, false).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn files_are_listed_after_the_folders_only_when_asked() {
+        let root = tree();
+        assert_eq!(
+            list(&root, false, true).unwrap(),
+            ["Alpha", "alpha", "beta", "file.txt"]
+        );
+        let mut b = Browser::for_places();
+        b.show(Some(&root));
+        assert!(b.is_dir("beta") && !b.is_dir("file.txt"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

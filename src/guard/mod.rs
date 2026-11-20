@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod ask;
+pub mod blocked;
 mod gate;
 pub mod injection;
 mod intake;
@@ -23,6 +24,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use self::actions::Place;
+pub use self::blocked::Blocked;
 pub use self::intake::topics;
 pub use self::secrets::Hidden;
 use crate::completion::Request;
@@ -35,6 +37,8 @@ const PACKS: &str = "guard.packs";
 const WAIT: &str = "guard.wait";
 /// Where the blocked words are saved.
 const WORDS: &str = "guard.words";
+/// Where the blocked places are saved.
+pub(crate) const BLOCKED: &str = "guard.blocked";
 /// Where the limits on channel messages are saved.
 const LIMITS: &str = "guard.channel_limits";
 /// Where the browser calls' approvals are saved (the Settings screen).
@@ -290,6 +294,9 @@ pub struct Guard {
     wait: Option<u32>,
     /// Words never sent to a model or shown to a channel person who did not write them.
     words: Vec<String>,
+    /// Folders and files no model's tool may reach; `None` until the person changes the list, when
+    /// it is [`blocked::defaults`].
+    blocked: Option<Vec<Blocked>>,
     limits: Limits,
     /// When browser calls wait for the person.
     browser: crate::connector::Approvals,
@@ -360,6 +367,7 @@ impl Guard {
             words: read(WORDS)
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default(),
+            blocked: read(BLOCKED).and_then(|v| serde_json::from_value(v).ok()),
             limits: read(LIMITS)
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default(),
@@ -402,6 +410,25 @@ impl Guard {
             }
         }
         self.words = kept;
+    }
+
+    /// The blocked places: the ones the person set, or the defaults until they do.
+    pub fn blocked(&self) -> Vec<Blocked> {
+        self.blocked
+            .clone()
+            .unwrap_or_else(|| blocked::defaults(crate::store::data_dir().as_deref()))
+    }
+
+    /// Sets the blocked places, each once.
+    pub fn set_blocked(&mut self, places: Vec<Blocked>) {
+        let mut kept: Vec<Blocked> = Vec::new();
+        for b in places {
+            let path = b.path.trim().trim_end_matches('/').to_owned();
+            if !path.is_empty() && !kept.iter().any(|k| k.path == path) {
+                kept.push(Blocked { path, ..b });
+            }
+        }
+        self.blocked = Some(kept);
     }
 
     /// The limits on what one channel person may send.
@@ -557,6 +584,7 @@ impl Guard {
         let mut found = Vec::new();
         // Put back whatever was hidden, even if the pack was turned off since.
         let revealed = hidden.reveal_json(args);
+        found.extend(blocked::check(name, &revealed, at, &self.blocked()));
         if self.on(Pack::Secrets) || !hidden.is_empty() {
             if let Some(unknown) = secrets::first_placeholder(&revealed) {
                 found.push(actions::Finding {
@@ -667,6 +695,7 @@ mod tests {
         Place {
             root: PathBuf::from("/home/ada/project"),
             home: Some(PathBuf::from("/home/ada")),
+            blocked: Vec::new(),
         }
     }
 
@@ -680,6 +709,29 @@ mod tests {
             tools: Vec::new(),
             cache_key: None,
         }
+    }
+
+    #[test]
+    fn a_call_reaching_a_blocked_place_is_refused_with_no_way_to_allow_it() {
+        let mut g = Guard::default();
+        g.set_blocked(vec![Blocked::new(
+            "/home/ada/taxes",
+            blocked::Keep::Everything,
+        )]);
+        let hidden = Hidden::default();
+        let args = json!({"command": "cat /home/ada/taxes/2025.pdf"}).to_string();
+        let (_, found) = g.review(&hidden, "shell", &args, &at(), None);
+        let found = found.unwrap();
+        assert_eq!((found.rule, found.action), ("path.blocked", Action::Block));
+        assert!(found.why.contains("/home/ada/taxes"), "{}", found.why);
+        // Still refused with every pack off.
+        for p in Pack::ALL {
+            g.set(p, false);
+        }
+        assert!(g.review(&hidden, "shell", &args, &at(), None).1.is_some());
+        // Emptying the list lifts it, defaults included.
+        g.set_blocked(Vec::new());
+        assert!(g.review(&hidden, "shell", &args, &at(), None).1.is_none());
     }
 
     #[test]

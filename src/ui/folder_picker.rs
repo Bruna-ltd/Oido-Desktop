@@ -24,6 +24,10 @@ const WIDTH: f32 = 320.0;
 pub enum Target {
     Form,
     Agent,
+    /// Adds a blocked place on the Guardrails screen (saved at once).
+    Places,
+    /// Adds a blocked place to the agent form's draft.
+    FormPlaces,
 }
 
 impl Target {
@@ -31,13 +35,22 @@ impl Target {
         match self {
             Target::Form => "workdir",
             Target::Agent => "composer-workdir",
+            Target::Places => "places",
+            Target::FormPlaces => "form-places",
         }
+    }
+
+    /// Whether it picks places to block: files too, and never a working folder.
+    fn places(self) -> bool {
+        matches!(self, Target::Places | Target::FormPlaces)
     }
 
     fn browser(self, s: &App) -> &Browser {
         match self {
             Target::Form => &s.roster.form.folders,
             Target::Agent => &s.workdir_browser,
+            Target::Places => &s.places_browser,
+            Target::FormPlaces => &s.roster.form.places,
         }
     }
 
@@ -45,6 +58,8 @@ impl Target {
         match self {
             Target::Form => &mut s.roster.form.folders,
             Target::Agent => &mut s.workdir_browser,
+            Target::Places => &mut s.places_browser,
+            Target::FormPlaces => &mut s.roster.form.places,
         }
     }
 
@@ -52,6 +67,7 @@ impl Target {
         match self {
             Target::Form => s.roster.form.workdir.as_deref(),
             Target::Agent => s.current().and_then(|a| a.workdir.as_deref()),
+            Target::Places | Target::FormPlaces => None,
         }
     }
 
@@ -59,6 +75,22 @@ impl Target {
         match self {
             Target::Form => s.roster.form.workdir = folder,
             Target::Agent => s.set_workdir(folder),
+            Target::Places => {
+                if let Some(path) = folder {
+                    s.block_place(&path);
+                }
+            }
+            Target::FormPlaces => {
+                if let Some(path) = folder {
+                    let typed = s.roster.form.blocked.text.trim().to_owned();
+                    let joined = if typed.is_empty() {
+                        path
+                    } else {
+                        format!("{typed}, {path}")
+                    };
+                    s.roster.form.blocked = rune::TextEdit::new(joined);
+                }
+            }
         }
     }
 
@@ -101,6 +133,18 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     out
 }
 
+/// The "Add…" button that opens the browser for a blocked place (`target` is one of the places).
+pub fn add_place(s: &App, target: Target, k: &Kit, layer: &mut Vec<El>) -> El {
+    let trigger = Button::new("Add…")
+        .variant(ButtonVariant::Outline)
+        .control_size(ControlSize::Small)
+        .help("Choose a folder or file to block")
+        .on_press(move |s: &mut App| target.toggle(s))
+        .build(k)
+        .key(format!("{}-add", target.key()));
+    popover(s, target, trigger, Placement::BottomStart, k, layer)
+}
+
 /// `trigger` with the browser for `target` opening from it.
 pub fn popover(
     s: &App,
@@ -113,7 +157,11 @@ pub fn popover(
     let open = target.browser(s).open;
     let popover = Popover::new(target.key())
         .trigger(trigger)
-        .label("Choose a folder")
+        .label(if target.places() {
+            "Choose a folder or file"
+        } else {
+            "Choose a folder"
+        })
         .placement(placement)
         .padding(0.0)
         .open(open)
@@ -169,7 +217,9 @@ fn browser(s: &App, target: Target, k: &Kit) -> El {
                 let names = names.clone();
                 move |_: &App, i| Cow::Owned(format!("{key}-folder-{}", names[i]))
             },
-            move |_: &App, i| folder_row(&kit, target, &names[i]),
+            move |s: &App, i| {
+                folder_row(&kit, target, &names[i], target.browser(s).is_dir(&names[i]))
+            },
         );
     let viewport = col()
         .key("viewport")
@@ -221,17 +271,21 @@ fn browser(s: &App, target: Target, k: &Kit) -> El {
         .gap(8.0)
         .center_y()
         .child(
-            Button::new("Use this folder")
-                .variant(ButtonVariant::Submit)
-                .control_size(ControlSize::Small)
-                .on_press(move |s: &mut App| {
-                    let b = target.browser_mut(s);
-                    let folder = b.at.to_string_lossy().into_owned();
-                    b.close();
-                    target.choose(s, Some(folder));
-                })
-                .build(k)
-                .key("use"),
+            Button::new(if target.places() {
+                "Block this folder"
+            } else {
+                "Use this folder"
+            })
+            .variant(ButtonVariant::Submit)
+            .control_size(ControlSize::Small)
+            .on_press(move |s: &mut App| {
+                let b = target.browser_mut(s);
+                let folder = b.at.to_string_lossy().into_owned();
+                b.close();
+                target.choose(s, Some(folder));
+            })
+            .build(k)
+            .key("use"),
         )
         .children(
             (target == Target::Agent && target.chosen(s).is_some()).then(|| {
@@ -272,14 +326,18 @@ fn browser(s: &App, target: Target, k: &Kit) -> El {
         .child(footer)
 }
 
-fn folder_row(k: &Kit, target: Target, name: &str) -> El {
+fn folder_row(k: &Kit, target: Target, name: &str, dir: bool) -> El {
     let c = &k.c;
     let name = name.to_owned();
     let go = name.clone();
     row()
         .key(format!("{}-folder-{name}", target.key()))
         .role("button")
-        .label(format!("Open {name}"))
+        .label(if dir {
+            format!("Open {name}")
+        } else {
+            format!("Block {name}")
+        })
         .w_full()
         .h(ROW)
         .px(8.0)
@@ -287,7 +345,17 @@ fn folder_row(k: &Kit, target: Target, name: &str) -> El {
         .center_y()
         .radius(6.0)
         .fill(Color::TRANSPARENT)
-        .child(icon(k.glyph.caret_right, 12.0).color(c.text_faint))
+        .child(
+            icon(
+                if dir {
+                    k.glyph.caret_right
+                } else {
+                    &glyphs::FILE
+                },
+                12.0,
+            )
+            .color(c.text_faint),
+        )
         .child(
             text(name)
                 .font(k.ty.ui_compact)
@@ -297,5 +365,18 @@ fn folder_row(k: &Kit, target: Target, name: &str) -> El {
                 .truncate()
                 .a11y_hidden(),
         )
-        .on_press(move |s: &mut App| target.browser_mut(s).enter(&go))
+        .on_press(move |s: &mut App| {
+            if dir {
+                target.browser_mut(s).enter(&go);
+            } else {
+                let path = target
+                    .browser(s)
+                    .at
+                    .join(&go)
+                    .to_string_lossy()
+                    .into_owned();
+                target.browser_mut(s).close();
+                target.choose(s, Some(path));
+            }
+        })
 }
