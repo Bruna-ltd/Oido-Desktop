@@ -129,7 +129,11 @@ impl App {
     /// the toolkit (a button, a drag, a key, a peek), so the view checks once a frame.
     pub fn sync_panes(&self) {
         let now = Panes::of(self);
-        if self.panes_seen.replace(Some(now)).is_some_and(|was| was != now) {
+        if self
+            .panes_seen
+            .replace(Some(now))
+            .is_some_and(|was| was != now)
+        {
             self.save("the panes", |db| db.set_setting(PANES, &now));
         }
     }

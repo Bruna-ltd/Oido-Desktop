@@ -14,6 +14,7 @@ use crate::picker::PickerState;
 use crate::providers::{ModelStatus, Providers};
 use crate::runs::{Run, Step};
 use crate::store::Store;
+use crate::ui;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
@@ -171,6 +172,8 @@ pub struct App {
     pub queued: std::collections::HashMap<String, crate::prompt::Prompt>,
     /// The message just copied with its Copy button (chat id and place), and when: its icon shows a
     /// check for a moment.
+    /// The menu a right-click on chat text or the composer opened.
+    pub text_menu: Option<ui::text_menu::TextMenu>,
     pub copied: Option<(String, usize, std::time::Instant)>,
     /// The open chat's transcript is scrolled up away from its newest message.
     pub scrolled_up: bool,
@@ -379,6 +382,7 @@ impl App {
             parked: std::collections::HashMap::new(),
             queued: std::collections::HashMap::new(),
             file_index: None,
+            text_menu: None,
             copied: None,
             scrolled_up: false,
             answer_text: TextEdit::new(""),
@@ -445,6 +449,16 @@ impl App {
                 ModelStatus::Ready(_)
             )
         })
+    }
+
+    /// What message `i` of the open chat says: your words, or the reply.
+    pub fn message_text(&self, i: usize) -> Option<String> {
+        let text = match self.current()?.chat().messages.get(i)? {
+            Message::User(p) => &p.text,
+            Message::Assistant { text, .. } => text,
+            _ => return None,
+        };
+        (!text.is_empty()).then(|| text.clone())
     }
 
     pub fn current(&self) -> Option<&Agent> {

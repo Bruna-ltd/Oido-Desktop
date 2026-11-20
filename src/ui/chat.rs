@@ -286,14 +286,17 @@ fn user(s: &App, p: &crate::prompt::Prompt, i: usize, k: &Kit) -> El {
                 .selectable(true),
         );
     }
-    col()
-        .key(format!("m{i}"))
-        .w_full()
-        .items_end()
-        .gap(2.0)
-        .hover_group()
-        .child(bubble)
-        .child(user_actions(s, p, i, k))
+    super::text_menu::message(
+        col()
+            .key(format!("m{i}"))
+            .w_full()
+            .items_end()
+            .gap(2.0)
+            .hover_group()
+            .child(bubble)
+            .child(user_actions(s, p, i, k)),
+        i,
+    )
 }
 
 /// A button that copies `body` of message `i`, its icon a check for a moment after. Shown while
@@ -673,7 +676,7 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
     if r.stats.is_some() || (finished && (r.run.is_some() || !r.body.is_empty())) {
         out = out.child(foot);
     }
-    out.hover_group()
+    super::text_menu::message(out.hover_group(), i)
 }
 
 /// How a reply ended when it did not finish, with a way to ask again.

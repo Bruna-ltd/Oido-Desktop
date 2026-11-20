@@ -26,6 +26,7 @@ mod runs;
 pub(crate) mod schedules;
 mod settings;
 mod sidebar;
+pub mod text_menu;
 pub(crate) mod usage;
 mod workflow_editor;
 mod workflow_graph;
@@ -137,6 +138,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .iter()
         .any(|a| a.family_status() == crate::model::AgentStatus::Waiting);
     agent_form::confirm_delete(s, &k, &mut layer);
+    text_menu::build(s, &k, &mut layer);
     let sidebar = sidebar::build(s, &k, &mut layer);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar)
