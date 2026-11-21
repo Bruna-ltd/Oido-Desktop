@@ -303,6 +303,11 @@ impl App {
                 db.save_session(&agent_id, &named, position)
             });
         }
+        self.fire(
+            sid,
+            crate::hooks::Event::BeforeAgent,
+            serde_json::json!({"message": text}),
+        );
         self.begin_fresh(sid, &text);
     }
 
@@ -881,6 +886,7 @@ impl App {
         request: crate::guard::Guarded,
         cancel: Arc<AtomicBool>,
     ) {
+        self.fire_before_model(&sid, request.request());
         let ask = move |emit: &mut dyn FnMut(Event)| {
             completion::run(&endpoint, credential.as_ref(), &request, &cancel, emit)
         };
@@ -1079,6 +1085,20 @@ impl App {
             })
         });
         self.record(sid, &steps.unwrap_or_default());
+        if let Some(why) = &failure {
+            self.fire(
+                sid,
+                crate::hooks::Event::OnError,
+                serde_json::json!({"error": why}),
+            );
+        } else if status == Status::Ok {
+            let calls: Vec<&str> = called.iter().map(|c| c.name.as_str()).collect();
+            self.fire(
+                sid,
+                crate::hooks::Event::AfterModel,
+                serde_json::json!({"text": reply, "tool_calls": calls, "output_tokens": live.tokens.output}),
+            );
+        }
 
         // The calls it asked for run now, once the guard has looked at them: a risky one waits
         // for your go-ahead, and the others with it.
@@ -1088,6 +1108,18 @@ impl App {
         // Idle only if nothing it asked for is running: a command that began is still the agent
         // at work.
         self.refresh_status(&live.agent_id);
+        if !self.busy_in(sid) {
+            let ended = match status {
+                Status::Ok => "done",
+                Status::Cancelled => "stopped",
+                _ => "failed",
+            };
+            self.fire(
+                sid,
+                crate::hooks::Event::AfterAgent,
+                serde_json::json!({"status": ended, "reply": shown, "error": failure}),
+            );
+        }
         // The turn is over (nothing more runs in the chat): a chat carried on from a channel gets
         // what the agent wrote, before a message waiting for it goes.
         let told = !self.busy_in(sid) && self.channel_turn_over(sid, status, failure.as_deref());

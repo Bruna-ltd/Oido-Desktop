@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Event, Fail, Hook, SAVED, Verdict, after_event, before_event, run};
+use super::{Event, Fail, Hook, OFF, SAVED, Verdict, after_event, base_event, before_event, run};
 use crate::app::App;
 use crate::guard::{Trip, TripState};
 use crate::model::{AgentStatus, Message};
@@ -219,6 +219,69 @@ impl App {
         }
     }
 
+    /// The hooks to run for `event` (and tool `tool`) in chat `sid`: none when its agent is switched
+    /// out of them.
+    fn hooks_for(&self, sid: &str, event: Event, tool: &str) -> Vec<Hook> {
+        match self.roster.owner_of(sid) {
+            Some(a) if self.hooks.runs_for(&a.id) => self.hooks.for_event(event, tool),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Switches agent `id` in or out of running hooks, and saves it.
+    pub fn set_hooks_for(&mut self, id: &str, runs: bool) {
+        self.hooks.set_runs_for(id, runs);
+        let off = self.hooks.off().to_vec();
+        self.save("the hooks", |db| db.set_setting(OFF, &off));
+    }
+
+    /// Tells the hooks for `event` in chat `sid` what happened (`data`, fields added to the common
+    /// ones). They only watch: they run off the UI thread, nothing waits for them, and a failure
+    /// is noted in the run.
+    pub(crate) fn fire(&mut self, sid: &str, event: Event, data: serde_json::Value) {
+        let hooks = self.hooks_for(sid, event, "");
+        if hooks.is_empty() {
+            return;
+        }
+        let (agent, dir) = self.hook_scene(sid);
+        let mut payload = base_event(event, sid, &agent, &dir);
+        if let (Some(into), serde_json::Value::Object(from)) = (payload.as_object_mut(), data) {
+            into.extend(from);
+        }
+        let chat = sid.to_owned();
+        self.spawn(
+            move || {
+                hooks
+                    .iter()
+                    .filter_map(|h| {
+                        run(h, &payload, &dir)
+                            .err()
+                            .map(|why| (format!("Hook {} failed", h.label()), format!("{why}.")))
+                    })
+                    .collect::<Vec<_>>()
+            },
+            move |app, notes| app.hook_notes(&chat, &notes),
+        );
+    }
+
+    /// Tells the before-model hooks what chat `sid`'s next model call is sent, as the model sees it.
+    pub(crate) fn fire_before_model(&mut self, sid: &str, request: &crate::completion::Request) {
+        if self.hooks_for(sid, Event::BeforeModel, "").is_empty() {
+            return;
+        }
+        let turns: Vec<_> = request
+            .turns
+            .iter()
+            .map(|t| serde_json::json!({"role": format!("{:?}", t.role).to_lowercase(), "text": t.text}))
+            .collect();
+        let tools: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+        self.fire(
+            sid,
+            Event::BeforeModel,
+            serde_json::json!({"model": request.model, "system": request.system, "turns": turns, "tools": tools}),
+        );
+    }
+
     /// Who is asking and where, as a hook is told.
     fn hook_scene(&self, sid: &str) -> (String, PathBuf) {
         let agent = self
@@ -338,7 +401,7 @@ impl App {
                 id: t.id.clone(),
                 name: t.name.clone(),
                 args: t.args.clone(),
-                hooks: self.hooks.for_tool(Event::BeforeTool, &t.name),
+                hooks: self.hooks_for(sid, Event::BeforeTool, &t.name),
             })
             .filter(|p| !p.hooks.is_empty())
             .collect();
@@ -469,7 +532,7 @@ impl App {
         if call.trip.as_ref().is_some_and(|t| t.state.stopped()) {
             return None;
         }
-        let hooks = self.hooks.for_tool(Event::AfterTool, &call.name);
+        let hooks = self.hooks_for(sid, Event::AfterTool, &call.name);
         (!hooks.is_empty()).then(|| (call.name.clone(), call.args.clone(), hooks))
     }
 }
@@ -701,6 +764,84 @@ mod tests {
             !second.contains("exit code"),
             "the real result is not sent: {second}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A hook that appends its input to `log` (a file in `dir`), so a test can see what it was told.
+    fn logger(event: Event, dir: &Path) -> Hook {
+        hook(
+            event,
+            &format!(
+                "cat >> {}/log; echo >> {}/log",
+                dir.display(),
+                dir.display()
+            ),
+        )
+    }
+
+    fn logged(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("log")).unwrap_or_default()
+    }
+
+    #[test]
+    fn watching_hooks_are_told_each_step_of_the_work() {
+        let dir = folder();
+        let db = TempDb::new();
+        let hooks = Event::WORK.map(|e| logger(e, &dir)).to_vec();
+        let (app, seen) = chat_with(&db, hooks, "echo hi", &dir);
+        let _ = seen.recv().unwrap();
+        let _ = seen.recv().unwrap();
+        let log = logged(&dir);
+        for name in ["before_agent", "before_model", "after_model", "after_agent"] {
+            assert!(
+                log.contains(&format!("\"event\":\"{name}\"")),
+                "{name}: {log}"
+            );
+        }
+        assert!(!log.contains("on_error"), "nothing failed: {log}");
+        // The model's own words, with what it was sent, as the model sees them.
+        assert!(log.contains("\"tool_calls\":[\"shell\"]"), "{log}");
+        assert!(log.contains("\"message\":\"go\""), "{log}");
+        assert!(!app.busy());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_hook_that_only_watches_cannot_change_the_work() {
+        let dir = folder();
+        let db = TempDb::new();
+        let refuse = hook(Event::BeforeModel, "echo '{\"action\":\"block\"}'; exit 2");
+        let (app, seen) = chat_with(&db, vec![refuse], "touch ran", &dir);
+        let _ = seen.recv().unwrap();
+        let _ = seen.recv().unwrap();
+        assert!(dir.join("ran").exists(), "the work went on");
+        assert!(!app.busy());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_agent_switched_out_runs_no_hooks() {
+        let dir = folder();
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (200, EVENTS, calling_shell("touch ran")),
+                (200, EVENTS, text_stream("Done.")),
+            ],
+        );
+        let id = app.roster.current().unwrap().id.clone();
+        app.set_hooks(vec![hook(Event::BeforeTool, "exit 2")]);
+        app.set_hooks_for(&id, false);
+        assert!(!app.hooks.runs_for(&id));
+        let agent = app.roster.current_mut().unwrap();
+        agent.tools = vec![crate::tools::SHELL.into()];
+        agent.workdir = Some(dir.to_string_lossy().into_owned());
+        app.composer.edit = TextEdit::new("go");
+        app.send();
+        let _ = seen.recv().unwrap();
+        let _ = seen.recv().unwrap();
+        assert!(dir.join("ran").exists(), "its hooks were off");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

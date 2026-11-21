@@ -41,7 +41,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
                 .py(24.0)
                 .gap(16.0)
                 .child(note(
-                    "Commands that run on this computer around an agent's tool calls, in every chat, schedule and channel. The guardrails look at a call first; a hook only sees what they let through, and it can refuse the call, hold it for your go-ahead or change it, but never allow what a guardrail stopped.",
+                    "Commands that run on this computer around an agent's tool calls and work, in every chat, schedule and channel. The guardrails look at a call first; a hook only sees what they let through, and it can refuse the call, hold it for your go-ahead or change it, but never allow what a guardrail stopped.",
                     k,
                 ))
                 .child(section("Your hooks", listed, k))
@@ -54,6 +54,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
                     form(s, k),
                     k,
                 ))
+                .child(section("Agents", agents(s, k), k))
                 .child(section("How a hook answers", vec![help(k)], k)),
         )
 }
@@ -69,14 +70,19 @@ fn note(words: &str, k: &Kit) -> El {
 /// One hook: what it is for and what it runs, with its switch.
 fn row(h: &Hook, k: &Kit) -> El {
     let c = &k.c;
-    let tools = if h.tools.trim().is_empty() {
-        "every tool".to_owned()
+    let detail = if h.event.is_tool() {
+        let tools = if h.tools.trim().is_empty() {
+            "every tool"
+        } else {
+            h.tools.trim()
+        };
+        let fail = match h.fail {
+            Fail::Open => "if it fails, the call goes on",
+            Fail::Closed => "if it fails, the call is stopped",
+        };
+        format!("{} · {tools} · {}s · {fail}", h.event.title(), h.secs)
     } else {
-        h.tools.trim().to_owned()
-    };
-    let fail = match h.fail {
-        Fail::Open => "if it fails, the call goes on",
-        Fail::Closed => "if it fails, the call is stopped",
+        format!("{} · {}s · watches only", h.event.title(), h.secs)
     };
     let (toggle, edit, delete) = (h.id.clone(), h.id.clone(), h.id.clone());
     rune::row()
@@ -95,16 +101,7 @@ fn row(h: &Hook, k: &Kit) -> El {
                         .font(k.ty.ui_medium)
                         .color(c.text_base),
                 )
-                .child(
-                    text(format!(
-                        "{} · {tools} · {}s · {fail}",
-                        h.event.title(),
-                        h.secs
-                    ))
-                    .font(k.ty.small)
-                    .color(c.text_muted)
-                    .wrap(),
-                )
+                .child(text(detail).font(k.ty.small).color(c.text_muted).wrap())
                 .child(
                     text(h.command.clone())
                         .font(k.ty.mono)
@@ -160,18 +157,28 @@ fn form(s: &App, k: &Kit) -> Vec<El> {
             k,
         )
     };
-    vec![
+    let mut rows = vec![
         setting(
             "hook-event",
             "Runs",
-            "Before a tool runs, once the guardrails let it through; or when it has its result, before the model sees it.",
-            choices(
-                "hook-event",
-                Event::ALL.map(|e| (e, e.title().to_owned())),
-                f.event,
-                |s, e| s.hook_form.event = e,
-                k,
-            ),
+            "On a tool call a hook can refuse, hold or change it. The others only watch: the hook is told, and nothing waits for it.",
+            col()
+                .gap(6.0)
+                .items_end()
+                .child(choices(
+                    "hook-event-tools",
+                    Event::TOOLS.map(|e| (e, e.title().to_owned())),
+                    f.event,
+                    |s, e| s.hook_form.event = e,
+                    k,
+                ))
+                .child(choices(
+                    "hook-event-work",
+                    Event::WORK.map(|e| (e, e.title().to_owned())),
+                    f.event,
+                    |s, e| s.hook_form.event = e,
+                    k,
+                )),
             k,
         ),
         field(
@@ -182,36 +189,40 @@ fn form(s: &App, k: &Kit) -> Vec<El> {
             |s| &mut s.hook_form.name,
             "e.g. No deploys on Friday",
         ),
-        field(
+    ];
+    if f.event.is_tool() {
+        rows.push(field(
             "hook-tools",
             "Tools",
             "Which tools it is for, split by |, with * for any characters. Empty: every tool.",
             &f.tools,
             |s| &mut s.hook_form.tools,
             "e.g. shell|write_file or mcp__*",
-        ),
-        field(
-            "hook-command",
-            "Command",
-            "Run with sh, in the agent's folder. It is given the event as JSON on its input.",
-            &f.command,
-            |s| &mut s.hook_form.command,
-            "e.g. ~/bin/check-call.sh",
-        ),
-        setting(
+        ));
+    }
+    rows.push(field(
+        "hook-command",
+        "Command",
+        "Run with sh, in the agent's folder. It is given the event as JSON on its input.",
+        &f.command,
+        |s| &mut s.hook_form.command,
+        "e.g. ~/bin/check-call.sh",
+    ));
+    rows.push(setting(
+        "hook-secs",
+        "Time limit",
+        "A hook that runs longer is ended and counts as failed.",
+        choices(
             "hook-secs",
-            "Time limit",
-            "A hook that runs longer is ended and counts as failed.",
-            choices(
-                "hook-secs",
-                LIMITS.map(|n| (n, format!("{n} s"))),
-                f.secs,
-                |s, n| s.hook_form.secs = n,
-                k,
-            ),
+            LIMITS.map(|n| (n, format!("{n} s"))),
+            f.secs,
+            |s, n| s.hook_form.secs = n,
             k,
         ),
-        setting(
+        k,
+    ));
+    if f.event.is_tool() {
+        rows.push(setting(
             "hook-fail",
             "If it fails",
             "Failed means it did not start, ran past its limit, exited with an error or printed something that is not an answer.",
@@ -226,7 +237,9 @@ fn form(s: &App, k: &Kit) -> Vec<El> {
                 k,
             ),
             k,
-        ),
+        ));
+    }
+    rows.push(
         rune::row()
             .key("setting-hook-save")
             .w_full()
@@ -253,7 +266,31 @@ fn form(s: &App, k: &Kit) -> Vec<El> {
                     .build(k)
                     .key("hook-clear")
             })),
-    ]
+    );
+    rows
+}
+
+/// Each agent, with a switch for whether the hooks run for it.
+fn agents(s: &App, k: &Kit) -> Vec<El> {
+    s.roster
+        .list
+        .iter()
+        .flat_map(|a| std::iter::once(a).chain(a.subagents.iter()))
+        .map(|a| {
+            let (id, on) = (a.id.clone(), s.hooks.runs_for(&a.id));
+            setting(
+                &format!("hook-agent-{}", a.id),
+                &a.name,
+                "",
+                Switch::new(on)
+                    .label(a.name.clone())
+                    .hide_label()
+                    .on_toggle(move |s: &mut App| s.set_hooks_for(&id, !on))
+                    .build(k),
+                k,
+            )
+        })
+        .collect()
 }
 
 /// What a hook is given and how it answers.

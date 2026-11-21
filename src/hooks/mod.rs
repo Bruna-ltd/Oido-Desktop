@@ -23,6 +23,8 @@ use crate::store::Store;
 
 /// Where the hooks are saved.
 const SAVED: &str = "hooks.list";
+/// Where the agents that run no hooks are saved.
+const OFF: &str = "hooks.off";
 
 /// The longest a hook may print and still be understood, in bytes: a replaced result is in it.
 const OUTPUT_LIMIT: usize = 256 * 1024;
@@ -40,16 +42,46 @@ pub enum Event {
     BeforeTool,
     /// When a tool call has its result, before the model sees it: it can be withheld or replaced.
     AfterTool,
+    /// When you (or a channel, or a schedule) give an agent a new message, as its work begins.
+    BeforeAgent,
+    /// Just before each call to the model, with what it is sent (as the model sees it: secrets
+    /// hidden).
+    BeforeModel,
+    /// When the model's reply has arrived (as the model wrote it: secrets hidden).
+    AfterModel,
+    /// When a reply failed.
+    OnError,
+    /// When the agent has finished a message: nothing more is running for it.
+    AfterAgent,
 }
 
 impl Event {
-    pub const ALL: [Event; 2] = [Event::BeforeTool, Event::AfterTool];
+    /// The events about tool calls, which can change what happens.
+    pub const TOOLS: [Event; 2] = [Event::BeforeTool, Event::AfterTool];
+    /// The events about the agent's work, which a hook only watches.
+    pub const WORK: [Event; 5] = [
+        Event::BeforeAgent,
+        Event::BeforeModel,
+        Event::AfterModel,
+        Event::OnError,
+        Event::AfterAgent,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::BeforeTool => "Before a tool runs",
             Self::AfterTool => "After a tool runs",
+            Self::BeforeAgent => "Agent starts",
+            Self::BeforeModel => "Before the model",
+            Self::AfterModel => "After the model",
+            Self::OnError => "On an error",
+            Self::AfterAgent => "Agent finishes",
         }
+    }
+
+    /// Whether it is about a tool call: only those name tools, and only those can change a call.
+    pub fn is_tool(self) -> bool {
+        matches!(self, Self::BeforeTool | Self::AfterTool)
     }
 
     /// The name the hook is told, and the docs use.
@@ -57,6 +89,11 @@ impl Event {
         match self {
             Self::BeforeTool => "before_tool",
             Self::AfterTool => "after_tool",
+            Self::BeforeAgent => "before_agent",
+            Self::BeforeModel => "before_model",
+            Self::AfterModel => "after_model",
+            Self::OnError => "on_error",
+            Self::AfterAgent => "after_agent",
         }
     }
 }
@@ -157,6 +194,8 @@ fn glob(pattern: &str, text: &str) -> bool {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Hooks {
     list: Vec<Hook>,
+    /// Agents (by id) that run no hooks.
+    off: Vec<String>,
 }
 
 impl Hooks {
@@ -169,18 +208,41 @@ impl Hooks {
                 })
             })
             .unwrap_or_default();
-        Hooks { list }
+        let off = store
+            .and_then(|db| db.setting::<Vec<String>>(OFF).unwrap_or(None))
+            .unwrap_or_default();
+        Hooks { list, off }
+    }
+
+    /// Whether agent `id` runs the hooks.
+    pub fn runs_for(&self, id: &str) -> bool {
+        !self.off.iter().any(|a| a == id)
+    }
+
+    pub fn off(&self) -> &[String] {
+        &self.off
+    }
+
+    pub(crate) fn set_runs_for(&mut self, id: &str, runs: bool) {
+        self.off.retain(|a| a != id);
+        if !runs {
+            self.off.push(id.to_owned());
+        }
     }
 
     pub fn list(&self) -> &[Hook] {
         &self.list
     }
 
-    /// The hooks that are on for `event` and tool `tool`, in order.
-    pub fn for_tool(&self, event: Event, tool: &str) -> Vec<Hook> {
+    /// The hooks that are on for `event`, in order; for a tool event, those for tool `tool`.
+    pub fn for_event(&self, event: Event, tool: &str) -> Vec<Hook> {
         self.list
             .iter()
-            .filter(|h| h.on && h.event == event && !h.command.trim().is_empty() && h.is_for(tool))
+            .filter(|h| {
+                h.on && h.event == event
+                    && !h.command.trim().is_empty()
+                    && (!event.is_tool() || h.is_for(tool))
+            })
             .cloned()
             .collect()
     }
@@ -271,6 +333,15 @@ pub enum Verdict {
 
 /// Reads what a hook that ended with `code` printed. `Err` says why there is no verdict.
 fn verdict(event: Event, code: Option<i32>, stdout: &str, stderr: &str) -> Result<Verdict, String> {
+    // A hook that only watches may print anything: nothing it says changes the work. Only whether
+    // it ran well is noted.
+    if !event.is_tool() {
+        return match code {
+            Some(0) => Ok(Verdict::Allow),
+            Some(code) => Err(format!("it exited with code {code}")),
+            None => Err("it was ended by a signal".to_owned()),
+        };
+    }
     match code {
         Some(2) => {
             let why = stderr.trim();
@@ -318,9 +389,10 @@ fn verdict(event: Event, code: Option<i32>, stdout: &str, stderr: &str) -> Resul
         }
         Some("ask") => Err("\"ask\" only works before a tool runs".to_owned()),
         Some("replace") => {
-            let key = match event {
-                Event::BeforeTool => "args",
-                Event::AfterTool => "result",
+            let key = if event == Event::BeforeTool {
+                "args"
+            } else {
+                "result"
             };
             match v.get(key) {
                 Some(Value::String(s)) => Ok(Verdict::Replace(s.clone())),
@@ -363,16 +435,23 @@ pub fn run(hook: &Hook, event: &Value, dir: &Path) -> Result<Verdict, String> {
     }
 }
 
-/// The input a hook is given before tool `tool` runs.
-pub fn before_event(chat: &str, agent: &str, dir: &Path, tool: &str, args: &str) -> Value {
+/// The input every hook is given: what happened (`event`), in which chat, to which agent, where.
+pub fn base_event(event: Event, chat: &str, agent: &str, dir: &Path) -> Value {
     json!({
-        "event": Event::BeforeTool.name(),
+        "event": event.name(),
         "chat": chat,
         "agent": agent,
         "cwd": dir,
-        "tool": tool,
-        "args": serde_json::from_str::<Value>(args).unwrap_or_else(|_| Value::String(args.to_owned())),
     })
+}
+
+/// The input a hook is given before tool `tool` runs.
+pub fn before_event(chat: &str, agent: &str, dir: &Path, tool: &str, args: &str) -> Value {
+    let mut event = base_event(Event::BeforeTool, chat, agent, dir);
+    event["tool"] = json!(tool);
+    event["args"] =
+        serde_json::from_str::<Value>(args).unwrap_or_else(|_| Value::String(args.to_owned()));
+    event
 }
 
 /// The input a hook is given once tool `tool` has `result`.
