@@ -35,6 +35,8 @@ pub enum Route {
     Channels,
     /// The checks made before anything reaches a model or an agent's action runs.
     Guardrails,
+    /// Commands run around agents' tool calls.
+    Hooks,
     /// The app's own settings: its appearance.
     Settings,
     /// The create, edit and team-member form (`Roster::editing` says which).
@@ -236,6 +238,15 @@ pub struct App {
     pub channels: crate::channels::Channels,
     /// The guardrails on: what is hidden from models and which tool calls wait for you.
     pub guard: crate::guard::Guard,
+    /// The commands set to run around tool calls (see `hooks`).
+    pub hooks: crate::hooks::Hooks,
+    /// The Hooks screen's form, as filled in.
+    pub hook_form: crate::hooks::Form,
+    /// Chats with hooks running off the UI thread, and how many jobs each has out.
+    pub hooking: std::collections::HashMap<String, usize>,
+    /// Calls the before-tool hooks have already looked at, so a call held for your go-ahead is
+    /// not looked at twice.
+    pub hooked: std::collections::HashSet<String>,
     /// Chats whose last model call had outside text in it, with what it was in words (see
     /// `guard::taint`): while it is there, calls that act wait for you.
     pub tainted: std::collections::HashMap<String, String>,
@@ -421,6 +432,10 @@ impl App {
             schedule_page: crate::schedules::Page::default(),
             channels: crate::channels::Channels::default(),
             guard: crate::guard::Guard::load(store.as_ref()),
+            hooks: crate::hooks::Hooks::load(store.as_ref()),
+            hook_form: crate::hooks::Form::default(),
+            hooking: std::collections::HashMap::new(),
+            hooked: std::collections::HashSet::new(),
             tainted: std::collections::HashMap::new(),
             waiting: Vec::new(),
             intake: std::collections::HashMap::new(),

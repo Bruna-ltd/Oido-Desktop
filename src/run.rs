@@ -267,6 +267,7 @@ impl App {
             || self.delegating.contains_key(sid)
             || self.summarizing.contains_key(sid)
             || self.routing.contains(sid)
+            || self.hooking.contains_key(sid)
     }
 
     /// Puts your message in chat `sid`, which need not be the open one, and starts the reply.
@@ -1082,7 +1083,7 @@ impl App {
         // The calls it asked for run now, once the guard has looked at them: a risky one waits
         // for your go-ahead, and the others with it.
         if status == Status::Ok && !self.review_calls(sid, &live.hidden) {
-            self.dispatch_calls(sid);
+            self.hook_then_dispatch(sid);
         }
         // Idle only if nothing it asked for is running: a command that began is still the agent
         // at work.
@@ -1227,6 +1228,7 @@ impl App {
             self.refresh_status_of(sid);
         }
         self.processes.stop_chat(sid);
+        self.stop_hooking(sid);
         if let Some(job) = self.commands.get(sid) {
             job.cancel.store(true, Ordering::Relaxed);
             let call = job.call.clone();
@@ -1295,7 +1297,8 @@ impl App {
 
     /// Gives a waiting call its result, in the chat that holds it. When nothing in that message is
     /// left waiting and `carry_on`, the agent continues with a new run.
-    pub(crate) fn resolve(&mut self, sid: &str, call_id: &str, output: String, carry_on: bool) {
+    pub(crate) fn resolve_now(&mut self, sid: &str, call_id: &str, output: String, carry_on: bool) {
+        self.hooked.remove(call_id);
         // Whether what came back is outside text: a web page, an MCP tool's result, a file or a
         // command's output where the folder is not trusted, an answer from a person not trusted.
         let trust_folder = self.roster.owner_of(sid).is_none_or(|a| a.trust_workdir);

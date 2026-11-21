@@ -11,6 +11,7 @@ mod extensions;
 mod flow;
 mod folder_picker;
 mod guard;
+mod hooks;
 mod icons;
 mod inspector;
 mod logo;
@@ -106,6 +107,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Extensions => ("Extensions".to_owned(), extensions::screen(s, &k)),
         Route::Channels => ("Channels".to_owned(), channels::screen(s, &k, &mut layer)),
         Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k, &mut layer)),
+        Route::Hooks => ("Hooks".to_owned(), hooks::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
     };
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.

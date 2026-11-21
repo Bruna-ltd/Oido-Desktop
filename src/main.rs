@@ -27,6 +27,7 @@ mod flow_node;
 mod flows;
 mod folders;
 mod guard;
+mod hooks;
 mod instance;
 mod launcher;
 mod listing;

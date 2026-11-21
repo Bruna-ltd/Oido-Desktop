@@ -340,7 +340,7 @@ impl App {
             .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
             .is_some_and(|chat| chat.messages.len() == seq + 1);
         if same {
-            self.dispatch_calls(sid);
+            self.hook_then_dispatch(sid);
         }
     }
 }
