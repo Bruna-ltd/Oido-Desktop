@@ -3,7 +3,7 @@
 //! it for the person's go-ahead first (see [`crate::guard`]); the limits below apply to every one
 //! that runs.
 //!
-//! A command runs through `sh -c` in its own process group, with no input, under a time limit.
+//! A command runs through `sh -c` in its own process group, with no input (a hook is given its event), under a time limit.
 //! Its output is read as it comes and cut at a limit, so a noisy command can neither fill the pipe
 //! and hang nor flood the model. One meant to keep running is started in the background instead
 //! (see [`crate::background`]).
@@ -37,6 +37,10 @@ pub struct Spec {
     pub timeout: Duration,
     /// Keep it running after the call returns, followed by [`crate::background`], not waited for.
     pub background: bool,
+    /// Text given to the command on its input, when it is not run with none (a hook's event).
+    pub input: Option<String>,
+    /// Each of stdout and stderr is kept up to this many bytes.
+    pub limit: usize,
 }
 
 /// Reads a call's arguments. `None` when there is no command to run.
@@ -64,6 +68,8 @@ pub fn parse(args: &str) -> Option<Spec> {
             .get("background")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        input: None,
+        limit: STREAM_LIMIT,
     })
 }
 
@@ -79,8 +85,11 @@ struct Capture {
     data: Mutex<(Vec<u8>, bool)>,
 }
 
-/// Reads `source` to its end on a thread, keeping the first [`STREAM_LIMIT`] bytes.
-fn capture(mut source: impl Read + Send + 'static) -> (Arc<Capture>, std::thread::JoinHandle<()>) {
+/// Reads `source` to its end on a thread, keeping the first `limit` bytes.
+fn capture(
+    mut source: impl Read + Send + 'static,
+    limit: usize,
+) -> (Arc<Capture>, std::thread::JoinHandle<()>) {
     let cap = Arc::new(Capture {
         data: Mutex::new((Vec::new(), false)),
     });
@@ -92,7 +101,7 @@ fn capture(mut source: impl Read + Send + 'static) -> (Arc<Capture>, std::thread
                 break;
             }
             if let Ok(mut d) = shared.data.lock() {
-                let room = STREAM_LIMIT.saturating_sub(d.0.len());
+                let room = limit.saturating_sub(d.0.len());
                 d.0.extend_from_slice(&buf[..n.min(room)]);
                 d.1 |= n > room;
             }
@@ -243,10 +252,21 @@ pub fn run_raw(spec: &Spec, dir: &Path, cancel: &AtomicBool) -> Raw {
     if spec.background {
         return failed("Only the agent in a chat can start a background process, not a team member or a workflow.".to_owned());
     }
-    let mut child = match shell(&spec.command, dir).spawn() {
+    let mut command = shell(&spec.command, dir);
+    if spec.input.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => return failed(format!("The command could not be started: {e}")),
     };
+    // Written on a thread so a command that never reads cannot hold this up; it ends with the pipe.
+    if let (Some(input), Some(mut stdin)) = (spec.input.clone(), child.stdin.take()) {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(input.as_bytes());
+        });
+    }
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         kill(&mut child);
         return failed("The command could not be started: no output pipes.".to_owned());
@@ -254,8 +274,8 @@ pub fn run_raw(spec: &Spec, dir: &Path, cancel: &AtomicBool) -> Raw {
     if let Ok(mut r) = running().lock() {
         r.insert(child.id());
     }
-    let (out, out_thread) = capture(stdout);
-    let (err, err_thread) = capture(stderr);
+    let (out, out_thread) = capture(stdout, spec.limit);
+    let (err, err_thread) = capture(stderr, spec.limit);
 
     let deadline = Instant::now() + spec.timeout;
     let end = loop {
@@ -309,6 +329,8 @@ mod tests {
             reason: String::new(),
             timeout: Duration::from_secs(secs),
             background: false,
+            input: None,
+            limit: STREAM_LIMIT,
         }
     }
 

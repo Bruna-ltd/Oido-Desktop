@@ -590,6 +590,8 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
             let calls: Vec<Call> = reviewed.iter().map(|(c, _)| c.clone()).collect();
             turns.push(Turn::assistant(text, calls));
             for (call, found) in &reviewed {
+                let mut call = call.clone();
+                let call = &mut call;
                 tell(Note::Tool {
                     name: call.name.clone(),
                     detail: tools::summary(&call.name, &call.args),
@@ -614,11 +616,27 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                     );
                     told
                 });
+                // The hooks look at a call the rules let through.
+                let mut noted = Vec::new();
+                let refused = refused.or_else(|| {
+                    job.prep.hooks.before(
+                        &job.prep.asker,
+                        (guard, &place, in_view.as_deref()),
+                        &call.name,
+                        &mut call.args,
+                        &job.cancel,
+                        &mut noted,
+                    )
+                });
                 let ran = refused.is_none();
                 let result = match refused {
                     Some(told) => told,
                     None => {
                         let result = run_tool(job, call);
+                        let result = job
+                            .prep
+                            .hooks
+                            .after(&call.name, &call.args, result, &mut noted);
                         let source =
                             crate::guard::taint::result_source(&call.name, job.trust_folder);
                         let what = if guard.on(crate::guard::Pack::Injection) {
@@ -633,6 +651,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                         result
                     }
                 };
+                steps.extend(noted.iter().map(|(n, t)| trace.guard(n, t)));
                 tell(Note::ToolDone {
                     ok: !result.starts_with("Error") && ran,
                 });

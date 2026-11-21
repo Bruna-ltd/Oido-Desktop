@@ -565,6 +565,39 @@ pub static SCENES: &[Scene] = &[
         });
         s.route = Route::Guardrails;
     }),
+    // The Hooks screen: two hooks set, and the form filled in to change one.
+    ("hooks", |s| {
+        use crate::hooks::{Event, Fail, Hook};
+        let hook = |event, name: &str, tools: &str, command: &str, fail, on| Hook {
+            name: name.into(),
+            tools: tools.into(),
+            command: command.into(),
+            fail,
+            on,
+            ..Hook::new(event)
+        };
+        let list = vec![
+            hook(
+                Event::BeforeTool,
+                "No deploys on Friday",
+                "shell",
+                "~/bin/no-friday-deploys.sh",
+                Fail::Closed,
+                true,
+            ),
+            hook(
+                Event::AfterTool,
+                "Shrink long results",
+                "mcp__*",
+                "python3 ~/bin/shrink.py",
+                Fail::Open,
+                false,
+            ),
+        ];
+        s.hooks.set(list.clone());
+        s.hook_form = crate::hooks::Form::of(&list[0]);
+        s.route = Route::Hooks;
+    }),
     // The Guardrails screen with the browser open to add a blocked place.
     ("guardrails-places", |s| {
         s.guard_blocked = TextEdit::new(crate::guard::blocked::render(&s.guard.blocked()));

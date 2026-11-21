@@ -193,6 +193,10 @@ impl Trip {
                 "Not run: nobody gave the go-ahead in time, so it was not allowed. ({rule}: {})",
                 self.why
             ),
+            _ if self.rule == "hook" => format!(
+                "Not run: a hook the person set stopped it. {}. Tell the person, and do not try to get around it.",
+                self.why
+            ),
             _ => format!(
                 "Not run: a guardrail stopped it. {rule}: {} Tell the person, and do not try to get around it.",
                 self.why
@@ -250,6 +254,7 @@ pub fn title(rule: &str) -> &'static str {
         "secrets.unknown" => "Unknown hidden value",
         "secrets.off_machine" => "Sends a secret away",
         "taint.outside" => "Acts after reading outside text",
+        "hook" => "A hook you set",
         other => crate::connector::approvals::title(other).unwrap_or_else(|| actions::title(other)),
     }
 }

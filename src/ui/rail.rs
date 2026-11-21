@@ -31,7 +31,7 @@ static OPERATE: [Item; 3] = [
     },
 ];
 
-static CONFIGURE: [Item; 6] = [
+static CONFIGURE: [Item; 7] = [
     Item {
         label: "Providers",
         icon: &icons::PROVIDERS,
@@ -61,6 +61,11 @@ static CONFIGURE: [Item; 6] = [
         label: "Guardrails",
         icon: &icons::GUARDRAILS,
         route: Route::Guardrails,
+    },
+    Item {
+        label: "Hooks",
+        icon: &icons::HOOKS,
+        route: Route::Hooks,
     },
 ];
 
