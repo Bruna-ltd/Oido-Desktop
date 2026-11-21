@@ -37,6 +37,7 @@ mod model;
 mod models;
 mod notify;
 mod omarchy;
+mod onboarding;
 mod persist;
 mod picker;
 mod pricing;

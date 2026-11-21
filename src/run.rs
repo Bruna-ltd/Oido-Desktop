@@ -1150,6 +1150,7 @@ impl App {
         self.run_schedule_calls(sid);
         self.run_mcp_server_calls(sid);
         self.run_agent_calls(sid);
+        self.run_setup_calls(sid);
         self.start_delegations(sid);
         self.start_next_command(sid);
     }

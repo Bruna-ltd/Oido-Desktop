@@ -343,7 +343,7 @@ const ROW: f32 = 32.0;
 const MAX_ROWS: f32 = 9.5;
 const LIST_WIDTH: f32 = 280.0;
 
-fn theme_row(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+pub(super) fn theme_row(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let offered = choices(&s.look);
     let current = offered.iter().find(|ch| ch.appearance == s.look.appearance);
     let trigger = Select::new::<&str>("theme-value", &[])

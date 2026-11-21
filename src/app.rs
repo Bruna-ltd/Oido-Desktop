@@ -39,6 +39,8 @@ pub enum Route {
     Hooks,
     /// The app's own settings: its appearance.
     Settings,
+    /// The first-run setup: connect a provider, then an agent sets the rest up.
+    Onboarding,
     /// The create, edit and team-member form (`Roster::editing` says which).
     AgentForm,
 }
@@ -206,6 +208,8 @@ pub struct App {
     pub look: crate::theme::Look,
     /// The Settings page's theme list is open.
     pub theme_open: bool,
+    /// First-run setup: the look is chosen, so the connect step shows.
+    pub setup_look_done: bool,
     /// This app's own updates: on their own or not, and where they stand.
     pub updates: crate::update::Updates,
     /// Model prices, the catalog's and yours, for working out cost; and whether the catalog is
@@ -341,10 +345,15 @@ impl App {
         let (store, roster, providers) = persist::load(store);
         let look = crate::theme::Look::load(persist::appearance(store.as_ref()));
         let skills_dir = crate::skills::dir();
+        let route = if persist::needs_onboarding(store.as_ref(), &providers) {
+            Route::Onboarding
+        } else {
+            Route::Chat
+        };
         let mut app = App {
             sidebar: PaneState::new(264.0).range(180.0, 420.0),
             inspector: PaneState::new(380.0).range(260.0, 720.0),
-            route: Route::Chat,
+            route,
             roster,
             runs: Vec::new(),
             run: 0,
@@ -416,6 +425,7 @@ impl App {
             ext: crate::extensions::Extensions::new(),
             look,
             theme_open: false,
+            setup_look_done: false,
             updates: crate::update::Updates::new(persist::auto_update(store.as_ref())),
             schedules: Vec::new(),
             firing: std::collections::HashMap::new(),

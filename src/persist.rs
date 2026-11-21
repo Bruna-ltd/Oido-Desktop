@@ -21,6 +21,7 @@ pub const RUN_SCHEDULES: &str = "schedules.run";
 pub const ROUTE_BULK: &str = "router.bulk";
 const PANES: &str = "panes";
 const SIDEBAR_FOLDS: &str = "sidebar.folds";
+const ONBOARDED: &str = "onboarding.done";
 
 /// What is folded away in the agents sidebar: its two sections, and the agents whose team is.
 #[derive(Default, Serialize, Deserialize)]
@@ -59,6 +60,28 @@ pub fn appearance(store: Option<&Store>) -> Appearance {
             None
         })
         .unwrap_or_default()
+}
+
+/// Whether the first-run setup shows: until it is finished or skipped, and only while nothing
+/// is connected. Someone who already has a provider has no need of it, so that settles it.
+pub fn needs_onboarding(store: Option<&Store>, providers: &Providers) -> bool {
+    let Some(db) = store else {
+        return false;
+    };
+    let done = db.setting::<bool>(ONBOARDED).unwrap_or_else(|e| {
+        eprintln!("oido: could not read the setup state: {e}");
+        None
+    });
+    if done == Some(true) {
+        return false;
+    }
+    if !providers.connected().is_empty() {
+        if let Err(e) = db.set_setting(ONBOARDED, &true) {
+            eprintln!("oido: could not save the setup state: {e}");
+        }
+        return false;
+    }
+    true
 }
 
 /// Whether the app updates itself: on unless turned off on the Settings page.
@@ -192,6 +215,12 @@ fn try_load(db: &Store) -> store::Result<(Roster, Providers)> {
 }
 
 impl App {
+    /// Ends the first-run setup, finished or skipped, and goes to the chat.
+    pub fn finish_onboarding(&mut self) {
+        self.save("the setup state", |db| db.set_setting(ONBOARDED, &true));
+        self.route = crate::app::Route::Chat;
+    }
+
     pub(crate) fn save(&self, what: &str, f: impl FnOnce(&Store) -> store::Result<()>) {
         if let Some(db) = &self.store
             && let Err(e) = f(db)
@@ -364,5 +393,41 @@ impl App {
             a.workdir = folder;
         }
         self.save_agent_row(&t);
+    }
+}
+
+#[cfg(test)]
+mod onboarding_tests {
+    use super::*;
+    use crate::vault::Vault;
+
+    fn db() -> Store {
+        Store::in_memory(Vault::fixed([1; 32])).unwrap()
+    }
+
+    #[test]
+    fn first_run_shows_setup_until_skipped() {
+        let db = db();
+        let providers = providers::init();
+        assert!(needs_onboarding(Some(&db), &providers));
+        db.set_setting(ONBOARDED, &true).unwrap();
+        assert!(!needs_onboarding(Some(&db), &providers));
+    }
+
+    #[test]
+    fn a_connected_provider_settles_it_for_good() {
+        let db = db();
+        let mut providers = providers::init();
+        let id = providers.list[0].id.clone();
+        providers.connect(&id);
+        assert!(!needs_onboarding(Some(&db), &providers));
+        assert_eq!(db.setting::<bool>(ONBOARDED).unwrap(), Some(true));
+        // Disconnecting later does not bring setup back.
+        assert!(!needs_onboarding(Some(&db), &providers::init()));
+    }
+
+    #[test]
+    fn no_store_means_no_setup() {
+        assert!(!needs_onboarding(None, &providers::init()));
     }
 }
