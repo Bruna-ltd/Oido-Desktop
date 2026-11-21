@@ -11,6 +11,8 @@
 
 mod gate;
 
+pub(crate) use gate::Worker;
+
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

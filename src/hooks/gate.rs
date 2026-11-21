@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::{Event, Fail, Hook, OFF, SAVED, Verdict, after_event, base_event, before_event, run};
 use crate::app::App;
-use crate::guard::{Trip, TripState};
+use crate::guard::{Action, Hidden, Trip, TripState, title};
 use crate::model::{AgentStatus, Message};
 
 /// What the before-tool hooks decided about one call.
@@ -151,6 +151,115 @@ pub(crate) fn after(
     }
 }
 
+/// The tool hooks for work nobody watches (a team member, a workflow step): worked out on the UI
+/// thread, then used on the worker thread, where waiting for a hook blocks nothing.
+#[derive(Clone, Default)]
+pub(crate) struct Worker {
+    before: Vec<Hook>,
+    after: Vec<Hook>,
+    agent: String,
+    dir: PathBuf,
+}
+
+fn matching(list: &[Hook], tool: &str) -> Vec<Hook> {
+    list.iter().filter(|h| h.is_for(tool)).cloned().collect()
+}
+
+impl Worker {
+    /// The hooks that are on for agent `id`, working in `dir`.
+    pub(crate) fn new(hooks: &super::Hooks, id: &str, agent: &str, dir: PathBuf) -> Worker {
+        let (before, after) = if hooks.runs_for(id) {
+            (
+                hooks.for_event(Event::BeforeTool, ""),
+                hooks.for_event(Event::AfterTool, ""),
+            )
+        } else {
+            Default::default()
+        };
+        Worker {
+            before,
+            after,
+            agent: agent.to_owned(),
+            dir,
+        }
+    }
+
+    /// Runs the before-tool hooks over a call the guardrails let through. They may change `args`,
+    /// and what they change is looked at by the guardrails again. Returns what the model is told
+    /// when the call must not run: a hook refused it, or held it and you said no (the card goes
+    /// through `asker`). `notes` gets what to say in the run.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn before(
+        &self,
+        asker: &crate::guard::ask::Asker,
+        (guard, place, outside): (&crate::guard::Guard, &crate::guard::Place, Option<&str>),
+        tool: &str,
+        args: &mut String,
+        stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        notes: &mut Vec<(String, String)>,
+    ) -> Option<String> {
+        let hooks = matching(&self.before, tool);
+        if hooks.is_empty() {
+            return None;
+        }
+        let b = before(&hooks, ("", &self.agent), &self.dir, tool, args);
+        notes.extend(b.notes);
+        if let Some(changed) = b.args {
+            *args = changed;
+            // A hook may change what runs, never what the guardrails allow.
+            let (_, found) =
+                guard.review(&crate::guard::Hidden::default(), tool, args, place, outside);
+            if let Some(f) = found {
+                let (state, told) = crate::guard::unattended(asker, tool, args, &f, stop);
+                notes.push((format!("{}: {state:?}", crate::guard::title(f.rule)), f.why));
+                if told.is_some() {
+                    return told;
+                }
+            }
+        }
+        let (rule, state, why) = match b.stop? {
+            Stop::Block(why) => ("hook", TripState::Blocked, why),
+            Stop::Ask(why) => {
+                let f = crate::guard::actions::Finding {
+                    rule: "hook",
+                    why,
+                    action: crate::guard::Action::Ask,
+                };
+                let (state, told) = crate::guard::unattended(asker, tool, args, &f, stop);
+                notes.push((format!("Hook: {state:?}"), f.why));
+                return told;
+            }
+        };
+        notes.push(("Hook: refused".to_owned(), why.clone()));
+        Some(
+            Trip {
+                rule: rule.to_owned(),
+                why,
+                state,
+                asked_at: None,
+            }
+            .told(),
+        )
+    }
+
+    /// Runs the after-tool hooks over `result` of a call that ran.
+    pub(crate) fn after(
+        &self,
+        tool: &str,
+        args: &str,
+        result: String,
+        notes: &mut Vec<(String, String)>,
+    ) -> String {
+        let hooks = matching(&self.after, tool);
+        if hooks.is_empty() {
+            return result;
+        }
+        let done = after(&hooks, ("", &self.agent), &self.dir, (tool, args), result);
+        notes.extend(done.notes);
+        done.result
+    }
+}
+
 /// A call waiting in the chat's last reply, as a hook job needs it.
 struct Pending {
     id: String,
@@ -226,6 +335,11 @@ impl App {
             Some(a) if self.hooks.runs_for(&a.id) => self.hooks.for_event(event, tool),
             _ => Vec::new(),
         }
+    }
+
+    /// The tool hooks for work `agent` does unattended, in `dir`.
+    pub(crate) fn hooks_worker(&self, agent: &crate::agents::Agent, dir: PathBuf) -> Worker {
+        Worker::new(&self.hooks, &agent.id, &agent.name, dir)
     }
 
     /// Switches agent `id` in or out of running hooks, and saves it.
@@ -416,6 +530,7 @@ impl App {
         if !self.hooking_end(sid) {
             return;
         }
+        let place = self.place_of(sid);
         let mut stopped: Vec<(String, Trip)> = Vec::new();
         let mut notes = Vec::new();
         let mut saved = None;
@@ -431,11 +546,36 @@ impl App {
                     continue;
                 };
                 notes.extend(b.notes);
+                let mut stop = b.stop;
                 if let Some(args) = b.args {
                     call.summary = crate::tools::summary(&call.name, &args);
                     call.args = args;
+                    // A hook may change what runs, never what the guardrails allow: the new
+                    // arguments are looked at again, and a hook's own refusal or hold stands.
+                    let outside = self.tainted.get(sid).map(String::as_str);
+                    let (_, found) = self.guard.review(
+                        &Hidden::default(),
+                        &call.name,
+                        &call.args,
+                        &place,
+                        outside,
+                    );
+                    if let Some(f) = found {
+                        let blocked = matches!(stop, Some(Stop::Block(_)));
+                        if !blocked {
+                            notes.push((
+                                format!("{}: after a hook changed the call", title(f.rule)),
+                                f.why.clone(),
+                            ));
+                            let why = format!("{} ({})", f.why, title(f.rule));
+                            stop = Some(match f.action {
+                                Action::Block => Stop::Block(why),
+                                Action::Ask => Stop::Ask(why),
+                            });
+                        }
+                    }
                 }
-                let (state, why) = match b.stop {
+                let (state, why) = match stop {
                     Some(Stop::Block(why)) => (TripState::Blocked, why),
                     Some(Stop::Ask(why)) => (TripState::Asking, why),
                     None => continue,
@@ -843,5 +983,84 @@ mod tests {
         let _ = seen.recv().unwrap();
         assert!(dir.join("ran").exists(), "its hooks were off");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const DISK: &str = r#"{"action":"replace","args":{"command":"mkfs.ext4 /dev/sdb1"}}"#;
+
+    #[test]
+    fn a_hook_cannot_change_a_call_into_one_the_guardrails_refuse() {
+        let dir = folder();
+        let db = TempDb::new();
+        let (app, seen) = chat_with(
+            &db,
+            vec![hook(Event::BeforeTool, &format!("echo '{DISK}'"))],
+            "touch ran",
+            &dir,
+        );
+        let _ = seen.recv().unwrap();
+        let second = seen.recv().unwrap();
+        assert!(second.contains("not run"), "{second}");
+        assert!(!dir.join("ran").exists());
+        assert!(!app.busy());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn worker(hooks: Vec<Hook>) -> Worker {
+        let mut all = super::super::Hooks::default();
+        all.set(hooks);
+        Worker::new(&all, "a", "Member", tmp())
+    }
+
+    fn scene() -> (crate::guard::Guard, crate::guard::Place) {
+        (
+            crate::guard::Guard::default(),
+            crate::guard::Place {
+                root: tmp(),
+                home: None,
+                blocked: Vec::new(),
+            },
+        )
+    }
+
+    fn gate(w: &Worker, args: &mut String) -> Option<String> {
+        let (guard, place) = scene();
+        w.before(
+            &crate::guard::ask::Asker::nobody(),
+            (&guard, &place, None),
+            "shell",
+            args,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &mut Vec::new(),
+        )
+    }
+
+    #[test]
+    fn unattended_work_runs_hooks_too() {
+        let w = worker(vec![hook(Event::BeforeTool, "echo nope >&2; exit 2")]);
+        let told = gate(&w, &mut "{}".to_owned()).unwrap();
+        assert!(told.contains("a hook the person set stopped it") && told.contains("nope"));
+
+        let w = worker(vec![hook(
+            Event::BeforeTool,
+            r#"echo '{"action":"replace","args":{"command":"ls"}}'"#,
+        )]);
+        let mut args = r#"{"command":"pwd"}"#.to_owned();
+        assert_eq!(gate(&w, &mut args), None);
+        assert_eq!(args, r#"{"command":"ls"}"#);
+
+        let w = worker(vec![hook(Event::BeforeTool, &format!("echo '{DISK}'"))]);
+        assert!(
+            gate(&w, &mut "{}".to_owned()).is_some(),
+            "the guardrails look again"
+        );
+
+        let w = worker(vec![hook(
+            Event::AfterTool,
+            r#"echo '{"action":"replace","result":"short"}'"#,
+        )]);
+        assert_eq!(
+            w.after("shell", "{}", "long".into(), &mut Vec::new()),
+            "short"
+        );
     }
 }

@@ -71,7 +71,19 @@ While hooks run, the chat shows as busy; Stop ends the wait and the calls still 
 The **Agents** section of the Hooks screen has a switch for each agent (team members too): one switched
 off runs no hooks.
 
+## Unattended work
+
+Tool calls by team members and by workflow steps run the tool hooks too (not the watch-only events).
+They run on the worker's own thread, so waiting for a hook blocks nothing. An `ask` becomes a card
+for your go-ahead, as a guardrail's question does; an agent switched out of the hooks runs none for
+its members' calls or its workflows' steps. Their notes go in a team member's run; a workflow step has
+no run to put them in.
+
+## What a hook changes is checked again
+
+When a hook replaces a call's arguments, the guardrails look at the new arguments. A hook cannot turn
+a call into one they refuse.
+
 ## Not yet
 
-Hooks run in a chat's own work. Team members' tool calls and workflow steps run none yet, and
-a hook cannot yet stop or change a model call.
+A hook cannot yet stop or change a model call (`before_model` only watches).

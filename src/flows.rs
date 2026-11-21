@@ -104,6 +104,8 @@ pub(crate) struct Prep {
     pub outside: Option<String>,
     /// TypeSafe's key, when a step asks it.
     pub typesafe: Option<zeroize::Zeroizing<String>>,
+    /// The hooks that look at its tool calls.
+    pub hooks: crate::hooks::Worker,
 }
 
 /// An MCP tool a workflow step calls.
@@ -433,148 +435,191 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
                 };
             }
         }
-        if name == crate::tools::DELEGATE {
-            let (who, task) = crate::delegate::parse(&args.to_string());
-            let Some(member) = p.crew.iter().find(|c| c.is(&who)) else {
-                return ToolOutcome {
-                    error: Some(format!(
-                        "{who:?} is not an agent this workflow can hand to."
-                    )),
-                    ..ToolOutcome::default()
-                };
-            };
-            if crate::delegate::in_background(&args.to_string()) {
-                member.start(&task, outside);
-                return ToolOutcome {
-                    value: Value::String(format!("Handed to {who}, not waiting for its answer.")),
-                    ..ToolOutcome::default()
-                };
-            }
-            let taken = member.take(&task, outside, stop);
-            let done = match taken.answer() {
-                Ok(text) => ToolOutcome {
-                    value: Value::String(text),
-                    outside: taken
-                        .outside()
-                        .then_some("a team member's answer, written with outside text in view"),
-                    ..ToolOutcome::default()
-                },
-                Err(why) => ToolOutcome {
-                    error: Some(why),
-                    ..ToolOutcome::default()
-                },
-            };
-            if let Ok(mut all) = handed.lock() {
-                all.push(taken);
-            }
-            return done;
-        }
-        if let Some(m) = p.mcp.iter().find(|m| m.name == name) {
-            // An extension's tool with fields answers with them; a server's answer that is JSON
-            // is read as JSON, so later steps can use its fields.
-            let done = match (&m.account, crate::extensions::find(&m.target.id)) {
-                (Some(account), Some(ext)) => crate::extensions::google::call_value(
-                    ext,
-                    &m.tool,
-                    args,
-                    account.clone(),
-                    cancel,
-                ),
-                _ => {
-                    let done = crate::mcp::client::call_tool(
-                        m.target.clone(),
-                        &m.tool,
-                        args.clone(),
-                        cancel,
-                    );
-                    crate::mcp::client::Outcome {
-                        result: done.result.map(|text| structured(&text)),
-                        tokens: done.tokens,
-                    }
-                }
-            };
-            if let (Some(tokens), Ok(mut kept)) = (done.tokens, renewed.lock()) {
-                kept.push((m.target.id.clone(), tokens));
-            }
-            return match done.result {
-                Ok(value) => ToolOutcome {
-                    value,
-                    ..ToolOutcome::default()
-                },
-                Err(why) => ToolOutcome {
-                    error: Some(why),
-                    ..ToolOutcome::default()
-                },
-            };
-        }
-        if crate::typesafe::is_tool(name) {
-            let Some(key) = &p.typesafe else {
-                return ToolOutcome {
-                    error: Some("TypeSafe is not connected.".to_owned()),
-                    ..ToolOutcome::default()
-                };
-            };
-            let text = crate::typesafe::run(
-                crate::typesafe::BASE,
-                key,
-                p.workdir.as_deref(),
-                name,
-                &args.to_string(),
-            );
-            if text.starts_with("Error:") {
-                return ToolOutcome {
-                    error: Some(text),
-                    ..ToolOutcome::default()
-                };
-            }
-            // The answer is JSON, so later steps read its fields (`yes_probability`, …).
+        // The hooks look at a step's call once the rules let it through; what they change is looked
+        // at by the rules again. Their notes have no run to go in.
+        let original = args.to_string();
+        let mut text_args = original.clone();
+        let mut noted = Vec::new();
+        if let Some(told) = p.hooks.before(
+            &p.asker,
+            (&p.guard, &place, outside),
+            name,
+            &mut text_args,
+            stop,
+            &mut noted,
+        ) {
             return ToolOutcome {
-                value: serde_json::from_str(&text).unwrap_or(Value::String(text)),
+                value: Value::Null,
+                error: Some(told),
                 ..ToolOutcome::default()
             };
         }
-        if name == crate::tools::SHELL {
-            let Some(spec) = command::parse(&args.to_string()) else {
+        let changed: Value;
+        let args = if text_args == original {
+            args
+        } else {
+            changed = serde_json::from_str(&text_args).unwrap_or(Value::Null);
+            &changed
+        };
+        let mut done = (|| -> ToolOutcome {
+            if name == crate::tools::DELEGATE {
+                let (who, task) = crate::delegate::parse(&args.to_string());
+                let Some(member) = p.crew.iter().find(|c| c.is(&who)) else {
+                    return ToolOutcome {
+                        error: Some(format!(
+                            "{who:?} is not an agent this workflow can hand to."
+                        )),
+                        ..ToolOutcome::default()
+                    };
+                };
+                if crate::delegate::in_background(&args.to_string()) {
+                    member.start(&task, outside);
+                    return ToolOutcome {
+                        value: Value::String(format!(
+                            "Handed to {who}, not waiting for its answer."
+                        )),
+                        ..ToolOutcome::default()
+                    };
+                }
+                let taken = member.take(&task, outside, stop);
+                let done = match taken.answer() {
+                    Ok(text) => ToolOutcome {
+                        value: Value::String(text),
+                        outside: taken
+                            .outside()
+                            .then_some("a team member's answer, written with outside text in view"),
+                        ..ToolOutcome::default()
+                    },
+                    Err(why) => ToolOutcome {
+                        error: Some(why),
+                        ..ToolOutcome::default()
+                    },
+                };
+                if let Ok(mut all) = handed.lock() {
+                    all.push(taken);
+                }
+                return done;
+            }
+            if let Some(m) = p.mcp.iter().find(|m| m.name == name) {
+                // An extension's tool with fields answers with them; a server's answer that is JSON
+                // is read as JSON, so later steps can use its fields.
+                let done = match (&m.account, crate::extensions::find(&m.target.id)) {
+                    (Some(account), Some(ext)) => crate::extensions::google::call_value(
+                        ext,
+                        &m.tool,
+                        args,
+                        account.clone(),
+                        cancel,
+                    ),
+                    _ => {
+                        let done = crate::mcp::client::call_tool(
+                            m.target.clone(),
+                            &m.tool,
+                            args.clone(),
+                            cancel,
+                        );
+                        crate::mcp::client::Outcome {
+                            result: done.result.map(|text| structured(&text)),
+                            tokens: done.tokens,
+                        }
+                    }
+                };
+                if let (Some(tokens), Ok(mut kept)) = (done.tokens, renewed.lock()) {
+                    kept.push((m.target.id.clone(), tokens));
+                }
+                return match done.result {
+                    Ok(value) => ToolOutcome {
+                        value,
+                        ..ToolOutcome::default()
+                    },
+                    Err(why) => ToolOutcome {
+                        error: Some(why),
+                        ..ToolOutcome::default()
+                    },
+                };
+            }
+            if crate::typesafe::is_tool(name) {
+                let Some(key) = &p.typesafe else {
+                    return ToolOutcome {
+                        error: Some("TypeSafe is not connected.".to_owned()),
+                        ..ToolOutcome::default()
+                    };
+                };
+                let text = crate::typesafe::run(
+                    crate::typesafe::BASE,
+                    key,
+                    p.workdir.as_deref(),
+                    name,
+                    &args.to_string(),
+                );
+                if text.starts_with("Error:") {
+                    return ToolOutcome {
+                        error: Some(text),
+                        ..ToolOutcome::default()
+                    };
+                }
+                // The answer is JSON, so later steps read its fields (`yes_probability`, …).
+                return ToolOutcome {
+                    value: serde_json::from_str(&text).unwrap_or(Value::String(text)),
+                    ..ToolOutcome::default()
+                };
+            }
+            if name == crate::tools::SHELL {
+                let Some(spec) = command::parse(&args.to_string()) else {
+                    return ToolOutcome {
+                        value: Value::Null,
+                        error: Some("No command was given.".to_owned()),
+                        ..ToolOutcome::default()
+                    };
+                };
+                let raw = command::run_raw(&spec, &p.shell_dir, cancel);
+                return ToolOutcome {
+                    value: json!({
+                        "exit_code": match raw.end { command::Ended::Exit(Some(c)) => json!(c), _ => Value::Null },
+                        "stdout": raw.stdout,
+                        "stderr": raw.stderr,
+                    }),
+                    error: (!raw.succeeded()).then(|| raw.text()),
+                    ..ToolOutcome::default()
+                };
+            }
+            if name == crate::web::NAME {
+                let text = crate::web::fetch(&args.to_string());
+                let error = text.starts_with("Error:").then(|| text.clone());
+                return ToolOutcome {
+                    value: Value::String(text),
+                    error,
+                    ..ToolOutcome::default()
+                };
+            }
+            let Some(root) = &p.workdir else {
                 return ToolOutcome {
                     value: Value::Null,
-                    error: Some("No command was given.".to_owned()),
+                    error: Some("This agent has no working folder for files.".to_owned()),
                     ..ToolOutcome::default()
                 };
             };
-            let raw = command::run_raw(&spec, &p.shell_dir, cancel);
-            return ToolOutcome {
-                value: json!({
-                    "exit_code": match raw.end { command::Ended::Exit(Some(c)) => json!(c), _ => Value::Null },
-                    "stdout": raw.stdout,
-                    "stderr": raw.stderr,
-                }),
-                error: (!raw.succeeded()).then(|| raw.text()),
-                ..ToolOutcome::default()
-            };
-        }
-        if name == crate::web::NAME {
-            let text = crate::web::fetch(&args.to_string());
+            let text = crate::files::run(root, name, &args.to_string());
             let error = text.starts_with("Error:").then(|| text.clone());
-            return ToolOutcome {
+            ToolOutcome {
                 value: Value::String(text),
                 error,
                 ..ToolOutcome::default()
-            };
+            }
+        })();
+        let shown = done.error.clone().unwrap_or_else(|| match &done.value {
+            Value::String(s) => s.clone(),
+            v => v.to_string(),
+        });
+        let hooked = p.hooks.after(name, &text_args, shown.clone(), &mut noted);
+        if hooked != shown {
+            if done.error.is_some() {
+                done.error = Some(hooked);
+            } else {
+                done.value = Value::String(hooked);
+            }
         }
-        let Some(root) = &p.workdir else {
-            return ToolOutcome {
-                value: Value::Null,
-                error: Some("This agent has no working folder for files.".to_owned()),
-                ..ToolOutcome::default()
-            };
-        };
-        let text = crate::files::run(root, name, &args.to_string());
-        let error = text.starts_with("Error:").then(|| text.clone());
-        ToolOutcome {
-            value: Value::String(text),
-            error,
-            ..ToolOutcome::default()
-        }
+        done
     };
     // Where a result came from decides whether what is made of it is held, whatever the tool.
     let tool = |name: &str, args: &Value, outside: Option<&str>| -> ToolOutcome {
@@ -684,16 +729,18 @@ impl App {
         };
         let (endpoint, credential) = self.target_for(&model.provider)?;
         let workdir = agent.workdir.clone().map(PathBuf::from);
+        let shell_dir = workdir
+            .clone()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| ".".into());
         Ok(Prep {
             endpoint,
             credential,
             who: self.providers.label_of(&model.provider),
             provider: model.provider,
             model: model.id,
-            shell_dir: workdir
-                .clone()
-                .or_else(dirs::home_dir)
-                .unwrap_or_else(|| ".".into()),
+            hooks: self.hooks_worker(agent, shell_dir.clone()),
+            shell_dir,
             workdir,
             guard: self.guard.clone(),
             asker: crate::guard::ask::Asker::nobody(),
