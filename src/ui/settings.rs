@@ -296,16 +296,11 @@ pub(super) fn section_with(title: &str, lead: Option<El>, rows: Vec<El>, k: &Kit
         .role("group")
         .label(title.to_owned())
         .child(
-            row()
-                .gap(8.0)
-                .center_y()
-                .px(4.0)
-                .children(lead)
-                .child(
-                    text(title.to_owned())
-                        .font(k.ty.body_medium)
-                        .color(c.text_base),
-                ),
+            row().gap(8.0).center_y().px(4.0).children(lead).child(
+                text(title.to_owned())
+                    .font(k.ty.body_medium)
+                    .color(c.text_base),
+            ),
         )
         .child(card)
 }
@@ -343,7 +338,7 @@ const ROW: f32 = 32.0;
 const MAX_ROWS: f32 = 9.5;
 const LIST_WIDTH: f32 = 280.0;
 
-fn theme_row(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+pub(super) fn theme_row(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let offered = choices(&s.look);
     let current = offered.iter().find(|ch| ch.appearance == s.look.appearance);
     let trigger = Select::new::<&str>("theme-value", &[])

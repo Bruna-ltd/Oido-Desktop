@@ -140,7 +140,12 @@ impl TempDb {
     }
 
     pub fn open_with(&self, vault: Vault) -> App {
-        App::new(Some(Store::open(&self.0, vault).expect("a store")))
+        let mut app = App::new(Some(Store::open(&self.0, vault).expect("a store")));
+        // A fresh file would start the first-run setup; these tests are about everything after it.
+        if app.route == crate::app::Route::Onboarding {
+            app.finish_onboarding();
+        }
+        app
     }
 }
 

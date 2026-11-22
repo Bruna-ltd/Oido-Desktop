@@ -72,6 +72,7 @@ impl App {
             return self.providers.fail(id, why);
         }
         self.providers.key = TextEdit::new("");
+        self.provider_connected();
     }
 
     /// Adds a server or saves edits to one. A blank key keeps the current one. As with a provider,
@@ -171,6 +172,7 @@ impl App {
             return self.providers.fail(id, why);
         }
         self.providers.key = TextEdit::new("");
+        self.provider_connected();
     }
 
     /// Signs a provider out. Its key and models are forgotten with it, by the same write; a server
@@ -397,6 +399,7 @@ impl App {
             return self.providers.fail(id, why);
         }
         self.providers.code = TextEdit::new("");
+        self.provider_connected();
     }
 
     /// Keeps signed-in subscriptions current, from the app's half-minute tick. Offline, the old

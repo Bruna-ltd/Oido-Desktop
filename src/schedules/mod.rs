@@ -36,6 +36,8 @@ pub struct Page {
     pub fires: Vec<Fire>,
     pub form: Option<Form>,
     pub confirm: bool,
+    /// The open schedule's long prompt shown in full.
+    pub prompt_open: bool,
     pub notice: Option<String>,
     /// Why approving a draft in a chat did not go through, by the draft's tool call.
     pub card_notice: Option<(String, String)>,
@@ -668,6 +670,7 @@ impl App {
         page.open = Some(id.to_owned());
         page.form = None;
         page.confirm = false;
+        page.prompt_open = false;
         page.notice = None;
         self.reload_fires();
     }

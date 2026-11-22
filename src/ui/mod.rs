@@ -19,6 +19,7 @@ mod math;
 mod mcp;
 mod model_picker;
 mod multi_picker;
+mod onboarding;
 mod picture;
 mod providers;
 mod qr;
@@ -109,6 +110,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Route::Guardrails => ("Guardrails".to_owned(), guard::screen(s, &k, &mut layer)),
         Route::Hooks => ("Hooks".to_owned(), hooks::screen(s, &k)),
         Route::Settings => ("Settings".to_owned(), settings::screen(s, &k, &mut layer)),
+        Route::Onboarding => ("Welcome".to_owned(), onboarding::screen(s, &k, &mut layer)),
     };
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.
     let runs = s.route == Route::Runs;

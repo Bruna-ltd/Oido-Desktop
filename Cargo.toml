@@ -88,6 +88,7 @@ dbg_macro = "deny"
 [profile.dev]
 opt-level = 1
 lto = "off"
+debug = "line-tables-only"
 
 # Dependencies are optimized more, and without debug info: the UI engine (rune) lays out and draws
 # every frame, and unoptimized it takes 75 to 150 ms a frame, which makes scrolling crawl.

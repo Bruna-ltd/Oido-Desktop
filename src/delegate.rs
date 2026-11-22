@@ -103,6 +103,9 @@ pub fn tools_for(
         all.push(crate::skills::spec(skills));
     }
     all.push(spec(&agent.subagents));
+    if crate::onboarding::is_setup(agent) {
+        all.push(crate::onboarding::spec());
+    }
     all
 }
 

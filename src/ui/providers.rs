@@ -65,18 +65,8 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             k,
         ));
     }
-    let servers = p.servers();
-    let mut server_rows: Vec<El> = servers.iter().map(|x| server_row(s, x, k)).collect();
-    server_rows.push(add_server_row(s, k));
-    page = page.child(section("Custom servers", servers.len(), server_rows, k));
-    let available = p.available();
-    if !available.is_empty() {
-        page = page.child(section(
-            "Not connected",
-            available.len(),
-            available.iter().map(|x| available_row(s, x, k)).collect(),
-            k,
-        ));
+    for section in unconnected(s, k) {
+        page = page.child(section);
     }
     col()
         .key("providers")
@@ -88,6 +78,26 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             stick_bottom: false,
         })
         .child(page)
+}
+
+/// Your own servers, then the providers not yet connected: where a new connection starts. The
+/// first-run setup shows these same rows.
+pub(super) fn unconnected(s: &App, k: &Kit) -> Vec<El> {
+    let p = &s.providers;
+    let servers = p.servers();
+    let mut server_rows: Vec<El> = servers.iter().map(|x| server_row(s, x, k)).collect();
+    server_rows.push(add_server_row(s, k));
+    let mut sections = vec![section("Custom servers", servers.len(), server_rows, k)];
+    let available = p.available();
+    if !available.is_empty() {
+        sections.push(section(
+            "Not connected",
+            available.len(),
+            available.iter().map(|x| available_row(s, x, k)).collect(),
+            k,
+        ));
+    }
+    sections
 }
 
 pub(super) fn section(title: &str, count: usize, rows: Vec<El>, k: &Kit) -> El {

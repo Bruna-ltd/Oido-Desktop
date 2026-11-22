@@ -242,6 +242,7 @@ pub fn summary(name: &str, args: &str) -> String {
         crate::schedule::tool::NAME => crate::schedule::tool::summary(args),
         crate::mcp::tool::NAME => crate::mcp::tool::summary(args),
         crate::agent_tool::NAME => crate::agent_tool::summary(args),
+        crate::onboarding::TIGHTEN => "Turn on every guardrail".to_owned(),
         crate::web::NAME => crate::web::summary(args),
         crate::connector::jev::NAME => crate::connector::jev::summary(args),
         n if needs_typesafe(n) => crate::typesafe::summary(args),
@@ -454,6 +455,7 @@ pub fn knows(name: &str) -> bool {
     name == DELEGATE
         || name == SKILL
         || name == crate::channels::SEND_FILE
+        || name == crate::onboarding::TIGHTEN
         || registered().iter().any(|t| t.name == name)
 }
 

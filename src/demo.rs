@@ -461,6 +461,14 @@ pub static SCENES: &[Scene] = &[
         s.theme_open = true;
         s.route = Route::Settings;
     }),
+    // First run: the look, then the connect step.
+    ("setup-look", |s| {
+        s.route = Route::Onboarding;
+    }),
+    ("setup-connect", |s| {
+        s.setup_look_done = true;
+        s.route = Route::Onboarding;
+    }),
     // An update installed, waiting for a restart.
     ("settings-updates", |s| {
         if let Ok(v) = "0.2.0".parse() {
