@@ -1,6 +1,6 @@
 //! A searchable multi-select: a field that opens a list with a check on each chosen item, and the
 //! chosen ones as removable chips beneath it. It is the model picker's sibling, but you can choose
-//! several, so choosing leaves it open. Skills and tools both use it. Each row shows a one-line
+//! several, so choosing leaves it open; with more than one chosen, "Clear all" empties them. Skills and tools both use it. Each row shows a one-line
 //! description; the highlighted row's whole description shows in a panel beside the list.
 
 use std::borrow::Cow;
@@ -131,7 +131,25 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>, spec: Spec) -> El {
         popover.build(k, layer)
     };
     // Always wrapped, so a caller's key never lands on the popover's own anchor.
-    let mut out = col().w_full().gap(10.0).child(row().child(field));
+    let mut top = row().gap(8.0).center_y().child(field);
+    if spec.chosen.len() > 1 && !spec.single {
+        // Every name is chosen, so toggling each one removes it.
+        let all = spec.chosen.clone();
+        top = top.child(
+            Button::new("Clear all")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .help("Remove everything chosen")
+                .on_press(move |s: &mut App| {
+                    for name in &all {
+                        toggle(s, name);
+                    }
+                })
+                .build(k)
+                .key(format!("{key}-clear-all")),
+        );
+    }
+    let mut out = col().w_full().gap(10.0).child(top);
     if !spec.chosen.is_empty() && !spec.single {
         out = out.child(chips(key, &spec.chosen, &spec.items, toggle, k));
     }

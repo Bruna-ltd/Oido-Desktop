@@ -296,16 +296,11 @@ pub(super) fn section_with(title: &str, lead: Option<El>, rows: Vec<El>, k: &Kit
         .role("group")
         .label(title.to_owned())
         .child(
-            row()
-                .gap(8.0)
-                .center_y()
-                .px(4.0)
-                .children(lead)
-                .child(
-                    text(title.to_owned())
-                        .font(k.ty.body_medium)
-                        .color(c.text_base),
-                ),
+            row().gap(8.0).center_y().px(4.0).children(lead).child(
+                text(title.to_owned())
+                    .font(k.ty.body_medium)
+                    .color(c.text_base),
+            ),
         )
         .child(card)
 }

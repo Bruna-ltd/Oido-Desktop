@@ -2,15 +2,17 @@
 //! its fires went, and the form that makes or changes one (or an agent's draft, which saving
 //! approves).
 
-use chrono::Local;
-use rune::{Color, El, ScrollSpec, TextEdit, col, el, row, text, text_input};
+use chrono::{Datelike, Local, TimeZone};
+use rune::{Color, El, ScrollSpec, TextEdit, TextStyle, col, el, icon, row, text, text_input};
 use rune_kit::{
-    Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Select,
-    SelectAppearance,
+    Button, ButtonVariant, ControlSize, Divider, Kit, SegmentedControl, Select, SelectAppearance,
+    glyphs,
 };
 
+use super::icons;
+
 use crate::app::{App, now};
-use crate::schedule::timing::{Days, when};
+use crate::schedule::timing::Days;
 use crate::schedule::{Fire, FireStatus, Schedule, Target};
 use crate::schedules::form::{Form, Kind, Source, TimingForm, When};
 
@@ -33,7 +35,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 
 fn new_button(k: &Kit) -> El {
     Button::new("New schedule")
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Submit)
         .control_size(ControlSize::Small)
         .on_press(|s: &mut App| s.new_schedule())
         .build(k)
@@ -46,19 +48,40 @@ fn empty(k: &Kit) -> El {
         .w_full()
         .h_full()
         .center()
-        .gap(8.0)
-        .child(text("No schedules yet").font(k.ty.body_medium).color(k.c.text_base))
+        .gap(12.0)
         .child(
-            text("A schedule sends an agent a prompt, or runs one of its workflows, at set times while Oido is open. Make one here, or ask an agent that has the schedule tool.")
-                .font(k.ty.small)
+            col()
+                .w(56.0)
+                .h(56.0)
+                .center()
+                .radius(k.radius.lg)
+                .fill(k.c.layer_01)
+                .border(1.0, k.c.border_muted)
+                .child(icon(&icons::SCHEDULED, 26.0).color(k.c.text_muted)),
+        )
+        .child(text("Nothing scheduled yet").font(heading_font(k)).color(k.c.text_base))
+        .child(
+            text("A schedule gives an agent a job at set times: send it a prompt, or run one of its workflows. Oido has to be open for it to run. You can make one here, or ask an agent to set it up.")
+                .font(k.ty.body)
                 .color(k.c.text_muted)
-                .max_w(460.0)
+                .max_w(440.0)
+                .align(rune::Align::Center)
                 .wrap(),
         )
+        .child(el().h(4.0))
         .child(new_button(k))
 }
 
+fn heading_font(k: &Kit) -> TextStyle {
+    TextStyle {
+        size: 20.0,
+        line_height: 26.0,
+        ..k.ty.body_medium
+    }
+}
+
 fn list(s: &App, k: &Kit) -> El {
+    let n = s.schedules.len();
     col()
         .key("schedule-list")
         .w(320.0)
@@ -69,16 +92,69 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        .child(row().w_full().pb(6.0).child(new_button(k)))
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .px(4.0)
+                .pb(8.0)
+                .child(
+                    text(match n {
+                        1 => "1 schedule".to_owned(),
+                        n => format!("{n} schedules"),
+                    })
+                    .font(k.ty.small)
+                    .color(k.c.text_muted),
+                )
+                .child(el().grow(1.0))
+                .child(new_button(k)),
+        )
         .children(s.schedules.iter().map(|x| item(s, x, k)))
 }
 
-/// "next Tue 11 Nov 2026 09:00", "paused" or "finished".
-fn state(x: &Schedule) -> String {
+/// A prompt longer than this many characters or lines is cut short until asked for.
+const PROMPT_CHARS: usize = 240;
+const PROMPT_LINES: usize = 4;
+
+fn dot(color: Color) -> El {
+    el().w(8.0).h(8.0).radius(4.0).fill(color)
+}
+
+/// "Today 08:30", "Tomorrow 08:30", "Fri 20 Nov 08:30"; the year only when it is not this one.
+fn soon(t: i64) -> String {
+    let Some(at) = Local.timestamp_opt(t, 0).earliest() else {
+        return t.to_string();
+    };
+    let clock = at.format("%H:%M");
+    let Some(today) = Local
+        .timestamp_opt(now(), 0)
+        .earliest()
+        .map(|d| d.date_naive())
+    else {
+        return format!("{} {clock}", at.format("%a %-d %b %Y"));
+    };
+    let day = at.date_naive();
+    if day == today {
+        format!("Today {clock}")
+    } else if today.succ_opt() == Some(day) {
+        format!("Tomorrow {clock}")
+    } else if day.year() == today.year() {
+        format!("{} {clock}", at.format("%a %-d %b"))
+    } else {
+        format!("{} {clock}", at.format("%a %-d %b %Y"))
+    }
+}
+
+/// Where a schedule stands: a word, the line under it, and the colour of its dot.
+fn state(x: &Schedule, k: &Kit) -> (&'static str, String, Color) {
     match (x.enabled, x.next_at) {
-        (false, _) => "paused".to_owned(),
-        (true, Some(t)) => format!("next {}", when(t, &Local)),
-        (true, None) => "finished".to_owned(),
+        (false, _) => (
+            "Paused",
+            "Won't run until you resume it".to_owned(),
+            k.c.text_faint,
+        ),
+        (true, Some(t)) => ("Active", format!("Next run {}", soon(t)), k.c.success.icon),
+        (true, None) => ("Finished", "Has no more runs".to_owned(), k.c.text_faint),
     }
 }
 
@@ -90,6 +166,7 @@ fn item(s: &App, x: &Schedule, k: &Kit) -> El {
         .roster
         .agent_ref(&x.agent_id)
         .map_or("", |a| a.name.as_str());
+    let (word, next, ink) = state(x, k);
     let id = x.id.clone();
     let e = col()
         .key(format!("schedule-{}", x.id))
@@ -105,22 +182,31 @@ fn item(s: &App, x: &Schedule, k: &Kit) -> El {
         })
         .on_press(move |s: &mut App| s.select_schedule(&id))
         .child(
-            text(x.name.clone())
-                .font(k.ty.ui_medium)
-                .color(c.text_base)
-                .truncate(),
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(dot(ink).label(word))
+                .child(
+                    text(x.name.clone())
+                        .font(k.ty.ui_medium)
+                        .color(c.text_base)
+                        .truncate(),
+                ),
         )
         .child(
             text(format!("{agent} · {}", x.timing.describe(&Local)))
                 .font(k.ty.small)
                 .color(c.text_muted)
-                .truncate(),
+                .truncate()
+                .pl(16.0),
         )
         .child(
-            text(state(x))
+            text(next)
                 .font(k.ty.small)
                 .color(c.text_faint)
-                .truncate(),
+                .truncate()
+                .pl(16.0),
         );
     k.interactive(e)
 }
@@ -146,6 +232,56 @@ fn small_button(label: &str, variant: ButtonVariant) -> Button {
         .control_size(ControlSize::Small)
 }
 
+/// A bordered group on the page's surface.
+fn card(k: &Kit) -> El {
+    col()
+        .w_full()
+        .radius(k.radius.lg)
+        .border(1.0, k.c.border_muted)
+        .fill(k.c.layer_01)
+}
+
+/// A note in the page's warning colour, with a rule to its left.
+fn notice(why: &str, k: &Kit) -> El {
+    row()
+        .w_full()
+        .gap(10.0)
+        .px(14.0)
+        .py(10.0)
+        .radius(k.radius.md)
+        .fill(k.c.warning.bg)
+        .border(1.0, k.c.warning.border)
+        .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.warning.icon))
+        .child(
+            text(why.to_owned())
+                .font(k.ty.small)
+                .color(k.c.warning.fg)
+                .wrap()
+                .grow(1.0),
+        )
+}
+
+/// One fact: what it is, then its value.
+fn fact(label: &str, value: El, k: &Kit) -> El {
+    row()
+        .w_full()
+        .gap(16.0)
+        .px(16.0)
+        .py(12.0)
+        .child(
+            text(label.to_owned())
+                .font(k.ty.small)
+                .color(k.c.text_muted)
+                .pt(3.0)
+                .w(88.0),
+        )
+        .child(value.grow(1.0).min_w(0.0))
+}
+
+fn value(t: impl Into<String>, k: &Kit) -> El {
+    text(t.into()).font(k.ty.body).color(k.c.text_base).wrap()
+}
+
 fn detail(s: &App, k: &Kit) -> El {
     let c = &k.c;
     let page = &s.schedule_page;
@@ -160,67 +296,54 @@ fn detail(s: &App, k: &Kit) -> El {
         .roster
         .agent_ref(&x.agent_id)
         .map_or("", |a| a.name.as_str());
-    let line = |t: String| text(t).font(k.ty.small).color(c.text_base).wrap();
-    let mut out = col()
-        .key("schedule-detail")
-        .grow(1.0)
-        .h_full()
-        .min_h(0.0)
-        .padding(20.0)
-        .gap(10.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
+    let (word, next, ink) = state(x, k);
+
+    let title = col()
+        .w_full()
+        .gap(6.0)
         .child(
             text(x.name.clone())
-                .font(k.ty.body_medium)
-                .color(c.text_base),
+                .font(heading_font(k))
+                .color(c.text_base)
+                .wrap(),
         )
-        .child(line(format!("Agent: {agent}")))
-        .child(line(target_words(s, &x.target)))
-        .child(line(format!("When: {}", x.timing.describe(&Local))))
-        .child(text(state(x)).font(k.ty.small).color(c.text_muted));
-    if x.from_trigger {
-        out = out.child(
-            text(
-                "Made by the workflow's schedule trigger. Change it in the workflow, then publish.",
-            )
-            .font(k.ty.small)
-            .color(c.text_muted)
-            .wrap(),
+        .child(
+            row().gap(8.0).center_y().child(dot(ink)).child(
+                text(format!("{word} · {}", next.to_lowercase()))
+                    .font(k.ty.small)
+                    .color(c.text_muted),
+            ),
         );
-    }
 
-    let mut actions = row().gap(8.0).center_y().pt(6.0);
-    actions = actions
-        .children((!x.from_trigger).then(|| {
-            small_button("Edit", ButtonVariant::Outline)
-                .on_press(|s: &mut App| s.edit_schedule())
-                .build(k)
-                .key("schedule-edit")
-        }))
-        .child(
-            small_button(
-                if x.enabled { "Pause" } else { "Resume" },
-                ButtonVariant::Outline,
-            )
-            .on_press(|s: &mut App| s.toggle_open_schedule())
+    let mut actions = row().gap(8.0).center_y().wrap();
+    actions = actions.child(
+        small_button("Run now", ButtonVariant::Submit)
+            .disabled(s.firing.contains_key(&x.id))
+            .on_press(|s: &mut App| s.run_open_schedule())
             .build(k)
-            .key("schedule-toggle"),
+            .key("schedule-run"),
+    );
+    actions = actions.child(
+        small_button(
+            if x.enabled { "Pause" } else { "Resume" },
+            ButtonVariant::Outline,
         )
-        .child(
-            small_button("Run now", ButtonVariant::Submit)
-                .disabled(s.firing.contains_key(&x.id))
-                .on_press(|s: &mut App| s.run_open_schedule())
-                .build(k)
-                .key("schedule-run"),
-        );
+        .on_press(|s: &mut App| s.toggle_open_schedule())
+        .build(k)
+        .key("schedule-toggle"),
+    );
+    actions = actions.children((!x.from_trigger).then(|| {
+        small_button("Edit", ButtonVariant::Outline)
+            .on_press(|s: &mut App| s.edit_schedule())
+            .build(k)
+            .key("schedule-edit")
+    }));
     actions = if x.from_trigger {
         actions
     } else if page.confirm {
         actions
             .child(
-                small_button("Delete it for good", ButtonVariant::Outline)
+                small_button("Yes, delete it", ButtonVariant::Outline)
                     .on_press(|s: &mut App| s.delete_open_schedule())
                     .build(k)
                     .key("schedule-delete-confirm"),
@@ -239,42 +362,122 @@ fn detail(s: &App, k: &Kit) -> El {
                 .key("schedule-delete"),
         )
     };
-    out = out.child(actions);
+
+    let does = match &x.target {
+        Target::Prompt(p) => {
+            let p = p.trim();
+            let long = p.chars().count() > PROMPT_CHARS || p.lines().count() > PROMPT_LINES;
+            let open = page.prompt_open;
+            let mut body = text(p.to_owned()).font(k.ty.body).color(c.text_base).wrap();
+            if long && !open {
+                body = body.max_lines(PROMPT_LINES);
+            }
+            let mut quote = col()
+                .w_full()
+                .px(12.0)
+                .py(10.0)
+                .gap(6.0)
+                .radius(k.radius.md)
+                .fill(c.layer_02)
+                .child(body);
+            if long {
+                quote = quote.child(
+                    small_button(
+                        if open { "Show less" } else { "Show all" },
+                        ButtonVariant::Ghost,
+                    )
+                    .on_press(|s: &mut App| s.schedule_page.prompt_open ^= true)
+                    .build(k)
+                    .key("schedule-prompt-more"),
+                );
+            }
+            ("Sends this prompt", quote)
+        }
+        Target::Workflow { .. } => (
+            "Runs a workflow",
+            col().w_full().child(value(
+                target_words(s, &x.target)
+                    .trim_start_matches("Runs the workflow ")
+                    .to_owned(),
+                k,
+            )),
+        ),
+    };
+    let facts = card(k)
+        .child(fact("Agent", value(agent, k), k))
+        .child(Divider::horizontal().build(k))
+        .child(fact(does.0, does.1, k))
+        .child(Divider::horizontal().build(k))
+        .child(fact("Repeats", value(x.timing.describe(&Local), k), k))
+        .child(Divider::horizontal().build(k))
+        .child(fact(
+            "Next run",
+            value(
+                match (x.enabled, x.next_at) {
+                    (_, None) => "None".to_owned(),
+                    (true, Some(t)) => soon(t),
+                    (false, Some(t)) => format!("{} (paused)", soon(t)),
+                },
+                k,
+            ),
+            k,
+        ));
+
+    let mut out = col()
+        .key("schedule-detail")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(28.0)
+        .gap(20.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(title)
+        .child(actions);
     if !s.run_schedules {
-        out = out.child(
-            text("Schedules are turned off in Settings: nothing fires on its own.")
-                .font(k.ty.small)
-                .color(k.c.warning.icon)
-                .wrap(),
-        );
+        out = out.child(notice(
+            "Schedules are turned off in Settings, so nothing runs on its own. Run now still works.",
+            k,
+        ));
     }
     if let Some(why) = &page.notice {
+        out = out.child(notice(why, k));
+    }
+    if x.from_trigger {
         out = out.child(
-            text(why.clone())
+            text("This schedule belongs to a workflow's schedule trigger. To change it, edit the workflow and publish it again.")
                 .font(k.ty.small)
-                .color(k.c.warning.icon)
+                .color(c.text_muted)
                 .wrap(),
         );
     }
-    if !page.fires.is_empty() {
-        out = out
-            .child(
-                text("Fires")
-                    .font(k.ty.ui_medium)
-                    .color(c.text_base)
-                    .pt(8.0),
-            )
-            .children(page.fires.iter().map(|f| fire_row(f, k)));
-    }
-    out
+    out = out.child(facts);
+    out.child(history(page.fires.as_slice(), k))
 }
 
-fn badge(status: FireStatus) -> Badge {
-    Badge::new(status.as_str()).variant(match status {
-        FireStatus::Succeeded => BadgeVariant::Subtle,
-        FireStatus::Running => BadgeVariant::Accent,
-        FireStatus::Failed | FireStatus::Skipped => BadgeVariant::Neutral,
-    })
+/// How the recent fires went, newest first.
+fn history(fires: &[Fire], k: &Kit) -> El {
+    let head = text("Recent runs")
+        .font(k.ty.ui_medium)
+        .color(k.c.text_base);
+    if fires.is_empty() {
+        return col().w_full().gap(10.0).child(head).child(
+            text("It hasn't run yet. Use Run now to try it.")
+                .font(k.ty.small)
+                .color(k.c.text_muted)
+                .wrap(),
+        );
+    }
+    let mut list = card(k);
+    let last = fires.len() - 1;
+    for (i, f) in fires.iter().enumerate() {
+        list = list.child(fire_row(f, k));
+        if i != last {
+            list = list.child(Divider::horizontal().build(k));
+        }
+    }
+    col().w_full().gap(10.0).child(head).child(list)
 }
 
 fn ago(secs: i64) -> String {
@@ -282,30 +485,62 @@ fn ago(secs: i64) -> String {
         ..60 => "just now".to_owned(),
         60..3600 => format!("{} min ago", secs / 60),
         3600..86400 => format!("{} h ago", secs / 3600),
-        _ => format!("{} d ago", secs / 86400),
+        86400..172800 => "yesterday".to_owned(),
+        _ => format!("{} days ago", secs / 86400),
     }
 }
 
 /// One fire: how it went, when, and why if it did not; pressing it opens its chat.
 fn fire_row(f: &Fire, k: &Kit) -> El {
     let c = &k.c;
-    let mut words = ago(now() - f.started_at);
+    let (mark, word) = match f.status {
+        FireStatus::Succeeded => (
+            icon(&glyphs::CHECK_SMALL, 16.0).color(c.success.icon),
+            "Succeeded",
+        ),
+        FireStatus::Failed => (icon(&glyphs::CIRCLE_X, 16.0).color(c.danger.icon), "Failed"),
+        FireStatus::Skipped => (icon(&glyphs::DASH, 16.0).color(c.text_faint), "Skipped"),
+        FireStatus::Running => (
+            icon(&glyphs::CHECK_SMALL, 16.0).color(c.text_faint),
+            "Running",
+        ),
+    };
+    let mut body = col().grow(1.0).min_w(0.0).gap(2.0).child(
+        row()
+            .gap(8.0)
+            .center_y()
+            .child(text(word).font(k.ty.ui_medium).color(c.text_base))
+            .child(
+                text(ago(now() - f.started_at))
+                    .font(k.ty.small)
+                    .color(c.text_muted),
+            ),
+    );
     if !f.note.is_empty() {
-        words.push_str(" · ");
-        words.push_str(&f.note);
+        body = body.child(
+            text(f.note.clone())
+                .font(k.ty.small)
+                .color(if f.status == FireStatus::Failed {
+                    c.danger.fg
+                } else {
+                    c.text_muted
+                })
+                .wrap(),
+        );
     }
     let mut e = row()
         .key(format!("fire-{}", f.id))
         .w_full()
-        .px(12.0)
-        .py(8.0)
-        .gap(8.0)
-        .center_y()
-        .radius(k.radius.sm)
-        .child(badge(f.status).build(k))
-        .child(text(words).font(k.ty.small).color(c.text_muted).truncate());
+        .px(16.0)
+        .py(12.0)
+        .gap(12.0)
+        .child(mark)
+        .child(body);
     if let Some(sid) = f.session_id.clone() {
-        e = e.on_press(move |s: &mut App| s.open_chat(&sid));
+        e = e
+            .child(text("Open chat").font(k.ty.small).color(c.text_muted))
+            .help("See what the agent did in this run")
+            .on_press(move |s: &mut App| s.open_chat(&sid));
         return k.interactive(e);
     }
     e
@@ -382,31 +617,30 @@ fn agents(s: &App) -> Vec<(String, String)> {
 
 fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let title = match &f.source {
-        Source::New => "New schedule",
-        Source::Edit(_) => "Change schedule",
-        Source::Draft(_) => "Agent's draft",
+    let (title, about) = match &f.source {
+        Source::New => (
+            "New schedule",
+            "Pick who does the job, what it is, and when it happens.",
+        ),
+        Source::Edit(_) => ("Change schedule", "Your changes apply to its next run."),
+        Source::Draft(_) => (
+            "Agent's draft",
+            "An agent suggested this. Check it, change what you like, then approve it to start it.",
+        ),
     };
-    let mut out = col()
-        .key("schedule-form")
-        .grow(1.0)
-        .h_full()
-        .min_h(0.0)
-        .max_w(620.0)
-        .padding(20.0)
-        .gap(14.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .child(text(title).font(k.ty.body_medium).color(c.text_base))
-        .child(input(
-            "Name",
-            &f.name,
-            "name",
-            "Morning digest",
-            k,
-            |s: &mut App| &mut s.schedule_page.form_mut().name,
-        ));
+    let head = col()
+        .w_full()
+        .gap(4.0)
+        .child(text(title).font(heading_font(k)).color(c.text_base))
+        .child(text(about).font(k.ty.small).color(c.text_muted).wrap());
+    let mut out = col().w_full().gap(14.0).child(input(
+        "Name",
+        &f.name,
+        "name",
+        "e.g. Morning briefing",
+        k,
+        |s: &mut App| &mut s.schedule_page.form_mut().name,
+    ));
 
     // The agent.
     let people = agents(s);
@@ -466,7 +700,7 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
             "Prompt",
             &f.prompt,
             "prompt",
-            "What the agent is told each time",
+            "What the agent should do each time, e.g. Summarise overnight news about our competitors",
             k,
             |s: &mut App| &mut s.schedule_page.form_mut().prompt,
         )),
@@ -536,56 +770,105 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
         }
     };
 
+    let what = card(k).padding(16.0).gap(14.0).child(out);
+
     // When it fires.
-    out = out.child(timing_fields(&f.timing, "schedule-", k, |s: &mut App| {
-        &mut s.schedule_page.form_mut().timing
-    }));
+    let when_card = card(k).padding(16.0).gap(14.0).child(timing_fields(
+        &f.timing,
+        "schedule-",
+        k,
+        |s: &mut App| &mut s.schedule_page.form_mut().timing,
+    ));
 
     // What it would do, as read so far.
-    if let Ok((_, _, _, timing)) = f.read(&s.workflows, now(), &Local) {
-        let next = timing.next_after(now(), &Local).map_or_else(
-            || "its time has passed".to_owned(),
-            |t| format!("next {}", when(t, &Local)),
-        );
-        out = out.child(
-            text(format!("{} · {next}", timing.describe(&Local)))
-                .font(k.ty.small)
-                .color(c.text_muted)
-                .wrap(),
-        );
-    }
-    if let Some(why) = &f.notice {
-        out = out.child(
-            text(why.clone())
-                .font(k.ty.small)
-                .color(k.c.warning.icon)
-                .wrap(),
-        );
-    }
+    let preview = f
+        .read(&s.workflows, now(), &Local)
+        .ok()
+        .map(|(_, _, _, timing)| {
+            let next = timing.next_after(now(), &Local).map_or_else(
+                || "its time has passed".to_owned(),
+                |t| format!("next run {}", soon(t)),
+            );
+            row()
+                .w_full()
+                .gap(10.0)
+                .center_y()
+                .px(14.0)
+                .py(10.0)
+                .radius(k.radius.md)
+                .fill(c.layer_02)
+                .child(icon(&icons::SCHEDULED, 16.0).color(c.text_muted))
+                .child(
+                    text(format!("Runs {}, {next}", timing.describe(&Local)))
+                        .font(k.ty.small)
+                        .color(c.text_base)
+                        .wrap()
+                        .grow(1.0),
+                )
+        });
     let save = match f.source {
-        Source::Draft(_) => "Approve",
-        _ => "Save",
+        Source::Draft(_) => "Approve and start",
+        _ => "Save schedule",
     };
-    out.child(
-        row()
-            .gap(8.0)
-            .child(
-                Button::new(save)
-                    .variant(ButtonVariant::Submit)
-                    .control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.save_schedule_form())
-                    .build(k)
-                    .key("schedule-save"),
-            )
-            .child(
-                Button::new("Cancel")
-                    .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.cancel_schedule_form())
-                    .build(k)
-                    .key("schedule-cancel"),
-            ),
-    )
+    let buttons = row()
+        .gap(8.0)
+        .child(
+            Button::new(save)
+                .variant(ButtonVariant::Submit)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.save_schedule_form())
+                .build(k)
+                .key("schedule-save"),
+        )
+        .child(
+            Button::new("Cancel")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.cancel_schedule_form())
+                .build(k)
+                .key("schedule-cancel"),
+        );
+    col()
+        .key("schedule-form")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(28.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(
+            col()
+                .w_full()
+                .max_w(640.0)
+                .gap(20.0)
+                .child(head)
+                .child(section("Task", what, k))
+                .child(section("When it runs", when_card, k))
+                .children(preview)
+                .children(f.notice.as_ref().map(|why| notice(why, k)))
+                .child(buttons),
+        )
+}
+
+fn section(title: &str, body: El, k: &Kit) -> El {
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(
+            text(title.to_owned())
+                .font(k.ty.ui_medium)
+                .color(k.c.text_base),
+        )
+        .child(body)
+}
+
+/// A line of help under a field.
+fn hint(t: &str, k: &Kit) -> El {
+    text(t.to_owned())
+        .font(k.ty.small)
+        .color(k.c.text_faint)
+        .wrap()
 }
 
 /// What a timing is made of, as boxes: how often, then what that takes. `form` finds the
@@ -623,31 +906,44 @@ pub(super) fn timing_fields(
                 k,
                 move |s: &mut App| &mut form(s).at,
             ))
-            .child(labelled("On", days(f.days, prefix, k, form), k)),
-        When::Every => out.child(input(
-            "Every (minutes)",
-            &f.every,
-            &key("every"),
-            "60",
-            k,
-            move |s: &mut App| &mut form(s).every,
-        )),
-        When::Once => out.child(input(
-            "On",
-            &f.once,
-            &key("once"),
-            "2026-11-12 09:00",
-            k,
-            move |s: &mut App| &mut form(s).once,
-        )),
-        When::Cron => out.child(input(
-            "Cron (minute hour day month weekday)",
-            &f.cron,
-            &key("cron"),
-            "0 9 * * 1-5",
-            k,
-            move |s: &mut App| &mut form(s).cron,
-        )),
+            .child(labelled("On", days(f.days, prefix, k, form), k))
+            .child(hint("Uses this computer's time.", k)),
+        When::Every => out
+            .child(input(
+                "Repeat every (minutes)",
+                &f.every,
+                &key("every"),
+                "60",
+                k,
+                move |s: &mut App| &mut form(s).every,
+            ))
+            .child(hint("60 is every hour, 1440 is every day.", k)),
+        When::Once => out
+            .child(input(
+                "On",
+                &f.once,
+                &key("once"),
+                "2026-11-12 09:00",
+                k,
+                move |s: &mut App| &mut form(s).once,
+            ))
+            .child(hint(
+                "Year-month-day, then hour:minute (24-hour), in this computer's time.",
+                k,
+            )),
+        When::Cron => out
+            .child(input(
+                "Cron expression",
+                &f.cron,
+                &key("cron"),
+                "0 9 * * 1-5",
+                k,
+                move |s: &mut App| &mut form(s).cron,
+            ))
+            .child(hint(
+                "Five parts: minute hour day month weekday. 0 9 * * 1-5 is 09:00 on weekdays.",
+                k,
+            )),
     }
 }
 
