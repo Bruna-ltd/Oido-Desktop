@@ -556,7 +556,7 @@ impl Run<'_, '_> {
             if let Some(memo) = through.done.get(i).filter(|_| i < through.last) {
                 self.out.steps.extend(memo.logs.iter().cloned());
                 if let Some((name, value)) = &memo.bound {
-                    scope.insert(name.clone(), value.clone());
+                    scope.insert(name.clone(), Arc::new(value.clone()));
                 }
                 self.tainted = memo
                     .tainted
@@ -581,7 +581,7 @@ impl Run<'_, '_> {
                 bound: step
                     .bind
                     .as_ref()
-                    .and_then(|name| scope.get(name).map(|v| (name.clone(), v.clone()))),
+                    .and_then(|name| scope.get(name).map(|v| (name.clone(), Value::clone(v)))),
                 tainted: self
                     .tainted
                     .iter()
@@ -663,7 +663,7 @@ impl Run<'_, '_> {
                     self.out.output = text;
                 }
                 if let Some(bind) = step.bind.as_deref().filter(|b| !b.is_empty()) {
-                    scope.insert(bind.to_owned(), value.clone());
+                    scope.insert(bind.to_owned(), Arc::new(value.clone()));
                     if let Some(why) = made {
                         self.tainted.insert(bind.to_owned(), why);
                     }
@@ -760,7 +760,7 @@ impl Run<'_, '_> {
     ) -> Result<Value, Halt> {
         let mut inner = scope.clone();
         if let Some(error) = error {
-            inner.insert("error".to_owned(), Value::String(error));
+            inner.insert("error".to_owned(), Arc::new(Value::String(error)));
         }
         let done = self.block(&step.catch, &branch(at, "catch"), &mut inner);
         if matches!(done, Err(Halt::Waiting { .. })) {
@@ -918,8 +918,8 @@ impl Run<'_, '_> {
                 for (n, item) in items.iter().enumerate().skip(first) {
                     self.rounds.push(n as u32 + 1);
                     let mut inner = scope.clone();
-                    inner.insert(step.item_name().to_owned(), item.clone());
-                    inner.insert("index".to_owned(), json!(n));
+                    inner.insert(step.item_name().to_owned(), Arc::new(item.clone()));
+                    inner.insert("index".to_owned(), Arc::new(json!(n)));
                     let done = self.block(&step.steps, &body, &mut inner);
                     self.rounds.pop();
                     match done {
@@ -960,7 +960,7 @@ impl Run<'_, '_> {
                     None => (0u32, Vec::new()),
                 };
                 loop {
-                    inner.insert("index".to_owned(), json!(round));
+                    inner.insert("index".to_owned(), Arc::new(json!(round)));
                     self.rounds.push(round + 1);
                     let done = self.block(&step.steps, &body, &mut inner);
                     self.rounds.pop();
@@ -1106,7 +1106,7 @@ impl Run<'_, '_> {
                 };
                 self.flows.push(id.clone());
                 let mut inner = Scope::new();
-                inner.insert("inputs".to_owned(), inputs);
+                inner.insert("inputs".to_owned(), Arc::new(inputs));
                 let done = self.block(&sub.steps, &branch(at, "flow"), &mut inner);
                 self.flows.pop();
                 if matches!(done, Err(Halt::Waiting { .. })) {
@@ -1386,7 +1386,7 @@ pub fn execute_through(
     env: &Env,
 ) -> Outcome {
     let mut scope = Scope::new();
-    scope.insert("inputs".to_owned(), inputs.clone());
+    scope.insert("inputs".to_owned(), Arc::new(inputs.clone()));
     let mut run = start(env);
     run.through = Some(Through {
         last,
@@ -1398,7 +1398,7 @@ pub fn execute_through(
 /// Runs the workflow. `inputs` are what [`bind_inputs`] gave.
 pub fn execute(def: &Definition, inputs: &Value, env: &Env) -> Outcome {
     let mut scope = Scope::new();
-    scope.insert("inputs".to_owned(), inputs.clone());
+    scope.insert("inputs".to_owned(), Arc::new(inputs.clone()));
     walk(start(env), def, scope)
 }
 

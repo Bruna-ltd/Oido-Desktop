@@ -82,7 +82,7 @@ pub fn panel(s: &App, ed: &Editor, k: &Kit) -> Option<El> {
         return None;
     }
     let (label, lines, waiting) = match &shown {
-        Some(r) => (r.label, r.lines.as_slice(), r.waiting.as_deref()),
+        Some(r) => (r.label, r.lines, r.waiting.as_deref()),
         None => ("Test run", &[][..], None),
     };
     let failed = lines.iter().filter(|l| l.error.is_some()).count();

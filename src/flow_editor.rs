@@ -2,8 +2,8 @@
 //! new one, changing what is in it, and saving. The state is [`crate::workflow::editor`]; the
 //! screen is `ui/workflow_editor.rs`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rune::TextEdit;
 use serde_json::{Map, Value};
@@ -396,11 +396,25 @@ impl App {
         let began = now();
         let flag = Arc::clone(&cancel);
         self.wf_test.live.clear();
-        // Each step beginning or ending tells the graph, so it shows the run as it goes.
+        // Each step beginning or ending tells the graph, so it shows the run as it goes. Only the
+        // newest log is kept: a fast run makes one redraw per frame, not a backlog of one a step.
         let watched = Arc::clone(&cancel);
+        let newest: Arc<Mutex<Option<Vec<StepLog>>>> = Arc::default();
         let watch: crate::flows::Watch = Arc::new(move |lines: Vec<StepLog>| {
-            let flag = Arc::clone(&watched);
-            crate::app::on_ui_thread(move |app| app.test_progress(&flag, lines));
+            let Ok(mut slot) = newest.lock() else {
+                return;
+            };
+            if slot.replace(lines).is_some() {
+                return;
+            }
+            drop(slot);
+            let (flag, newest) = (Arc::clone(&watched), Arc::clone(&newest));
+            crate::app::on_ui_thread(move |app| {
+                let lines = newest.lock().ok().and_then(|mut slot| slot.take());
+                if let Some(lines) = lines {
+                    app.test_progress(&flag, lines);
+                }
+            });
         });
         self.spawn_flow(prep, def, go, cancel, Some(watch), move |app, outcome| {
             let who = Counted {

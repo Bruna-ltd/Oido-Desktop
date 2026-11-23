@@ -32,11 +32,13 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
     // What a run did at each step, and what is wrong with each.
     let shown = s.shown_run();
     let runs = shown.as_ref().map_or_else(Vec::new, |r| {
-        runs_by_step(ed, &r.lines, r.waiting.as_deref())
+        runs_by_step(ed, r.lines, r.waiting.as_deref())
     });
+    let runs: std::collections::HashMap<&Loc, &NodeRun> =
+        runs.iter().map(|(at, r)| (at, r)).collect();
     let problems = problems_by_id(&ed.problems);
     let look = |item: &Item| Look {
-        run: runs.iter().find(|(at, _)| *at == item.loc).map(|(_, r)| r),
+        run: runs.get(&item.loc).copied(),
         problem: problems.get(&item.id).map(String::as_str),
     };
     // The step being carried is dimmed where it was.
@@ -44,7 +46,7 @@ pub fn view(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
 
     let mut world = el()
         .key("wfg-world")
-        .pin(Some(s.world_origin()), Some(0.0), None, None)
+        .pin(Some(s.world_origin_for(l.width)), Some(0.0), None, None)
         .size(l.width, l.height)
         .live_offset(&g.live_pan)
         .live_scale(&g.live_zoom);
@@ -791,12 +793,8 @@ fn dots(s: &App, k: &Kit) -> El {
 pub fn banner(s: &App, ed: &Editor, k: &Kit) -> Option<El> {
     let c = &k.c;
     let shown = s.shown_run()?;
-    let runs = runs_by_step(ed, &shown.lines, shown.waiting.as_deref());
-    let total = layout(ed)
-        .items
-        .iter()
-        .filter(|i| i.form != Form::Empty)
-        .count();
+    let runs = runs_by_step(ed, shown.lines, shown.waiting.as_deref());
+    let total = ed.step_count();
     let failed = runs
         .iter()
         .filter(|(_, r)| r.state == State::Failed)

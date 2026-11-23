@@ -569,7 +569,7 @@ impl Comparison {
 pub type Place = Vec<(usize, usize)>;
 
 /// A step: the list it is in, and where in it.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Loc {
     pub place: Place,
     pub index: usize,
@@ -1701,6 +1701,16 @@ impl Editor {
             list = &list.get(step)?.blocks.get(block)?.steps;
         }
         list.get(at.index)
+    }
+
+    /// How many steps there are, counting those inside other steps.
+    pub fn step_count(&self) -> usize {
+        fn count(list: &[Node]) -> usize {
+            list.iter()
+                .map(|n| 1 + n.blocks.iter().map(|b| count(&b.steps)).sum::<usize>())
+                .sum()
+        }
+        count(&self.steps)
     }
 
     /// What a box can name: the inputs as `inputs.name`, what the steps before bind, and inside a

@@ -24,7 +24,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 # encrypted with a key sealed like a token. A database opened without a key, like Oido's own, is
 # plain SQLite as before.
 libsqlite3-sys = { version = "0.37", features = ["bundled-sqlcipher"] }
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.154"
 ureq = "3.5.1"
 uuid = { version = "1.29.1", features = ["v4"] }

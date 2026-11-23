@@ -48,9 +48,9 @@ pub struct GraphView {
 const DOUBLE_PRESS: std::time::Duration = std::time::Duration::from_millis(450);
 
 /// A run drawn on the steps: its log, where it waits, and if it can be answered, how.
-pub struct Shown {
+pub struct Shown<'a> {
     pub label: &'static str,
-    pub lines: Vec<StepLog>,
+    pub lines: &'a [StepLog],
     /// The id of the `wait` step it is stopped at.
     pub waiting: Option<String>,
     /// A run that waits for you: its workflow and its own id, and what it waits for.
@@ -161,7 +161,7 @@ impl App {
     pub fn selected_step(&self) -> Option<Loc> {
         let ed = self.wf_editor.as_ref()?;
         let at = self.wf_graph.selected.clone()?;
-        layout::layout(ed).find(&at).map(|_| at)
+        ed.node(&at).map(|_| at)
     }
 
     /// An arrow key in the graph: moves the selection along the tree, starting at the first step
@@ -184,12 +184,12 @@ impl App {
 
     /// The run drawn on the steps: the test run if there is one (as it goes, or as it ended), else
     /// the workflow's last run if that is asked for and this is its workflow.
-    pub fn shown_run(&self) -> Option<Shown> {
+    pub fn shown_run(&self) -> Option<Shown<'_>> {
         let t = &self.wf_test;
         if t.running.is_some() {
             return Some(Shown {
                 label: "Test run, going",
-                lines: t.live.clone(),
+                lines: &t.live,
                 waiting: None,
                 answer: None,
             });
@@ -201,7 +201,7 @@ impl App {
             };
             return Some(Shown {
                 label: "Test run",
-                lines: r.steps.clone(),
+                lines: &r.steps,
                 waiting,
                 answer: None,
             });
@@ -217,7 +217,7 @@ impl App {
             } else {
                 "Last run"
             },
-            lines: last.steps.clone(),
+            lines: &last.steps,
             waiting: last.pause.as_ref().map(|p| p.step.clone()),
             answer: last
                 .pause
@@ -260,7 +260,12 @@ impl App {
 
     /// Where the drawing's top-left is in the view, before pan and zoom: it is centred across.
     pub(crate) fn world_origin(&self) -> f32 {
-        ((self.wf_graph.viewport[2] - self.world_size()[0]) / 2.0).max(0.0)
+        self.world_origin_for(self.world_size()[0])
+    }
+
+    /// [`App::world_origin`] for a drawing `width` wide, for a caller that has the layout already.
+    pub(crate) fn world_origin_for(&self, width: f32) -> f32 {
+        ((self.wf_graph.viewport[2] - width) / 2.0).max(0.0)
     }
 
     /// The wheel or a two-finger scroll moves the drawing.
@@ -450,7 +455,7 @@ impl App {
                 },
             ]
             .into_iter()
-            .find(|l| layout::layout(ed).find(l).is_some())
+            .find(|l| ed.node(l).is_some())
         });
         self.autosave();
     }

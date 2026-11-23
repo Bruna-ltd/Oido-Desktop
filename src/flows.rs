@@ -1912,7 +1912,7 @@ mod tests {
             // The last step, over rounds as the loop gives them.
             let round = |n: usize, yes: bool| json!({"subject": format!("s{n}"), "from": "f", "important": yes, "p": if yes { 0.9 - n as f64 / 100.0 } else { 0.1 }});
             let each: Vec<Value> = (0..8).map(|n| round(n, n % 4 != 3)).collect();
-            let scope = crate::workflow::template::Scope::from([("each".to_owned(), json!(each))]);
+            let scope = crate::workflow::template::scope_of([("each".to_owned(), json!(each))]);
             let ev = crate::workflow::expr::Evaluator::new(&Arc::new(AtomicBool::new(false)));
             let top = ev
                 .run(&scope, def.steps[2].script.as_deref().unwrap())

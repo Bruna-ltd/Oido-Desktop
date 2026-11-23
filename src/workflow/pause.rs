@@ -106,3 +106,25 @@ pub fn span(seconds: u32) -> String {
     };
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_paused_scope_is_stored_as_plain_values_and_read_back() {
+        let frame = Frame::Block {
+            at: 1,
+            scope: crate::workflow::template::scope_of([("files".to_owned(), json!({"n": 2}))]),
+        };
+        let stored = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            stored,
+            json!({"frame": "block", "at": 1, "scope": {"files": {"n": 2}}})
+        );
+        assert_eq!(serde_json::from_value::<Frame>(stored).unwrap(), frame);
+    }
+}
