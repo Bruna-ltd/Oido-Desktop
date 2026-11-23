@@ -40,6 +40,8 @@ mod omarchy;
 mod onboarding;
 mod persist;
 mod picker;
+#[expect(dead_code, reason = "phase 1 skeleton; wired into chat in phase 2")]
+mod plan;
 mod pricing;
 mod prompt;
 mod providers;
