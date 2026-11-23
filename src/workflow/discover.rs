@@ -17,8 +17,8 @@ pub const SYSTEM: &str = "You describe the shape of data for a workflow editor.\
 pub fn message(result: &Value) -> Result<String, String> {
     if !result.is_object() {
         return Err(match result {
-            Value::String(_) => "That result is plain text, so it has no fields. An Ask the AI step can answer in fields.".to_owned(),
-            Value::Array(_) => "That result is a list, so it has no fields of its own. Repeat for each item and look at one.".to_owned(),
+            Value::String(_) => "That result is plain text, so it has no fields. A Basic LLM Chain step can answer in fields.".to_owned(),
+            Value::Array(_) => "That result is a list, so it has no fields of its own. Use Loop Over Items and look at one.".to_owned(),
             _ => "That result is a single value, so it has no fields.".to_owned(),
         });
     }

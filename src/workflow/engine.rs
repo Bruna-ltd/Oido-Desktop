@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 use super::definition::{
     CODE, CONTINUE, DECIDE, DEFAULT_ROUNDS, Definition, FLOW, FOR_EACH, Field, FieldKind, GENERATE,
     IF, INLINE_WAIT, MAX_FLOW_DEPTH, MAX_ROUNDS, PARALLEL, SET, SWITCH, Step, TOOL, TRY, WAIT,
-    WHILE, branch, case_branch, child, describe, reads,
+    WHILE, bound_in, branch, case_branch, child, describe, reads,
 };
 use super::expr::Evaluator;
 use super::pause::{Decision, Frame, Snapshot, intern, span, unix_now};
@@ -412,6 +412,10 @@ struct Run<'a, 'e> {
     steered: Option<&'static str>,
     /// The ids of the workflows being run inside one another, outermost first.
     flows: Vec<String>,
+    /// What the round of each loop with a `collect` that is in progress has bound so far, at any
+    /// depth, outermost first: the loop's `collect` reads what a list that ran inside the round
+    /// bound, though the list's own scope is gone by then.
+    bags: Vec<Scope>,
     /// Frames left by a pause as it unwinds, innermost first.
     frames: Vec<Frame>,
     /// Frames of a run being resumed, outermost first, taken as the walk goes back down them.
@@ -422,6 +426,13 @@ struct Run<'a, 'e> {
     group: Option<Arc<AtomicBool>>,
     /// Run only as far as this top-level step, taking the first steps from their memos.
     through: Option<Through>,
+}
+
+/// Whether a loop says what each round gives.
+fn collects(step: &Step) -> bool {
+    step.collect
+        .as_deref()
+        .is_some_and(|c| !c.trim().is_empty())
 }
 
 /// How far to run the top-level steps, and which of the first ones are already done.
@@ -663,7 +674,11 @@ impl Run<'_, '_> {
                     self.out.output = text;
                 }
                 if let Some(bind) = step.bind.as_deref().filter(|b| !b.is_empty()) {
-                    scope.insert(bind.to_owned(), Arc::new(value.clone()));
+                    let shared = Arc::new(value.clone());
+                    for bag in &mut self.bags {
+                        bag.insert(bind.to_owned(), Arc::clone(&shared));
+                    }
+                    scope.insert(bind.to_owned(), shared);
                     if let Some(why) = made {
                         self.tainted.insert(bind.to_owned(), why);
                     }
@@ -702,6 +717,56 @@ impl Run<'_, '_> {
         if self.group.is_none() && (self.out.steps.len() <= 400 || self.taken.is_multiple_of(25)) {
             tell(&self.out.steps);
         }
+    }
+
+    /// What a round of a loop gives: its `collect` worked out over the round's own values, else
+    /// what its last step gave. The `collect` also reads what the round's lists bound (`inside`),
+    /// which is empty for one that did not run. One that does not work fails the round.
+    fn round_gave(
+        &self,
+        step: &Step,
+        scope: &Scope,
+        inside: &[String],
+        last: Result<Value, Halt>,
+    ) -> Result<Value, Halt> {
+        let (Ok(_), Some(src)) = (
+            &last,
+            step.collect
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty()),
+        ) else {
+            return last;
+        };
+        let mut seen = scope.clone();
+        let bag = self.bags.last();
+        for name in inside {
+            match bag.and_then(|b| b.get(name)) {
+                Some(v) => {
+                    seen.insert(name.clone(), Arc::clone(v));
+                }
+                None => {
+                    seen.entry(name.clone())
+                        .or_insert_with(|| Arc::new(Value::Null));
+                }
+            }
+        }
+        self.eval
+            .eval(&seen, src)
+            .map_err(|why| self.fail(step, format!("collect {src:?}: {why}")))
+    }
+
+    /// What a loop gives: the list of its rounds. A loop that says what to collect has a result of
+    /// its own, so it is the workflow's result if nothing runs after it.
+    fn loop_gave(&mut self, step: &Step, list: Value) -> Result<Value, Halt> {
+        if step
+            .collect
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty())
+        {
+            self.out.output = template::as_text(&list);
+        }
+        Ok(list)
     }
 
     /// A `wait`: a short delay is waited out here; a long one, or an approval, pauses the run. A
@@ -871,13 +936,14 @@ impl Run<'_, '_> {
                 }
             }
             FOR_EACH => {
-                let (items, first, mut results, mut failed) = match back {
+                let (items, first, mut results, mut failed, mut bag) = match back {
                     Some(Frame::Each {
                         items,
                         n,
                         results,
                         failed,
-                    }) => (items, n, results, failed),
+                        bag,
+                    }) => (items, n, results, failed, bag),
                     Some(_) => return Err(self.changed()),
                     None => {
                         let over = self
@@ -910,17 +976,32 @@ impl Run<'_, '_> {
                             self.steered = self.steered.or(Some(why));
                             self.tainted.insert(step.item_name().to_owned(), why);
                         }
-                        (items, 0, Vec::new(), 0)
+                        (items, 0, Vec::new(), 0, Scope::new())
                     }
                 };
                 let go_on = step.on_error.as_deref() == Some(CONTINUE);
                 let body = branch(at, "body");
+                let collecting = collects(step);
+                let inside = if collecting {
+                    bound_in(&step.steps)
+                } else {
+                    Vec::new()
+                };
                 for (n, item) in items.iter().enumerate().skip(first) {
                     self.rounds.push(n as u32 + 1);
                     let mut inner = scope.clone();
                     inner.insert(step.item_name().to_owned(), Arc::new(item.clone()));
                     inner.insert("index".to_owned(), Arc::new(json!(n)));
+                    if collecting {
+                        self.bags.push(std::mem::take(&mut bag));
+                    }
                     let done = self.block(&step.steps, &body, &mut inner);
+                    let done = self.round_gave(step, &inner, &inside, done);
+                    let kept = if collecting {
+                        self.bags.pop().unwrap_or_default()
+                    } else {
+                        Scope::new()
+                    };
                     self.rounds.pop();
                     match done {
                         Ok(v) => results.push(v),
@@ -934,6 +1015,7 @@ impl Run<'_, '_> {
                                 n,
                                 results,
                                 failed,
+                                bag: kept,
                             });
                             return Err(halt);
                         }
@@ -945,7 +1027,7 @@ impl Run<'_, '_> {
                     (n, f) => format!("{n} rounds, {f} failed"),
                 };
                 said(self, words);
-                Ok(Value::Array(results))
+                self.loop_gave(step, Value::Array(results))
             }
             WHILE => {
                 // The body runs first, so the condition can read what it bound: nothing else
@@ -954,20 +1036,43 @@ impl Run<'_, '_> {
                 let max = step.max.unwrap_or(DEFAULT_ROUNDS);
                 let body = branch(at, "body");
                 let mut inner = scope.clone();
-                let (mut round, mut results) = match back {
-                    Some(Frame::Loop { round, results }) => (round, results),
+                let (mut round, mut results, mut bag) = match back {
+                    Some(Frame::Loop {
+                        round,
+                        results,
+                        bag,
+                    }) => (round, results, bag),
                     Some(_) => return Err(self.changed()),
-                    None => (0u32, Vec::new()),
+                    None => (0u32, Vec::new(), Scope::new()),
+                };
+                let collecting = collects(step);
+                let inside = if collecting {
+                    bound_in(&step.steps)
+                } else {
+                    Vec::new()
                 };
                 loop {
                     inner.insert("index".to_owned(), Arc::new(json!(round)));
                     self.rounds.push(round + 1);
+                    if collecting {
+                        self.bags.push(std::mem::take(&mut bag));
+                    }
                     let done = self.block(&step.steps, &body, &mut inner);
+                    let done = self.round_gave(step, &inner, &inside, done);
+                    let kept = if collecting {
+                        self.bags.pop().unwrap_or_default()
+                    } else {
+                        Scope::new()
+                    };
                     self.rounds.pop();
                     match done {
                         Ok(v) => results.push(v),
                         Err(halt @ Halt::Waiting { .. }) => {
-                            self.frames.push(Frame::Loop { round, results });
+                            self.frames.push(Frame::Loop {
+                                round,
+                                results,
+                                bag: kept,
+                            });
                             return Err(halt);
                         }
                         Err(halt) => return Err(halt),
@@ -993,7 +1098,7 @@ impl Run<'_, '_> {
                     }
                 }
                 said(self, format!("{round} rounds"));
-                Ok(Value::Array(results))
+                self.loop_gave(step, Value::Array(results))
             }
             TRY => {
                 let retries = step.retries.unwrap_or(0);
@@ -1326,6 +1431,7 @@ fn start<'a, 'e>(env: &'a Env<'e>) -> Run<'a, 'e> {
         touched: None,
         steered: None,
         flows: Vec::new(),
+        bags: Vec::new(),
         frames: Vec::new(),
         resume: VecDeque::new(),
         decision: None,
@@ -1887,6 +1993,58 @@ mod tests {
         let mut first = d.clone();
         first.steps[0].all = false;
         assert_eq!(run_shell(&first, json!({"n": 7})).1, ["A"]);
+    }
+
+    #[test]
+    fn a_loop_says_what_each_round_gives_and_that_is_its_result_when_nothing_follows() {
+        let d = def(json!({"steps": [
+            {"id": "l", "kind": "for_each", "over": "[\"a\", \"b\"]", "as": "name", "bind": "all",
+             "collect": "made.label + \"!\"",
+             "steps": [{"id": "mk", "kind": "set", "values": {"label": "name + index"}, "bind": "made"}]},
+            {"id": "w", "kind": "while", "cond": "false", "bind": "polled", "collect": "index + 10",
+             "steps": [{"id": "mk2", "kind": "set", "values": {"x": "1"}, "bind": "other"}]}
+        ]}));
+        let (out, _) = run_shell(&d, json!({}));
+        assert_eq!(out.ending, Ending::Succeeded);
+        assert_eq!(out.output, "[10]", "the last loop's rounds are the result");
+        let mut first = d.clone();
+        first.steps.truncate(1);
+        assert_eq!(run_shell(&first, json!({})).0.output, "[\"a0!\",\"b1!\"]");
+        // Without it a round gives what its last step gave, and the loop is not a result itself.
+        let mut plain = first.clone();
+        plain.steps[0].collect = None;
+        assert_ne!(run_shell(&plain, json!({})).0.output, "[\"a0!\",\"b1!\"]");
+        // One that cannot be worked out fails the round, in words.
+        let mut bad = first.clone();
+        bad.steps[0].collect = Some("nothing_here".to_owned());
+        let Ending::Failed { error, .. } = run_shell(&bad, json!({})).0.ending else {
+            panic!("a collect that names nothing should fail");
+        };
+        assert!(
+            error.contains("collect") && error.contains("nothing_here"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_loops_collect_reads_what_a_list_inside_its_body_bound_and_nothing_where_it_did_not_run() {
+        let d = def(json!({"steps": [
+            {"id": "l", "kind": "for_each", "over": "[7, 8, 9]", "as": "n", "collect": "got",
+             "steps": [{"id": "i", "kind": "if", "cond": "index == 1",
+                "then": [{"id": "mk", "kind": "set", "values": {"v": "n * 2"}, "bind": "got"}],
+                "else": []}]}
+        ]}));
+        let (out, _) = run_shell(&d, json!({}));
+        assert_eq!(out.ending, Ending::Succeeded);
+        assert_eq!(out.output, "[null,{\"v\":16},null]");
+        // A name bound in a round does not carry over into the next one.
+        let again = def(json!({"steps": [
+            {"id": "l", "kind": "for_each", "over": "[1, 2]", "as": "n", "collect": "got",
+             "steps": [{"id": "i", "kind": "if", "cond": "index == 0",
+                "then": [{"id": "mk", "kind": "set", "values": {"v": "n"}, "bind": "got"}],
+                "else": []}]}
+        ]}));
+        assert_eq!(run_shell(&again, json!({})).0.output, "[{\"v\":1},null]");
     }
 
     #[test]

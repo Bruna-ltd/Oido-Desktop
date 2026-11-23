@@ -468,6 +468,11 @@ impl App {
         } else {
             brief
         };
+        // Its saved workflows come last, so running one that fits outranks every other approach.
+        let brief = match self.workflows_brief(&agent.id) {
+            Some(flows) => format!("{brief}\n\n{flows}"),
+            None => brief,
+        };
         let system = Some(brief.clone()).filter(|p| !p.trim().is_empty());
         // The chat's secrets, numbered from its start, so each keeps its placeholder.
         let mut hidden = self.guard.chat_hidden(

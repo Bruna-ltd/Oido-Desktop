@@ -383,14 +383,27 @@ impl App {
     }
 
     /// Where a step added from the Add step button goes: after the selected one, else at the end
-    /// of the top list.
+    /// of the top list. Nothing goes after an If or Switch that ends its list, so there it goes at
+    /// the end of that step's first output.
     pub fn add_position(&self) -> (Place, usize) {
-        match self.selected_step() {
+        let (place, index) = match self.selected_step() {
             Some(at) => (at.place, at.index + 1),
             None => (
                 Vec::new(),
                 self.wf_editor.as_ref().map_or(0, |ed| ed.steps.len()),
             ),
+        };
+        let Some(ed) = self.wf_editor.as_ref() else {
+            return (place, index);
+        };
+        match ed.list(&place) {
+            Some(list) if index >= list.len() && ed.ends_in_branch(&place) => {
+                let mut inside = place;
+                inside.push((list.len() - 1, 0));
+                let end = ed.list(&inside).map_or(0, <[_]>::len);
+                (inside, end)
+            }
+            _ => (place, index),
         }
     }
 
@@ -738,15 +751,26 @@ mod tests {
     #[test]
     fn a_step_is_added_after_the_selected_one_or_at_the_end_and_selected() {
         let mut app = app_with_editor();
-        assert_eq!(app.add_position(), (vec![], 2), "the end of the top list");
-        app.editor_add_at(&vec![], usize::MAX, "Remember a value");
-        assert_eq!(app.selected_step(), Some(at(&[], 2)));
+        assert_eq!(
+            app.add_position(),
+            (vec![(1, 0)], 1),
+            "the top list ends in an If, so it goes on in the If's first output"
+        );
+        let (place, index) = app.add_position();
+        app.editor_add_at(&place, index, "Edit Fields (Set)");
+        assert_eq!(app.selected_step(), Some(at(&[(1, 0)], 1)));
         app.select_step(Some(at(&[], 0)));
         assert_eq!(app.add_position(), (vec![], 1));
         let (place, index) = app.add_position();
-        app.editor_add_at(&place, index, "Use a tool");
+        app.editor_add_at(&place, index, "Tool");
         assert_eq!(app.selected_step(), Some(at(&[], 1)));
-        assert_eq!(ids(&app, &[]).len(), 4);
+        assert_eq!(ids(&app, &[]).len(), 3);
+        app.select_step(Some(at(&[], 2)));
+        assert_eq!(
+            app.add_position(),
+            (vec![(2, 0)], 2),
+            "with the If selected too"
+        );
         app.select_step(Some(at(&[(2, 0)], 0)));
         assert_eq!(
             app.add_position(),

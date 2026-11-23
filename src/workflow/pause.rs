@@ -5,7 +5,7 @@
 //! steps before the wait are not run again and the ones after it go on as if nothing had happened.
 //! A step in progress when the app closes is never replayed: the wait is the only checkpoint.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -36,9 +36,18 @@ pub enum Frame {
         n: usize,
         results: Vec<Value>,
         failed: usize,
+        /// What the round in progress bound so far, for the loop's `collect`.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        bag: Scope,
     },
     /// A `while`: the round in progress, and what the earlier rounds gave.
-    Loop { round: u32, results: Vec<Value> },
+    Loop {
+        round: u32,
+        results: Vec<Value>,
+        /// What the round in progress bound so far, for the loop's `collect`.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        bag: Scope,
+    },
     /// A `try`: which attempt, and whether it was already in its catch steps.
     Attempt { attempt: u32, catching: bool },
     /// A `flow` step: the workflow it was running, and what was held for outside text in the one
@@ -126,5 +135,22 @@ mod tests {
             json!({"frame": "block", "at": 1, "scope": {"files": {"n": 2}}})
         );
         assert_eq!(serde_json::from_value::<Frame>(stored).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_paused_loop_keeps_what_its_round_bound_and_an_old_frame_without_it_still_reads() {
+        let frame = Frame::Each {
+            items: vec![json!(1)],
+            n: 0,
+            results: Vec::new(),
+            failed: 0,
+            bag: crate::workflow::template::scope_of([("got".to_owned(), json!(3))]),
+        };
+        let stored = serde_json::to_value(&frame).unwrap();
+        assert_eq!(stored["bag"], json!({"got": 3}));
+        assert_eq!(serde_json::from_value::<Frame>(stored).unwrap(), frame);
+        let old = json!({"frame": "each", "items": [1], "n": 0, "results": [], "failed": 0});
+        let read: Frame = serde_json::from_value(old).unwrap();
+        assert!(matches!(read, Frame::Each { bag, .. } if bag.is_empty()));
     }
 }

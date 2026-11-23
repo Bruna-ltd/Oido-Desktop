@@ -57,7 +57,7 @@ fn chosen(s: &App, lines: &[StepLog]) -> Option<usize> {
         .or_else(|| lines.len().checked_sub(1))
 }
 
-/// Where a step is, in words: "Step 3 › Repeat for each name › Run mv <name> docs/".
+/// Where a step is, in words: "Step 3 › Loop over each name › Run mv <name> docs/".
 pub fn place(ed: &Editor, line: &StepLog) -> String {
     let Some(at) = loc_of(ed, &line.path) else {
         return line.what.clone();

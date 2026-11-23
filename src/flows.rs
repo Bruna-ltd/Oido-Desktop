@@ -71,6 +71,10 @@ pub fn trace_of(messages: &[Message]) -> (String, Vec<Trace>) {
     (request.join("\n\n"), trace)
 }
 
+/// What an agent with saved workflows is told, above the list of them. Last in its instructions,
+/// so it outranks the advice to write a script for a list of items.
+const WORKFLOWS_RULE: &str = "Your saved workflows are listed below. Check them first, before any other way of working, including writing a script or calling tools yourself: when the request matches what one of them does, even loosely or with a misspelt name, call `run_workflow` with its exact name straight away, without asking first, and answer from its result. Ask only if an input it needs is missing and cannot be worked out from the request. If none fits, carry on as usual.";
+
 /// What a model call or a run needs, worked out before leaving the UI thread.
 #[derive(Clone)]
 pub(crate) struct Prep {
@@ -136,7 +140,7 @@ const SCRIPT_RESULT: usize = 8_000;
 pub(crate) fn script_spec() -> crate::completion::ToolSpec {
     crate::completion::ToolSpec {
         name: crate::tools::SCRIPT.into(),
-        description: "Run steps on your own and get back only what the last one gives. Use it instead of calling tools one by one whenever you would fetch, read or list many things and then filter or judge them: what the steps read never enters your context. `steps` is a list of {\"id\", \"kind\", \"bind\"?, ...}. Kinds: `tool` {tool, args} calls a tool by name (shell, web_fetch, read_file, write_file, edit_file, delegate, an mcp__ tool, or while TypeSafe is connected typesafe_yes_no {content, question}, a quick yes/no with `yes_probability`); `code` {script} runs a Rhai script, its last value is the result; `generate` {instruction, reply?: [{name, kind: text|number|yes_no|list}]} asks the model one narrow thing; `decide` {question, options, input?}; `for_each` {over, as?, steps}; `parallel` {branches: [{name, steps}]}; `if` {cond, then, else}; `set` {values}; `try` {steps, retries?, catch?}. `bind` names a step's result (it is the step's `id` when you leave it out); later steps read it as {{name}} or {{name.field}} in text (`args` values such as \"id\": \"{{msg.id}}\", and `instruction`), and as plain `name` or `name.field` in Rhai fields (`over`, `cond`, `script`). Rhai is not JavaScript: declare with `let`, use `.len()` not `.length`, `.push(x)`, closures `|h| h.name == \"Subject\"` not `=>`, `if x != () {}` not `?.` or `||` defaults, and `for item in list { ... }`. In `for_each`, `item` is the current one. For a big list: `tool` to fetch, `code` to drop what plainly does not matter, `for_each` with a yes_no `generate` for what needs judgment, `code` to collect. End with a `code` step that returns a short result: the last step's value is all you get, cut at 8,000 characters. It cannot ask the person; a step a rule questions waits for them as usual.".into(),
+        description: "Run steps on your own and get back only what the last one gives. Use it instead of calling tools one by one whenever you would fetch, read or list many things and then filter or judge them: what the steps read never enters your context. `steps` is a list of {\"id\", \"kind\", \"bind\"?, ...}. Kinds: `tool` {tool, args} calls a tool by name (shell, web_fetch, read_file, write_file, edit_file, delegate, an mcp__ tool, or while TypeSafe is connected typesafe_yes_no {content, question}, a quick yes/no with `yes_probability`); `code` {script} runs a Rhai script, its last value is the result; `generate` {instruction, reply?: [{name, kind: text|number|yes_no|list}]} asks the model one narrow thing; `decide` {question, options, input?}; `for_each` {over, as?, collect?, steps} (`collect` is an expression over the round's values for what each round gives instead of its last step's value); `parallel` {branches: [{name, steps}]}; `if` {cond, then, else}; `set` {values}; `try` {steps, retries?, catch?}. `bind` names a step's result (it is the step's `id` when you leave it out); later steps read it as {{name}} or {{name.field}} in text (`args` values such as \"id\": \"{{msg.id}}\", and `instruction`), and as plain `name` or `name.field` in Rhai fields (`over`, `cond`, `script`). Rhai is not JavaScript: declare with `let`, use `.len()` not `.length`, `.push(x)`, closures `|h| h.name == \"Subject\"` not `=>`, `if x != () {}` not `?.` or `||` defaults, and `for item in list { ... }`. In `for_each`, `item` is the current one. For a big list: `tool` to fetch, `code` to drop what plainly does not matter, `for_each` with a yes_no `generate` for what needs judgment, `code` to collect. End with a `code` step that returns a short result: the last step's value is all you get, cut at 8,000 characters. It cannot ask the person; a step a rule questions waits for them as usual.".into(),
         schema: json!({
             "type": "object",
             "properties": {
@@ -1523,6 +1527,53 @@ impl App {
         });
     }
 
+    /// What an agent is told about its saved workflows: each by name, what it is for and what it
+    /// takes, and to run the one that fits before trying anything else. None while it has none.
+    pub(crate) fn workflows_brief(&self, agent_id: &str) -> Option<String> {
+        let lines: Vec<String> = self
+            .workflows
+            .iter()
+            .filter(|w| w.agent_id == agent_id)
+            .map(|w| {
+                let what = match w.goal.trim() {
+                    "" => {
+                        let steps: Vec<String> = w
+                            .definition
+                            .steps
+                            .iter()
+                            .map(crate::workflow::definition::plain)
+                            .collect();
+                        crate::runs::clip(&steps.join(" → "), 200).0
+                    }
+                    goal => goal.to_owned(),
+                };
+                let inputs: Vec<String> = w
+                    .definition
+                    .inputs
+                    .iter()
+                    .map(|(name, i)| {
+                        let mut said = format!("{name}: {}", i.kind);
+                        if !i.description.trim().is_empty() {
+                            said.push_str(&format!(", {}", i.description.trim()));
+                        }
+                        if let Some(d) = &i.default {
+                            said.push_str(&format!(
+                                ", default {}",
+                                crate::workflow::template::as_text(d)
+                            ));
+                        }
+                        said
+                    })
+                    .collect();
+                match inputs.is_empty() {
+                    true => format!("- {:?}: {what}", w.name),
+                    false => format!("- {:?}: {what} (inputs: {})", w.name, inputs.join("; ")),
+                }
+            })
+            .collect();
+        (!lines.is_empty()).then(|| format!("{WORKFLOWS_RULE}\n{}", lines.join("\n")))
+    }
+
     /// The agent called `run_workflow`: starts it as a background job like a command, so the
     /// result goes back to the agent when it ends. Always handles the call, even to refuse it.
     pub(crate) fn start_workflow_call(&mut self, sid: &str, call_id: &str, args: &str) {
@@ -1721,6 +1772,57 @@ mod tests {
     use crate::testing::{EVENTS, TempDb, app_with_server, call_stream, text_stream};
     use crate::workflow::definition::Step;
     use crate::workflow::pause::Decision;
+
+    #[test]
+    fn an_agent_is_told_its_own_saved_workflows_and_to_run_the_one_that_fits_first() {
+        let mut app = crate::testing::samples();
+        let me = app.roster.current().unwrap().id.clone();
+        app.workflows.clear();
+        assert!(
+            app.workflows_brief(&me).is_none(),
+            "nothing said with none saved"
+        );
+        let saved = |agent: &str, name: &str, goal: &str, def: Value| Saved {
+            id: name.into(),
+            agent_id: agent.into(),
+            name: name.into(),
+            goal: goal.into(),
+            definition: serde_json::from_value(def).unwrap(),
+            created_at: 0,
+            published: None,
+        };
+        app.workflows.push(saved(
+            &me,
+            "Email Summery",
+            "Sumurize important emails",
+            json!({"inputs": {"n": {"type": "number", "default": 5}},
+                   "steps": [{"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "x"}}]}),
+        ));
+        app.workflows.push(saved(
+            &me,
+            "Tidy",
+            "",
+            json!({"steps": [{"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls docs"}}]}),
+        ));
+        app.workflows
+            .push(saved("someone-else", "Not mine", "x", json!({"steps": []})));
+        let told = app.workflows_brief(&me).unwrap();
+        assert!(
+            told.contains(
+                "\"Email Summery\": Sumurize important emails (inputs: n: number, default 5)"
+            ),
+            "{told}"
+        );
+        assert!(
+            told.contains("\"Tidy\": Run ls docs"),
+            "no goal: its steps in words\n{told}"
+        );
+        assert!(
+            told.contains("run_workflow") && told.contains("without asking"),
+            "{told}"
+        );
+        assert!(!told.contains("Not mine"));
+    }
 
     fn tool_step(id: &str, command: &str, bind: &str) -> Step {
         Step {

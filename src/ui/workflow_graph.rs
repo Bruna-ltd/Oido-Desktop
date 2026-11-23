@@ -323,7 +323,18 @@ fn shows(s: &App, g: &Gap, selected: Option<&Loc>) -> bool {
     let next_to = selected
         .is_some_and(|at| g.place == at.place && (g.index == at.index || g.index == at.index + 1));
     let bare_end = selected.is_none() && g.place.is_empty() && g.index == end_of_top(s);
-    open || next_to || bare_end
+    // The end of each list inside the selected frame, where its outputs carry on.
+    let inside_end = selected.is_some_and(|at| {
+        let n = at.place.len();
+        g.place.len() == n + 1
+            && g.place[..n] == at.place[..]
+            && g.place[n].0 == at.index
+            && s.wf_editor
+                .as_ref()
+                .and_then(|ed| ed.list(&g.place))
+                .is_some_and(|l| l.len() == g.index)
+    });
+    open || next_to || bare_end || inside_end
 }
 
 fn end_of_top(s: &App) -> usize {

@@ -76,7 +76,7 @@ static IF_BOXES: [Spec; 1] = [spec(
     Refs::Bare,
 )];
 static SWITCH_BOXES: [Spec; 1] = [spec("on", "Switch on", "inputs.kind", 1, Refs::Bare)];
-static FOR_EACH_BOXES: [Spec; 2] = [
+static FOR_EACH_BOXES: [Spec; 3] = [
     spec(
         "over",
         "Go over",
@@ -85,8 +85,15 @@ static FOR_EACH_BOXES: [Spec; 2] = [
         Refs::Bare,
     ),
     spec("as", "Call each item", "item", 1, Refs::None),
+    spec(
+        "collect",
+        "Result of each round (empty: what its last step gave)",
+        "summary.text",
+        1,
+        Refs::Bare,
+    ),
 ];
-static WHILE_BOXES: [Spec; 2] = [
+static WHILE_BOXES: [Spec; 3] = [
     spec(
         "cond",
         "Repeat while",
@@ -95,6 +102,13 @@ static WHILE_BOXES: [Spec; 2] = [
         Refs::Bare,
     ),
     spec("max", "At most this many rounds", "100", 1, Refs::None),
+    spec(
+        "collect",
+        "Result of each round (empty: what its last step gave)",
+        "poll.stdout",
+        1,
+        Refs::Bare,
+    ),
 ];
 static SET_BOXES: [Spec; 1] = [spec(
     "values",
@@ -201,9 +215,18 @@ const fn kind(
     }
 }
 
-/// "Ask an agent" in the Add step list. It is not a kind of step of its own: it adds a tool step
+/// "AI Agent" in the Add step list. It is not a kind of step of its own: it adds a tool step
 /// that hands a task to an agent.
 pub const AGENT: &str = "agent";
+
+/// Whether a step of `kind` has more than one output: an If's Then and Else, a Switch's cases. Each
+/// carries on in its own list, so nothing goes after the step itself, which would join them.
+pub fn branches(kind: &str) -> bool {
+    matches!(kind, IF | SWITCH)
+}
+
+const AFTER_BRANCH: &str =
+    "Each output of an If or Switch carries on in its own list, so nothing goes after one.";
 
 pub const COMMON: &str = "Common";
 pub const MORE: &str = "More";
@@ -213,83 +236,83 @@ pub const MORE: &str = "More";
 pub const KINDS: [Kind; 14] = [
     kind(
         TOOL,
-        "Use a tool",
+        "Tool",
         COMMON,
         "Run a command, read a file, fetch a web page",
     ),
     kind(
         GENERATE,
-        "Ask the AI",
+        "Basic LLM Chain",
         COMMON,
         "The model writes text from your instruction",
     ),
     kind(
         AGENT,
-        "Ask an agent",
+        "AI Agent",
         COMMON,
         "Hand a task to one of your agents, and use its answer",
     ),
     kind(
         IF,
-        "Check something",
+        "If",
         COMMON,
         "Do one thing or another, depending on a result",
     ),
     kind(
         FOR_EACH,
-        "Repeat for each",
+        "Loop Over Items",
         COMMON,
-        "The same steps for every file, line or name",
+        "The same steps for each file, line or name",
     ),
     kind(
         WAIT,
-        "Pause or ask me",
+        "Wait",
         COMMON,
         "Wait a while, or stop until you say yes",
     ),
     kind(
         PARALLEL,
-        "Do at once",
+        "Parallel",
         COMMON,
         "Several lists of steps, side by side",
     ),
     kind(
         DECIDE,
-        "Let the AI choose",
+        "Text Classifier",
         MORE,
         "The model picks one of the options you give it",
     ),
     kind(
         SWITCH,
-        "Choose by value",
+        "Switch",
         MORE,
         "Different steps for different values",
     ),
     kind(
         WHILE,
-        "Repeat until done",
+        "Loop While",
         MORE,
         "Go round again while something is true",
     ),
     kind(
         TRY,
-        "Retry if it fails",
+        "Retry On Fail",
         MORE,
         "Try again, then do something else if it still fails",
     ),
     kind(
         FLOW,
-        "Run a workflow",
+        "Execute Workflow",
         MORE,
         "Use a workflow you already made",
     ),
     kind(
         SET,
-        "Remember a value",
+        "Edit Fields (Set)",
         MORE,
         "Work something out and keep it under a name",
     ),
-    kind(CODE, "Run a script", MORE, "A few lines of code"),
+    kind(CODE, "Code", MORE, "A few lines of code"),
 ];
 
 /// The kind of step an Add step list entry is.
@@ -741,12 +764,14 @@ impl Node {
             FOR_EACH => {
                 n.set_field("over", text(&s.over));
                 n.set_field("as", text(&s.item));
+                n.set_field("collect", text(&s.collect));
                 n.go_on = s.on_error.as_deref() == Some(CONTINUE);
                 n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
             }
             WHILE => {
                 n.set_condition(&text(&s.cond));
                 n.set_field("max", s.max.map(|m| m.to_string()).unwrap_or_default());
+                n.set_field("collect", text(&s.collect));
                 n.blocks[0].steps = s.steps.iter().map(Node::from_step).collect();
             }
             TRY => {
@@ -878,11 +903,13 @@ impl Node {
             FOR_EACH => {
                 s.over = get("over");
                 s.item = get("as").map(|a| a.trim().to_owned());
+                s.collect = get("collect");
                 s.on_error = self.go_on.then(|| CONTINUE.to_owned());
                 s.steps = steps(&self.blocks[0], bad, at);
             }
             WHILE => {
                 s.cond = self.condition();
+                s.collect = get("collect");
                 if let Some(m) = get("max") {
                     match m.trim().parse::<u32>() {
                         Ok(n) => s.max = Some(n),
@@ -1428,6 +1455,9 @@ impl Editor {
     pub fn add_at(&mut self, place: &Place, index: usize, kind: &str) -> Option<Loc> {
         let len = self.block_mut(place)?.len();
         let index = index.min(len);
+        if index == len && self.ends_in_branch(place) {
+            return None;
+        }
         let node = Node::new(kind, self.fresh_id());
         self.record("Add step");
         self.block_mut(place)?.insert(index, node);
@@ -1510,6 +1540,9 @@ impl Editor {
         if to.place == from.place && (to.index == from.index || to.index == from.index + 1) {
             return Ok(from.clone());
         }
+        if to.index == len && self.ends_in_branch(&to.place) {
+            return Err(AFTER_BRANCH);
+        }
         self.record("Move step");
         let node = self
             .block_mut(&from.place)
@@ -1543,6 +1576,9 @@ impl Editor {
             .block_mut(&to.place)
             .map(|l| l.len())
             .ok_or("There is nowhere to put it.")?;
+        if to.index >= len && self.ends_in_branch(&to.place) {
+            return Err(AFTER_BRANCH);
+        }
         let mut ids = Vec::new();
         collect_ids(&self.steps, &mut ids);
         let mut binds = Vec::new();
@@ -1683,16 +1719,61 @@ impl Editor {
             place.push((step, block));
         }
         before(&place, at.index.min(list.len()), &mut seen);
+        // A loop's own box that reads what a round made sees the round: its body's results too.
+        let in_round = |node: &Node| match (node.kind.as_str(), key) {
+            (WHILE, Some("cond" | "collect")) => Some(false),
+            (FOR_EACH, Some("collect")) => Some(true),
+            _ => None,
+        };
         if let Some(node) = list.get(at.index)
-            && node.kind == WHILE
-            && key == Some("cond")
+            && let Some(with_item) = in_round(node)
         {
+            if with_item {
+                seen.push(Seen::Item(node.item_name()));
+            }
             seen.push(Seen::Index);
             let mut inner = place.clone();
             inner.push((at.index, 0));
-            before(&inner, node.blocks[0].steps.len(), &mut seen);
+            if key == Some("collect") {
+                // What the lists inside the body bound too, empty where the list did not run.
+                fn nested(place: &Place, list: &[Node], seen: &mut Vec<Seen>) {
+                    for (index, n) in list.iter().enumerate() {
+                        seen.push(Seen::Step(Loc {
+                            place: place.clone(),
+                            index,
+                        }));
+                        if n.kind != PARALLEL {
+                            for (b, block) in n.blocks.iter().enumerate() {
+                                let mut inside = place.clone();
+                                inside.push((index, b));
+                                nested(&inside, &block.steps, seen);
+                            }
+                        }
+                    }
+                }
+                nested(&inner, &node.blocks[0].steps, &mut seen);
+            } else {
+                before(&inner, node.blocks[0].steps.len(), &mut seen);
+            }
         }
         seen
+    }
+
+    /// The steps of the list at `place`.
+    pub fn list(&self, place: &Place) -> Option<&[Node]> {
+        let mut list = &self.steps;
+        for &(step, block) in place {
+            list = &list.get(step)?.blocks.get(block)?.steps;
+        }
+        Some(list)
+    }
+
+    /// Whether the list at `place` ends in an If or Switch. Nothing is added after one; a workflow
+    /// that has steps there already keeps them.
+    pub fn ends_in_branch(&self, place: &Place) -> bool {
+        self.list(place)
+            .and_then(|l| l.last())
+            .is_some_and(|n| branches(&n.kind))
     }
 
     pub fn node(&self, at: &Loc) -> Option<&Node> {
@@ -1714,7 +1795,8 @@ impl Editor {
     }
 
     /// What a box can name: the inputs as `inputs.name`, what the steps before bind, and inside a
-    /// loop its item and `index`. A `while` condition also sees what its body binds.
+    /// loop its item and `index`. A `while` condition also sees what its body binds, and a loop's
+    /// result of each round what the lists inside the body bind too.
     pub fn names(&self, at: &Loc, key: Option<&str>) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for seen in self.scope(at, key) {
@@ -2357,7 +2439,7 @@ mod tests {
             // Anywhere: at the top, in a branch of an if, and twice, so names do not clash.
             let mut e = Editor::blank("a1");
             e.add_at(&Vec::new(), 0, kind.kind).unwrap();
-            e.add_at(&Vec::new(), 1, kind.kind).unwrap();
+            e.add_at(&Vec::new(), 0, kind.kind).unwrap();
             e.add_at(&Vec::new(), 0, IF).unwrap();
             e.add_at(&vec![(0, 0)], 0, kind.kind).unwrap();
             e.check();
@@ -2475,9 +2557,9 @@ mod tests {
         e.shift(&at(&[], 1), 1);
         assert_eq!(e.steps[1].kind, TOOL, "the last cannot go down");
         e.remove(&at(&[], 1));
-        e.add(&vec![], TOOL);
+        e.add(&vec![(0, 0)], TOOL);
         assert_eq!(
-            e.steps[1].id.text, "step-1",
+            e.steps[0].blocks[0].steps[1].id.text, "step-1",
             "a freed id comes back, but none in use does"
         );
         e.remove(&at(&[(9, 9)], 0));
@@ -2490,6 +2572,31 @@ mod tests {
         e.remove_case(&at(&[(0, 1)], 0), 2);
         e.remove_case(&at(&[(0, 1)], 0), 0);
         assert_eq!(e.steps[0].blocks[1].steps[0].blocks.len(), 2);
+    }
+
+    #[test]
+    fn nothing_goes_after_an_if_or_switch_that_ends_its_list_but_before_and_inside_it_is_fine() {
+        for kind in [IF, SWITCH] {
+            let mut e = Editor::blank("a1");
+            e.add(&vec![], TOOL);
+            e.add(&vec![], kind);
+            assert!(e.ends_in_branch(&vec![]));
+            assert_eq!(e.add_at(&vec![], 2, TOOL), None, "{kind}");
+            assert_eq!(e.move_to(&at(&[], 0), &at(&[], 2)), Err(AFTER_BRANCH));
+            assert_eq!(e.duplicate(&at(&[], 0), &at(&[], 2)), Err(AFTER_BRANCH));
+            assert_eq!(e.steps.len(), 2, "{kind}: nothing was added or moved");
+            assert!(e.add_at(&vec![], 1, TOOL).is_some(), "{kind}: before it");
+            assert!(e.add_at(&vec![(2, 0)], 0, TOOL).is_some(), "{kind}: inside");
+            // A workflow made before keeps the steps it has after one, and may add to them.
+            let mut old = Editor::blank("a1");
+            old.add(&vec![], kind);
+            old.steps.push(Node::new(TOOL, "x".into()));
+            assert!(!old.ends_in_branch(&vec![]));
+            assert!(
+                old.add_at(&vec![], 2, TOOL).is_some(),
+                "{kind}: made before"
+            );
+        }
     }
 
     #[test]
@@ -3039,9 +3146,9 @@ mod tests {
             (n.kind.as_str(), n.tool.as_str()),
             (TOOL, crate::tools::DELEGATE)
         );
-        assert_eq!(n.label(), "Ask an agent");
-        assert_eq!(kind_named("Ask an agent"), Some(AGENT));
-        assert_eq!(Node::new(TOOL, "t1".into()).label(), "Use a tool");
+        assert_eq!(n.label(), "AI Agent");
+        assert_eq!(kind_named("AI Agent"), Some(AGENT));
+        assert_eq!(Node::new(TOOL, "t1".into()).label(), "Tool");
 
         // Saved and opened again it is still that: a tool step naming the delegate tool.
         let mut e = Editor::blank("a1");
@@ -3058,7 +3165,7 @@ mod tests {
         );
         let step = e.steps[0].to_step("1", &mut Vec::new());
         assert_eq!(step.tool.as_deref(), Some(crate::tools::DELEGATE));
-        assert_eq!(Node::from_step(&step).label(), "Ask an agent");
+        assert_eq!(Node::from_step(&step).label(), "AI Agent");
     }
 
     #[test]

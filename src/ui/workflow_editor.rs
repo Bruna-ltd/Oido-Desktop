@@ -894,6 +894,10 @@ fn steps(s: &App, ed: &Editor, place: &Place, k: &Kit, layer: &mut Vec<El>) -> E
         };
         out = out.child(card(s, ed, &at, node, list.len(), true, k, layer));
     }
+    // After an If or Switch there is nothing to add: each output goes on in its own list.
+    if ed.ends_in_branch(place) {
+        return out;
+    }
     let target = place.clone();
     let key = format!(
         "wfe-add-{}",

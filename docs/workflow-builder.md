@@ -78,8 +78,8 @@ parse unchanged). New kinds and fields, all optional:
 |---|---|---|
 | `if` | `cond`, `then`, `else` | run one child list |
 | `switch` | `on`, `cases: [{when, steps}]`, `default`, `all` | first matching case, or every matching case in order when `all` is true; `default` only if none match |
-| `for_each` | `over`, `as`, `steps`, `on_error` | binds a list of per-item results |
-| `while` | `cond`, `steps`, `max` | repeats while true, at most `max` times |
+| `for_each` | `over`, `as`, `steps`, `on_error`, `collect` | binds a list of per-item results |
+| `while` | `cond`, `steps`, `max`, `collect` | repeats while true, at most `max` times |
 | `parallel` | `branches: [{name, steps}]`, `on_error` | binds a map name → result |
 | `try` | `steps`, `retries`, `backoff_ms`, `catch` | catch sees `error` |
 | `set` | `values` | map of name → expression, bound as one object |
@@ -88,6 +88,12 @@ parse unchanged). New kinds and fields, all optional:
 | `wait` | `seconds` or `approve: "text"` | delay, or pause until you answer |
 | `flow` | `workflow`, `inputs` | run a saved workflow of the same agent |
 | `delegate` | `agent`, `task` | an agent does the task; its reply is the result |
+
+`collect` (loops only, optional) is an expression over the round's own values: the item, `index`, and
+what the steps in the body bound at any depth, inside an `if`, `switch` or `try` too (empty where that list
+did not run in the round; a step inside a `parallel` branch comes back as the `parallel` step's own result).
+It says what each round gives; without it a round gives what its last step gave. A loop with a `collect`
+also becomes the workflow's result if nothing runs after it.
 
 `tool` steps gain MCP tools by name (`mcp__server__tool`). `bind` works on every kind. A container
 sees everything bound before it plus, inside its body, `item`/`index` (for_each) or `error` (catch).
@@ -253,7 +259,7 @@ is the one non-deterministic tool step and is marked as such.
 - `delegate` is a `tool` step with the tool `delegate` and arguments `agent` (an agent by name,
   fixed text, any case: one of the workflow's own team first, else any agent in the roster),
   `task` (text; `{{...}}` allowed) and `background` (yes: start it and go on). The editor shows it
-  as the **Ask an agent** step. An agent the workflow names is made ready before the run starts
+  as the **AI Agent** step. An agent the workflow names is made ready before the run starts
   (so one that does not exist, or has no model, is said up front). It takes the task as
   in a chat: fresh, with its own brief, model, tools and folder, unattended, up to 20 model calls.
   Stop ends it. The answer is the step's result, as text. Each task is filed as a run of the
@@ -602,4 +608,4 @@ Add step list.
   is only a note that it was handed over, so no later step can use an answer. Stopping the flow does
   not stop a background agent, and its run is filed when it ends (an app that closes first loses it).
 - **Stored as** the existing `delegate` tool step, so the engine, the guard and saved workflows are
-  unchanged; "Ask an agent" is how the editor names it.
+  unchanged; "AI Agent" is how the editor names it.
