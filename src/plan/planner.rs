@@ -11,6 +11,10 @@ pub trait Planner {
     /// Steps to put in place of the pending ones, after `failed` failed. [`Plan::replace_pending`]
     /// checks the list, so an implementation need not.
     fn replan(&self, plan: &Plan, failed: &Step) -> Result<Vec<StepSpec>, PlanError>;
+
+    /// Steps to put in place of the pending ones, as the person asked `change`. Checked like a
+    /// re-plan, so a step already done is never touched.
+    fn revise(&self, plan: &Plan, change: &str) -> Result<Vec<StepSpec>, PlanError>;
 }
 
 /// A planner with canned answers that counts how often it was asked. `plan` answers the same every
@@ -68,6 +72,12 @@ impl Planner for Mock {
     fn plan(&self, _request: &str) -> Result<Vec<StepSpec>, PlanError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.answer.clone().map_err(PlanError::Planner)
+    }
+
+    fn revise(&self, plan: &Plan, _change: &str) -> Result<Vec<StepSpec>, PlanError> {
+        // Answers from the same queue as a re-plan.
+        let failed = plan.steps[0].clone();
+        self.replan(plan, &failed)
     }
 
     fn replan(&self, _plan: &Plan, _failed: &Step) -> Result<Vec<StepSpec>, PlanError> {

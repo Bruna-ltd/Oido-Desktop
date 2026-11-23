@@ -132,6 +132,9 @@ fn request(turn: &Turn) -> Value {
         "turn": turn.text,
         "plan": {"goal": turn.plan.goal, "steps": steps},
     });
+    if turn.plan.status == super::PlanStatus::Draft {
+        state["plan"]["waiting_for_approval"] = json!(true);
+    }
     if !turn.parked.is_empty() {
         state["parked"] = json!(turn.parked);
     }
@@ -302,6 +305,21 @@ mod tests {
             q["turn"]["criteria"].as_object().unwrap().len(),
             Kind::OPTIONS.len()
         );
+
+        let mut draft = plan(0);
+        draft.status = super::super::PlanStatus::Draft;
+        let r = request(&Turn {
+            text: "go",
+            plan: &draft,
+            parked: &[],
+        });
+        assert_eq!(r["state"]["plan"]["waiting_for_approval"], json!(true));
+        let r = request(&Turn {
+            text: "go",
+            plan: &p,
+            parked: &[],
+        });
+        assert!(r["state"]["plan"].get("waiting_for_approval").is_none());
 
         let parked = ["car in Rome".to_owned()];
         let r = request(&Turn {

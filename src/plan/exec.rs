@@ -74,6 +74,12 @@ pub fn run(
                 step.result = Some(out);
                 saved(plan);
             }
+            Err(_) if stop.load(Ordering::SeqCst) => {
+                // Stopped part way through the step: it did not fail, it was cut off. It goes
+                // again when the plan is resumed.
+                saved(plan);
+                return Outcome::Stopped;
+            }
             Err(error) => {
                 step.status = StepStatus::Failed;
                 step.result = Some(error.clone());
@@ -202,8 +208,29 @@ mod tests {
     }
 
     #[test]
+    fn a_step_cut_off_by_stop_stays_pending_and_is_not_planned_around() {
+        let mut p = plan();
+        let stop = AtomicBool::new(false);
+        // The step fails because Stop was pressed while it ran.
+        struct Cut<'a>(&'a AtomicBool);
+        impl StepRunner for Cut<'_> {
+            fn run(&self, _: &Step) -> Result<String, String> {
+                self.0.store(true, Ordering::SeqCst);
+                Err("Stopped.".into())
+            }
+        }
+        let planner = silent();
+        let out = run(&mut p, &Cut(&stop), &planner, &stop, &mut |_| {});
+        assert_eq!(out, Outcome::Stopped);
+        assert_eq!(planner.replan_calls(), 0);
+        assert_eq!(p.status, PlanStatus::Active);
+        assert!(p.steps.iter().all(|s| s.status == StepStatus::Pending));
+    }
+
+    #[test]
     fn a_plan_that_is_not_active_does_not_run() {
         for status in [
+            PlanStatus::Draft,
             PlanStatus::Parked,
             PlanStatus::Done,
             PlanStatus::Failed,

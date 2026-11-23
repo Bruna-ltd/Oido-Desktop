@@ -19,6 +19,7 @@ const APPEARANCE: &str = "appearance";
 const AUTO_UPDATE: &str = "updates.auto";
 pub const RUN_SCHEDULES: &str = "schedules.run";
 pub const ROUTE_BULK: &str = "router.bulk";
+pub const PLAN: &str = "plan.on";
 const PANES: &str = "panes";
 const SIDEBAR_FOLDS: &str = "sidebar.folds";
 const ONBOARDED: &str = "onboarding.done";
@@ -108,6 +109,20 @@ pub fn run_schedules(store: Option<&Store>) -> bool {
             None
         })
         .unwrap_or(true)
+}
+
+/// Whether a message that takes several steps is planned first (Settings → Context). Off unless
+/// turned on.
+pub fn plan_on(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return false;
+    };
+    db.setting::<bool>(PLAN)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the planning setting: {e}");
+            None
+        })
+        .unwrap_or(false)
 }
 
 /// Whether TypeSafe sorts each message first (Settings → Context). Off unless turned on.

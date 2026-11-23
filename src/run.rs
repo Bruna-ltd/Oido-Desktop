@@ -267,6 +267,7 @@ impl App {
             || self.delegating.contains_key(sid)
             || self.summarizing.contains_key(sid)
             || self.routing.contains(sid)
+            || self.planning.contains_key(sid)
             || self.hooking.contains_key(sid)
     }
 
@@ -316,6 +317,9 @@ impl App {
     /// TypeSafe cannot be asked, the run starts at once as it always did.
     fn begin_fresh(&mut self, sid: &str, message: &str) {
         self.bulk.remove(sid);
+        if self.plan_begin(sid, message) {
+            return;
+        }
         let key = (self.route_bulk && self.typesafe_connected())
             .then(|| {
                 let db = self.store.as_ref()?;
@@ -397,7 +401,7 @@ impl App {
 
     /// Starts a run that answers the last message of a chat, which need not be the open one (a
     /// command can finish after you have gone to another chat).
-    fn begin_in(&mut self, sid: &str) {
+    pub(crate) fn begin_in(&mut self, sid: &str) {
         if self.busy_in(sid) {
             return;
         }
@@ -1250,6 +1254,10 @@ impl App {
         self.resuming.remove(sid);
         if self.routing.remove(sid) {
             self.refresh_status_of(sid);
+        }
+        // A plan being made or run is told to stop; it reports back and clears itself.
+        if let Some(flag) = self.planning.get(sid) {
+            flag.store(true, Ordering::Relaxed);
         }
         if let Some(flag) = self.summarizing.remove(sid) {
             flag.store(true, Ordering::Relaxed);

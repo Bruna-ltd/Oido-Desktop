@@ -9,6 +9,7 @@
 //! The invariant everything else leans on: only a `Pending` step can change. A `Done` step is
 //! never run again and never patched, because it may have had a side effect.
 
+pub mod chat;
 pub mod exec;
 pub mod planner;
 pub mod router;
@@ -62,6 +63,8 @@ pub struct Step {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStatus {
+    /// Proposed and waiting for the person's OK. Nothing in it runs until they approve it.
+    Draft,
     Active,
     Parked,
     Done,
