@@ -11,6 +11,7 @@
 
 pub mod exec;
 pub mod planner;
+pub mod router;
 pub mod store;
 
 use std::fmt;
