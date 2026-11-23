@@ -78,6 +78,9 @@ pub struct Plan {
     pub created_from_turn: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_at_turn: Option<u32>,
+    /// Times the pending steps were replaced after a failure, against [`exec::MAX_REPLANS`].
+    #[serde(default)]
+    pub replans: u32,
 }
 
 impl Plan {
@@ -103,7 +106,48 @@ impl Plan {
             steps,
             created_from_turn: turn,
             parked_at_turn: None,
+            replans: 0,
         })
+    }
+
+    /// Swap the steps still pending for `specs`, numbered on from the last step. Done and failed
+    /// steps stay as they are. Refused, with the plan untouched, when the list breaks the usual
+    /// rules, would pass [`MAX_STEPS`], or repeats a step that is already done and had a side
+    /// effect: that would do the same thing in the world twice.
+    pub fn replace_pending(&mut self, specs: Vec<StepSpec>) -> Result<(), PlanError> {
+        check(&specs)?;
+        let kept = self
+            .steps
+            .iter()
+            .filter(|s| s.status != StepStatus::Pending)
+            .count();
+        if kept + specs.len() > MAX_STEPS {
+            return Err(PlanError::TooMany(kept + specs.len()));
+        }
+        let repeats = |spec: &StepSpec| {
+            self.steps.iter().any(|s| {
+                s.status == StepStatus::Done
+                    && s.side_effect
+                    && s.action == spec.action
+                    && s.args == spec.args
+            })
+        };
+        if let Some(i) = specs.iter().position(repeats) {
+            return Err(PlanError::RepeatsDone(i + 1));
+        }
+        self.steps.retain(|s| s.status != StepStatus::Pending);
+        let last = self.steps.iter().map(|s| s.id).max().unwrap_or(0);
+        for (id, s) in (last + 1..).zip(specs) {
+            self.steps.push(Step {
+                id,
+                action: s.action,
+                args: s.args,
+                status: StepStatus::Pending,
+                side_effect: s.side_effect,
+                result: None,
+            });
+        }
+        Ok(())
     }
 
     /// Index of the first step still to run.
@@ -138,6 +182,8 @@ pub enum PlanError {
     Empty,
     TooMany(usize),
     BlankAction(usize),
+    /// A replacement step would do a side effect again that is already done.
+    RepeatsDone(usize),
     /// The planner could not produce a plan.
     Planner(String),
 }
@@ -148,6 +194,9 @@ impl fmt::Display for PlanError {
             Self::Empty => f.write_str("a plan needs at least one step"),
             Self::TooMany(n) => write!(f, "a plan of {n} steps is over the {MAX_STEPS} step limit"),
             Self::BlankAction(i) => write!(f, "step {i} has no action"),
+            Self::RepeatsDone(i) => {
+                write!(f, "step {i} would repeat a step that is already done")
+            }
             Self::Planner(why) => write!(f, "planning failed: {why}"),
         }
     }
@@ -232,6 +281,57 @@ pub(crate) mod tests {
         assert!(plan.steps.iter().all(|s| s.status == StepStatus::Pending));
         assert_eq!(plan.status, PlanStatus::Active);
         assert_eq!(plan.created_from_turn, 3);
+    }
+
+    #[test]
+    fn replacing_pending_keeps_done_steps_and_numbers_on() {
+        let mut p = Plan::new(
+            "g",
+            vec![spec("a", true), spec("b", false), spec("c", false)],
+            0,
+        )
+        .unwrap();
+        p.steps[0].status = StepStatus::Done;
+        p.steps[1].status = StepStatus::Failed;
+        let before = p.steps[..2].to_vec();
+        p.replace_pending(vec![spec("b2", false), spec("c2", false)])
+            .unwrap();
+        assert_eq!(
+            p.steps[..2],
+            before[..],
+            "done and failed steps are untouched"
+        );
+        let tail: Vec<_> = p.steps[2..]
+            .iter()
+            .map(|s| (s.id, s.action.as_str()))
+            .collect();
+        assert_eq!(tail, [(3, "b2"), (4, "c2")]);
+    }
+
+    #[test]
+    fn a_replacement_may_not_repeat_a_done_side_effect() {
+        let mut p = Plan::new("g", vec![spec("book", true), spec("x", false)], 0).unwrap();
+        p.steps[0].status = StepStatus::Done;
+        let before = p.clone();
+        let err = p
+            .replace_pending(vec![spec("x", false), spec("book", true)])
+            .unwrap_err();
+        assert_eq!(err, PlanError::RepeatsDone(2));
+        assert_eq!(p, before, "a refused replacement changes nothing");
+        // A read-only step may be repeated; only a done side effect may not.
+        let mut q = Plan::new("g", vec![spec("look", false), spec("x", false)], 0).unwrap();
+        q.steps[0].status = StepStatus::Done;
+        assert!(q.replace_pending(vec![spec("look", false)]).is_ok());
+    }
+
+    #[test]
+    fn a_replacement_that_passes_the_step_limit_is_refused() {
+        let mut p = Plan::new("g", vec![spec("a", false), spec("b", false)], 0).unwrap();
+        p.steps[0].status = StepStatus::Done;
+        let err = p
+            .replace_pending(vec![spec("n", false); MAX_STEPS])
+            .unwrap_err();
+        assert_eq!(err, PlanError::TooMany(MAX_STEPS + 1));
     }
 
     #[test]
