@@ -124,6 +124,69 @@ pub fn render(scope: &Scope, text: &str, eval: &Evaluator) -> Result<String, Str
     Ok(out)
 }
 
+/// A shell command with each reference filled in as exactly its text, quoted for where it sits:
+/// in single quotes outside any, escaped inside double quotes, and closing and reopening single
+/// quotes inside them. What a value holds (a name with quotes, `$(...)`) never becomes syntax.
+pub fn render_shell(scope: &Scope, text: &str, eval: &Evaluator) -> Result<String, String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+    let mut quote = Quote::None;
+    let mut out = String::new();
+    let mut last = 0;
+    let track = |literal: &str, quote: &mut Quote| {
+        let mut chars = literal.chars();
+        while let Some(c) = chars.next() {
+            *quote = match (*quote, c) {
+                (Quote::None | Quote::Double, '\\') => {
+                    chars.next();
+                    *quote
+                }
+                (Quote::None, '\'') => Quote::Single,
+                (Quote::None, '"') => Quote::Double,
+                (Quote::Single, '\'') | (Quote::Double, '"') => Quote::None,
+                (q, _) => q,
+            };
+        }
+    };
+    for r in find_refs(text) {
+        let literal = &text[last..r.start];
+        track(literal, &mut quote);
+        out.push_str(literal);
+        let v = as_text(&value(scope, &r, eval)?);
+        match quote {
+            // Plain words go in as they are, so the command still reads as written.
+            Quote::None
+                if !v.is_empty()
+                    && v.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "_./:@%+=,-".contains(c)) =>
+            {
+                out.push_str(&v);
+            }
+            Quote::None => {
+                out.push('\'');
+                out.push_str(&v.replace('\'', "'\\''"));
+                out.push('\'');
+            }
+            Quote::Single => out.push_str(&v.replace('\'', "'\\''")),
+            Quote::Double => {
+                for c in v.chars() {
+                    if matches!(c, '\\' | '"' | '$' | '`') {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+            }
+        }
+        last = r.end;
+    }
+    out.push_str(&text[last..]);
+    Ok(out)
+}
+
 /// A tool argument with its references filled in. A string that is only one reference keeps the
 /// value's own type (a number stays a number); references inside longer text become text.
 pub fn resolve(scope: &Scope, v: &Value, eval: &Evaluator) -> Result<Value, String> {
@@ -180,6 +243,31 @@ mod tests {
             ("mails".into(), json!([{"subject": "Hi", "ids": [7, 8]}])),
             ("out".into(), json!("plain")),
         ])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_command_gets_each_value_as_exactly_its_text_wherever_it_sits() {
+        let from =
+            "\"Mireia Garzón (EBM Fàbregas)\" <noreply@x.email> it's $(echo pwned) `id` \\ end";
+        let s = scope_of([("item".to_owned(), json!({"from": from}))]);
+        for (command, want) in [
+            ("printf %s {{item.from}}", from.to_owned()),
+            ("printf %s \"{{item.from}}\"", from.to_owned()),
+            ("printf %s '{{item.from}}'", from.to_owned()),
+            (
+                "printf %s \"<{{item.from}}>: {{= 1 + 1}}\"",
+                format!("<{from}>: 2"),
+            ),
+        ] {
+            let rendered = render_shell(&s, command, &ev()).unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&rendered)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{rendered}");
+        }
     }
 
     #[test]
