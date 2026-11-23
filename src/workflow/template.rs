@@ -4,13 +4,21 @@
 //! language; it ends at the first `}}`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use super::expr::Evaluator;
 
-/// What a step can reference: each input under `inputs`, and each bound result by name.
-pub type Scope = BTreeMap<String, Value>;
+/// What a step can reference: each input under `inputs`, and each bound result by name. Shared,
+/// so the scope a loop round or a branch starts from is a cheap copy, not every result again.
+pub type Scope = BTreeMap<String, Arc<Value>>;
+
+/// A scope of plain values, for tests.
+#[cfg(test)]
+pub fn scope_of<const N: usize>(pairs: [(String, Value); N]) -> Scope {
+    pairs.into_iter().map(|(k, v)| (k, Arc::new(v))).collect()
+}
 
 /// A `{{path}}` or `{{= expr}}` found in text: where it sits and what it names.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -64,8 +72,9 @@ pub fn find_refs(text: &str) -> Vec<Ref> {
 pub fn lookup(scope: &Scope, path: &str) -> Result<Value, String> {
     let mut parts = path.split('.');
     let root = parts.next().unwrap_or_default();
-    let mut value = scope
+    let mut value: &Value = scope
         .get(root)
+        .map(|v| &**v)
         .ok_or_else(|| format!("{{{{{path}}}}}: nothing is called {root}"))?;
     for part in parts {
         value = match value {
@@ -166,7 +175,7 @@ mod tests {
     }
 
     fn scope() -> Scope {
-        Scope::from([
+        scope_of([
             ("inputs".into(), json!({"since": "monday", "n": 3})),
             ("mails".into(), json!([{"subject": "Hi", "ids": [7, 8]}])),
             ("out".into(), json!("plain")),

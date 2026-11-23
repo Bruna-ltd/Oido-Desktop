@@ -222,6 +222,10 @@ pub struct Step {
     pub item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_error: Option<String>,
+    /// for_each and while: an expression over the round's own values that says what the round
+    /// gives. Without it a round gives what its last step gave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<String>,
     // while
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
@@ -271,7 +275,7 @@ impl Step {
 
     /// Fields this step has filled in, by name, for telling which ones its kind does not take.
     fn filled(&self) -> Vec<&'static str> {
-        let fields: [(&str, bool); 29] = [
+        let fields: [(&str, bool); 30] = [
             ("tool", self.tool.is_some()),
             ("args", self.args.is_some()),
             ("instruction", self.instruction.is_some()),
@@ -287,6 +291,7 @@ impl Step {
             ("over", self.over.is_some()),
             ("as", self.item.is_some()),
             ("on_error", self.on_error.is_some()),
+            ("collect", self.collect.is_some()),
             ("max", self.max.is_some()),
             ("values", self.values.is_some()),
             ("then", !self.then.is_empty()),
@@ -317,8 +322,8 @@ fn takes(kind: &str) -> &'static [&'static str] {
         DECIDE => &["question", "options", "input"],
         IF => &["cond", "then", "else"],
         SWITCH => &["on", "cases", "default", "all"],
-        FOR_EACH => &["over", "as", "on_error", "steps"],
-        WHILE => &["cond", "max", "steps"],
+        FOR_EACH => &["over", "as", "on_error", "collect", "steps"],
+        WHILE => &["cond", "max", "collect", "steps"],
         SET => &["values"],
         TRY => &["retries", "backoff_ms", "steps", "catch"],
         FLOW => &["workflow", "inputs"],
@@ -431,6 +436,20 @@ impl Check<'_> {
                 }
             }
         }
+    }
+
+    /// What a loop's `collect` may read: what its body made at any depth (empty when the list that
+    /// made it did not run), its item and `index`, and the inputs.
+    fn collected(&mut self, at: &str, s: &Step, end: &[String]) {
+        let Some(src) = s.collect.as_deref().filter(|c| !c.trim().is_empty()) else {
+            return;
+        };
+        let inside = bound_in(&s.steps);
+        let names: Vec<&str> = std::iter::once("inputs")
+            .chain(end.iter().map(String::as_str))
+            .chain(inside.iter().map(String::as_str))
+            .collect();
+        self.expression(at, "collect", Some(src), &names);
     }
 
     /// References in text must name an input that is declared or something bound earlier, and an
@@ -678,7 +697,8 @@ impl Check<'_> {
                         .push(format!("{at}: on_error is {STOP} or {CONTINUE}, not {v:?}"));
                 }
                 let item = s.item_name().to_owned();
-                self.body(&at, &s.steps, label, vis, &[item.as_str(), "index"], below);
+                let end = self.body(&at, &s.steps, label, vis, &[item.as_str(), "index"], below);
+                self.collected(&at, s, &end);
             }
             WHILE => {
                 // The body runs first and the condition then reads what it bound.
@@ -687,6 +707,7 @@ impl Check<'_> {
                     .chain(end.iter().map(String::as_str))
                     .collect();
                 self.expression(&at, "cond", s.cond.as_deref(), &names);
+                self.collected(&at, s, &end);
                 if s.max.is_some_and(|m| m == 0 || m > MAX_ROUNDS) {
                     self.bad
                         .push(format!("{at}: max is 1 to {MAX_ROUNDS} rounds"));
@@ -894,6 +915,32 @@ fn words(src: &str, out: &mut BTreeSet<String>) {
     }
 }
 
+/// The names the steps of a loop body bind at any depth: inside an If's lists, a Switch's cases and
+/// a Try's lists as well as at the top. Not inside a `parallel` step's branches, whose results
+/// come back as the `parallel` step's own.
+pub fn bound_in(steps: &[Step]) -> Vec<String> {
+    fn walk(steps: &[Step], out: &mut Vec<String>) {
+        for s in steps {
+            if let Some(b) = s.bind.as_deref().filter(|b| !b.is_empty())
+                && !out.iter().any(|o| o == b)
+            {
+                out.push(b.to_owned());
+            }
+            walk(&s.then, out);
+            walk(&s.otherwise, out);
+            for c in &s.cases {
+                walk(&c.steps, out);
+            }
+            walk(&s.default, out);
+            walk(&s.steps, out);
+            walk(&s.catch, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(steps, &mut out);
+    out
+}
+
 /// What a step's own fields read: the first name of each `{{path}}`, and every name in an
 /// expression. Steps inside it are not looked into.
 pub fn reads(s: &Step) -> BTreeSet<String> {
@@ -912,7 +959,7 @@ pub fn reads(s: &Step) -> BTreeSet<String> {
             out.insert(root.to_owned());
         }
     }
-    for e in [&s.cond, &s.on, &s.over].into_iter().flatten() {
+    for e in [&s.cond, &s.on, &s.over, &s.collect].into_iter().flatten() {
         words(e, &mut out);
     }
     for c in &s.cases {
@@ -1125,8 +1172,8 @@ pub fn plain(s: &Step) -> String {
         GENERATE => format!("Ask the AI: {}", text(&s.instruction)),
         DECIDE => format!("Ask the AI to choose: {}", text(&s.question)),
         IF => format!("If {}", say_cond(s.cond.as_deref().unwrap_or_default())),
-        SWITCH => format!("Choose by {}", words_for(s.on.as_deref().unwrap_or("?"))),
-        FOR_EACH => format!("Repeat for each {}", s.item_name()),
+        SWITCH => format!("Switch on {}", words_for(s.on.as_deref().unwrap_or("?"))),
+        FOR_EACH => format!("Loop over each {}", s.item_name()),
         WHILE => format!(
             "Repeat while {}",
             say_cond(s.cond.as_deref().unwrap_or_default())
@@ -1382,6 +1429,41 @@ mod tests {
     }
 
     #[test]
+    fn a_loops_collect_may_read_its_item_index_and_what_its_body_made_and_nothing_else() {
+        let each = |collect: &str| {
+            validate(&def(json!({"steps": [
+                {"id": "f", "kind": "for_each", "over": "[1, 2]", "as": "n", "collect": collect,
+                 "steps": [{"id": "m", "kind": "set", "values": {"v": "n"}, "bind": "made"}]}
+            ]})))
+        };
+        assert!(each("made.v + n + index").is_ok());
+        assert!(each("").is_ok(), "empty means what the last step gave");
+        let inner = |collect: &str| {
+            validate(&def(json!({"steps": [
+                {"id": "f", "kind": "for_each", "over": "[1]", "collect": collect,
+                 "steps": [{"id": "i", "kind": "if", "cond": "true",
+                    "then": [{"id": "m", "kind": "set", "values": {"v": "1"}, "bind": "deep"}],
+                    "else": []}]}
+            ]})))
+        };
+        assert!(inner("deep").is_ok(), "what a list inside the body bound");
+        assert!(inner("other").is_err());
+        let p = each("nope + 1").unwrap_err().join("\n");
+        assert!(p.contains("collect \"nope + 1\""), "{p}");
+        assert!(
+            validate(&def(json!({"steps": [
+                {"id": "w", "kind": "while", "cond": "false", "collect": "made.v + index",
+                 "steps": [{"id": "m", "kind": "set", "values": {"v": "1"}, "bind": "made"}]}
+            ]})))
+            .is_ok()
+        );
+        let p = problems(json!({"steps": [
+            {"id": "t", "kind": "tool", "tool": "shell", "collect": "1"}
+        ]}));
+        assert!(p.contains("a tool step has no collect"), "{p}");
+    }
+
+    #[test]
     fn every_container_problem_is_listed_with_where_it_is() {
         let p = problems(json!({"steps": [
             {"id": "i", "kind": "if", "cond": "nope > 1", "then": []},
@@ -1540,7 +1622,7 @@ mod tests {
             "what is not of that shape is as written"
         );
         assert_eq!(said[4], "Ask the AI: Say ‹files output› please");
-        assert_eq!(said[5], "Repeat for each name");
+        assert_eq!(said[5], "Loop over each name");
         assert_eq!(said[6], "Ask me first: Send it?");
     }
 }

@@ -4,8 +4,9 @@
 //! step, which the guardrails see. Every evaluation is bounded in operations, nesting, size and
 //! time, and ends at once when the run is stopped.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rhai::{Dynamic, Engine, EvalAltResult, ParseError};
@@ -26,6 +27,9 @@ const MAX_MAP: usize = 10_000;
 const MAX_PATTERN: usize = 100_000;
 /// The clock is looked at this often, in operations.
 const CLOCK_EVERY: u64 = 1024;
+
+/// How many compiled patterns `matches` keeps, so a loop does not compile its pattern each round.
+const KEPT_PATTERNS: usize = 32;
 
 const STOPPED: &str = "stopped";
 const TOO_LONG: &str = "too long";
@@ -58,15 +62,37 @@ fn base() -> Engine {
         |text: rhai::ImmutableString,
          pattern: rhai::ImmutableString|
          -> Result<bool, Box<EvalAltResult>> {
-            regex::RegexBuilder::new(&pattern)
-                .size_limit(MAX_PATTERN)
-                .build()
-                .map(|re| re.is_match(&text))
+            pattern_matches(&pattern, &text)
                 .map_err(|e| format!("{pattern:?} is not a pattern: {e}").into())
         },
     );
     engine
 }
+
+/// Whether `text` fits `pattern`, compiling each pattern once.
+fn pattern_matches(pattern: &str, text: &str) -> Result<bool, regex::Error> {
+    static KEPT: LazyLock<Mutex<HashMap<String, regex::Regex>>> = LazyLock::new(Mutex::default);
+    let known = KEPT.lock().ok().and_then(|kept| kept.get(pattern).cloned());
+    let re = match known {
+        Some(re) => re,
+        None => {
+            let re = regex::RegexBuilder::new(pattern)
+                .size_limit(MAX_PATTERN)
+                .build()?;
+            if let Ok(mut kept) = KEPT.lock() {
+                if kept.len() >= KEPT_PATTERNS {
+                    kept.clear();
+                }
+                kept.insert(pattern.to_owned(), re.clone());
+            }
+            re
+        }
+    };
+    Ok(re.is_match(text))
+}
+
+/// The engine that checks expressions without running them; it is the same for every check.
+static CHECKER: LazyLock<Engine> = LazyLock::new(base);
 
 /// What a run evaluates expressions with. One per run: it knows when the run is stopped.
 pub struct Evaluator {
@@ -125,8 +151,12 @@ impl Evaluator {
         if let Ok(mut d) = self.deadline.lock() {
             *d = Instant::now() + self.limit;
         }
+        // Only what `src` names is made into Rhai values: a value it does not name cannot be
+        // reached (there is no `eval`, and variables are strict), and a big earlier result would
+        // otherwise be converted again for every condition in a loop.
+        let named = names_in(src);
         let mut vars = rhai::Scope::new();
-        for (name, value) in scope {
+        for (name, value) in scope.iter().filter(|(n, _)| named.contains(n.as_str())) {
             let dynamic = rhai::serde::to_dynamic(value).map_err(|e| e.to_string())?;
             vars.push_dynamic(name.as_str(), dynamic);
         }
@@ -146,6 +176,13 @@ impl Evaluator {
             )),
         }
     }
+}
+
+/// Every word in `src` that could be a variable's name.
+fn names_in(src: &str) -> std::collections::HashSet<&str> {
+    src.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect()
 }
 
 fn one_line(src: &str) -> String {
@@ -212,7 +249,7 @@ pub fn check_script(visible: &[&str], src: &str) -> Result<(), String> {
     if src.trim().is_empty() {
         return Err("it is empty".to_owned());
     }
-    let engine = base();
+    let engine = &*CHECKER;
     let mut vars = rhai::Scope::new();
     for name in visible {
         vars.push_dynamic(*name, Dynamic::UNIT);
@@ -228,7 +265,7 @@ pub fn check(visible: &[&str], src: &str) -> Result<(), String> {
     if src.trim().is_empty() {
         return Err("it is empty".to_owned());
     }
-    let engine = base();
+    let engine = &*CHECKER;
     let mut vars = rhai::Scope::new();
     for name in visible {
         vars.push_dynamic(*name, Dynamic::UNIT);
@@ -247,7 +284,7 @@ mod tests {
     use super::*;
 
     fn scope() -> Scope {
-        Scope::from([
+        crate::workflow::template::scope_of([
             (
                 "inputs".to_owned(),
                 json!({"n": 3, "who": "ann", "tags": ["a", "b"]}),
@@ -261,6 +298,20 @@ mod tests {
 
     fn ev() -> Evaluator {
         Evaluator::new(&Arc::new(AtomicBool::new(false)))
+    }
+
+    #[test]
+    fn only_the_values_named_are_handed_over_and_a_missing_one_is_still_an_error() {
+        let e = ev();
+        let s = scope();
+        assert_eq!(e.eval(&s, "`${files.exit_code}!`").unwrap(), json!("0!"));
+        assert_eq!(
+            e.run(&s, "let n = 0; for t in inputs.tags { n += 1 } n")
+                .unwrap(),
+            json!(2)
+        );
+        let why = e.eval(&s, "nothing_here + 1").unwrap_err();
+        assert!(why.contains("nothing_here"), "{why}");
     }
 
     #[test]
@@ -400,7 +451,10 @@ mod tests {
     #[test]
     fn trimmed_gives_the_text_without_its_ends_where_rhais_own_trim_gives_nothing() {
         let e = ev();
-        let s = Scope::from([("out".to_owned(), json!({"stdout": "  hi there\n"}))]);
+        let s = crate::workflow::template::scope_of([(
+            "out".to_owned(),
+            json!({"stdout": "  hi there\n"}),
+        )]);
         assert_eq!(
             e.eval(&s, "out.stdout.trimmed()").unwrap(),
             json!("hi there")
@@ -423,7 +477,7 @@ mod tests {
             e.run(&s, "let t = out.stdout.trimmed(); t.len()").unwrap(),
             json!(8)
         );
-        let n = Scope::from([("n".to_owned(), json!(3))]);
+        let n = crate::workflow::template::scope_of([("n".to_owned(), json!(3))]);
         assert_eq!(e.eval(&n, "n.trimmed() == 3").unwrap(), json!(true));
         assert_eq!(
             e.eval(&s, "out.stdout.trimmed().contains(\"hi\")").unwrap(),
@@ -434,7 +488,7 @@ mod tests {
     #[test]
     fn matches_tests_text_against_a_pattern_and_a_bad_pattern_is_an_error() {
         let e = ev();
-        let s = Scope::from([("n".to_owned(), json!("order-1042"))]);
+        let s = crate::workflow::template::scope_of([("n".to_owned(), json!("order-1042"))]);
         assert_eq!(
             e.eval(&s, r#"n.matches("^order-\\d+$")"#).unwrap(),
             json!(true)

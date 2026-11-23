@@ -1496,7 +1496,7 @@ pub static SCENES: &[Scene] = &[
     ("workflow-agent", |s| {
         use crate::workflow::editor::Loc;
         graph_scene(s);
-        s.editor_add(&Vec::new(), "Ask an agent");
+        s.editor_add(&Vec::new(), "AI Agent");
         let last = s
             .wf_editor
             .as_ref()
@@ -1509,7 +1509,7 @@ pub static SCENES: &[Scene] = &[
     ("workflow-reply", |s| {
         use crate::workflow::editor::Loc;
         graph_scene(s);
-        s.editor_add(&Vec::new(), "Ask the AI");
+        s.editor_add(&Vec::new(), "Basic LLM Chain");
         let at = Loc {
             place: Vec::new(),
             index: s

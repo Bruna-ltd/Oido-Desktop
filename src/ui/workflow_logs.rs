@@ -57,7 +57,7 @@ fn chosen(s: &App, lines: &[StepLog]) -> Option<usize> {
         .or_else(|| lines.len().checked_sub(1))
 }
 
-/// Where a step is, in words: "Step 3 › Repeat for each name › Run mv <name> docs/".
+/// Where a step is, in words: "Step 3 › Loop over each name › Run mv <name> docs/".
 pub fn place(ed: &Editor, line: &StepLog) -> String {
     let Some(at) = loc_of(ed, &line.path) else {
         return line.what.clone();
@@ -82,7 +82,7 @@ pub fn panel(s: &App, ed: &Editor, k: &Kit) -> Option<El> {
         return None;
     }
     let (label, lines, waiting) = match &shown {
-        Some(r) => (r.label, r.lines.as_slice(), r.waiting.as_deref()),
+        Some(r) => (r.label, r.lines, r.waiting.as_deref()),
         None => ("Test run", &[][..], None),
     };
     let failed = lines.iter().filter(|l| l.error.is_some()).count();

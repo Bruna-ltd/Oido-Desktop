@@ -48,9 +48,9 @@ pub struct GraphView {
 const DOUBLE_PRESS: std::time::Duration = std::time::Duration::from_millis(450);
 
 /// A run drawn on the steps: its log, where it waits, and if it can be answered, how.
-pub struct Shown {
+pub struct Shown<'a> {
     pub label: &'static str,
-    pub lines: Vec<StepLog>,
+    pub lines: &'a [StepLog],
     /// The id of the `wait` step it is stopped at.
     pub waiting: Option<String>,
     /// A run that waits for you: its workflow and its own id, and what it waits for.
@@ -161,7 +161,7 @@ impl App {
     pub fn selected_step(&self) -> Option<Loc> {
         let ed = self.wf_editor.as_ref()?;
         let at = self.wf_graph.selected.clone()?;
-        layout::layout(ed).find(&at).map(|_| at)
+        ed.node(&at).map(|_| at)
     }
 
     /// An arrow key in the graph: moves the selection along the tree, starting at the first step
@@ -184,12 +184,12 @@ impl App {
 
     /// The run drawn on the steps: the test run if there is one (as it goes, or as it ended), else
     /// the workflow's last run if that is asked for and this is its workflow.
-    pub fn shown_run(&self) -> Option<Shown> {
+    pub fn shown_run(&self) -> Option<Shown<'_>> {
         let t = &self.wf_test;
         if t.running.is_some() {
             return Some(Shown {
                 label: "Test run, going",
-                lines: t.live.clone(),
+                lines: &t.live,
                 waiting: None,
                 answer: None,
             });
@@ -201,7 +201,7 @@ impl App {
             };
             return Some(Shown {
                 label: "Test run",
-                lines: r.steps.clone(),
+                lines: &r.steps,
                 waiting,
                 answer: None,
             });
@@ -217,7 +217,7 @@ impl App {
             } else {
                 "Last run"
             },
-            lines: last.steps.clone(),
+            lines: &last.steps,
             waiting: last.pause.as_ref().map(|p| p.step.clone()),
             answer: last
                 .pause
@@ -260,7 +260,12 @@ impl App {
 
     /// Where the drawing's top-left is in the view, before pan and zoom: it is centred across.
     pub(crate) fn world_origin(&self) -> f32 {
-        ((self.wf_graph.viewport[2] - self.world_size()[0]) / 2.0).max(0.0)
+        self.world_origin_for(self.world_size()[0])
+    }
+
+    /// [`App::world_origin`] for a drawing `width` wide, for a caller that has the layout already.
+    pub(crate) fn world_origin_for(&self, width: f32) -> f32 {
+        ((self.wf_graph.viewport[2] - width) / 2.0).max(0.0)
     }
 
     /// The wheel or a two-finger scroll moves the drawing.
@@ -378,14 +383,27 @@ impl App {
     }
 
     /// Where a step added from the Add step button goes: after the selected one, else at the end
-    /// of the top list.
+    /// of the top list. Nothing goes after an If or Switch that ends its list, so there it goes at
+    /// the end of that step's first output.
     pub fn add_position(&self) -> (Place, usize) {
-        match self.selected_step() {
+        let (place, index) = match self.selected_step() {
             Some(at) => (at.place, at.index + 1),
             None => (
                 Vec::new(),
                 self.wf_editor.as_ref().map_or(0, |ed| ed.steps.len()),
             ),
+        };
+        let Some(ed) = self.wf_editor.as_ref() else {
+            return (place, index);
+        };
+        match ed.list(&place) {
+            Some(list) if index >= list.len() && ed.ends_in_branch(&place) => {
+                let mut inside = place;
+                inside.push((list.len() - 1, 0));
+                let end = ed.list(&inside).map_or(0, <[_]>::len);
+                (inside, end)
+            }
+            _ => (place, index),
         }
     }
 
@@ -450,7 +468,7 @@ impl App {
                 },
             ]
             .into_iter()
-            .find(|l| layout::layout(ed).find(l).is_some())
+            .find(|l| ed.node(l).is_some())
         });
         self.autosave();
     }
@@ -733,15 +751,26 @@ mod tests {
     #[test]
     fn a_step_is_added_after_the_selected_one_or_at_the_end_and_selected() {
         let mut app = app_with_editor();
-        assert_eq!(app.add_position(), (vec![], 2), "the end of the top list");
-        app.editor_add_at(&vec![], usize::MAX, "Remember a value");
-        assert_eq!(app.selected_step(), Some(at(&[], 2)));
+        assert_eq!(
+            app.add_position(),
+            (vec![(1, 0)], 1),
+            "the top list ends in an If, so it goes on in the If's first output"
+        );
+        let (place, index) = app.add_position();
+        app.editor_add_at(&place, index, "Edit Fields (Set)");
+        assert_eq!(app.selected_step(), Some(at(&[(1, 0)], 1)));
         app.select_step(Some(at(&[], 0)));
         assert_eq!(app.add_position(), (vec![], 1));
         let (place, index) = app.add_position();
-        app.editor_add_at(&place, index, "Use a tool");
+        app.editor_add_at(&place, index, "Tool");
         assert_eq!(app.selected_step(), Some(at(&[], 1)));
-        assert_eq!(ids(&app, &[]).len(), 4);
+        assert_eq!(ids(&app, &[]).len(), 3);
+        app.select_step(Some(at(&[], 2)));
+        assert_eq!(
+            app.add_position(),
+            (vec![(2, 0)], 2),
+            "with the If selected too"
+        );
         app.select_step(Some(at(&[(2, 0)], 0)));
         assert_eq!(
             app.add_position(),

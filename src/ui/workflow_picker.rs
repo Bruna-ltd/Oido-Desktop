@@ -172,6 +172,8 @@ mod tests {
         assert_eq!(matching("   ").len(), KINDS.len());
         let found: Vec<_> = matching("each FILE").iter().map(|k| k.kind).collect();
         assert_eq!(found, ["for_each"]);
+        let found: Vec<_> = matching("loop items").iter().map(|k| k.kind).collect();
+        assert_eq!(found, ["for_each"]);
         assert!(matching("zzz").is_empty());
         assert!(matching("more").iter().all(|k| k.group == "More"));
     }

@@ -2,8 +2,8 @@
 //! new one, changing what is in it, and saving. The state is [`crate::workflow::editor`]; the
 //! screen is `ui/workflow_editor.rs`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rune::TextEdit;
 use serde_json::{Map, Value};
@@ -396,11 +396,25 @@ impl App {
         let began = now();
         let flag = Arc::clone(&cancel);
         self.wf_test.live.clear();
-        // Each step beginning or ending tells the graph, so it shows the run as it goes.
+        // Each step beginning or ending tells the graph, so it shows the run as it goes. Only the
+        // newest log is kept: a fast run makes one redraw per frame, not a backlog of one a step.
         let watched = Arc::clone(&cancel);
+        let newest: Arc<Mutex<Option<Vec<StepLog>>>> = Arc::default();
         let watch: crate::flows::Watch = Arc::new(move |lines: Vec<StepLog>| {
-            let flag = Arc::clone(&watched);
-            crate::app::on_ui_thread(move |app| app.test_progress(&flag, lines));
+            let Ok(mut slot) = newest.lock() else {
+                return;
+            };
+            if slot.replace(lines).is_some() {
+                return;
+            }
+            drop(slot);
+            let (flag, newest) = (Arc::clone(&watched), Arc::clone(&newest));
+            crate::app::on_ui_thread(move |app| {
+                let lines = newest.lock().ok().and_then(|mut slot| slot.take());
+                if let Some(lines) = lines {
+                    app.test_progress(&flag, lines);
+                }
+            });
         });
         self.spawn_flow(prep, def, go, cancel, Some(watch), move |app, outcome| {
             let who = Counted {
@@ -778,10 +792,19 @@ impl App {
     }
 
     /// The tools a step of the editor's workflow can use, by the name the model knows them by:
-    /// the built-in ones a flow may call, and those of the MCP servers that are on. Handing a
-    /// task to an agent is its own kind of step, not a tool to choose.
+    /// the built-in ones a flow may call, TypeSafe's while it is connected, and those of the MCP
+    /// servers that are on. Handing a task to an agent is its own kind of step, not a tool to
+    /// choose.
     pub fn step_tools(&self, current: &str) -> Vec<String> {
         let mut tools: Vec<String> = STEP_TOOLS.iter().map(|t| (*t).to_owned()).collect();
+        if self.typesafe_connected() {
+            tools.extend(
+                crate::typesafe::specs()
+                    .into_iter()
+                    .map(|t| t.name)
+                    .filter(|n| crate::typesafe::is_tool(n)),
+            );
+        }
         for server in self.mcp.servers.iter().filter(|m| m.offers()) {
             tools.extend(server.tools.iter().map(|t| server.qualified(&t.name)));
         }
@@ -1180,6 +1203,25 @@ mod tests {
     }
 
     #[test]
+    fn typesafe_tools_can_be_chosen_for_a_step_only_while_typesafe_is_connected() {
+        let mut app = crate::testing::samples();
+        let has = |app: &App| {
+            app.step_tools("")
+                .iter()
+                .any(|t| t == crate::typesafe::YES_NO)
+        };
+        assert!(!has(&app));
+        app.providers.connect(crate::providers::TYPESAFE);
+        assert!(has(&app));
+        let offered = app
+            .step_tools("")
+            .into_iter()
+            .filter(|t| crate::typesafe::is_tool(t))
+            .count();
+        assert_eq!(offered, 4, "yes/no, choose, score and locate");
+    }
+
+    #[test]
     fn a_name_is_finished_by_key_or_click_and_put_away_with_escape() {
         use rune::{Key, KeyEvent};
         let db = TempDb::new();
@@ -1242,12 +1284,12 @@ mod tests {
         app.editor_set_input_kind(0, "boolean");
         set(&mut app, &Target::InputDefault(0), "true");
 
-        app.editor_add(&Vec::new(), "Repeat for each");
+        app.editor_add(&Vec::new(), "Loop Over Items");
         set(&mut app, &Target::Field(top(0), 0), "[\"x\", \"y\"]");
         set(&mut app, &Target::Field(top(0), 1), "name");
         set(&mut app, &Target::Bind(top(0)), "greeted");
         let body: Place = vec![(0, 0)];
-        app.editor_add(&body, "Use a tool");
+        app.editor_add(&body, "Tool");
         let inner = Loc {
             place: body,
             index: 0,
@@ -1257,11 +1299,11 @@ mod tests {
             &Target::Param(inner, "command".into(), ArgKind::Text),
             "echo {{name}}-{{index}}",
         );
-        app.editor_add(&Vec::new(), "Check something");
+        app.editor_add(&Vec::new(), "If");
         app.editor_toggle_expression(&top(1));
         set(&mut app, &Target::Field(top(1), 0), "inputs.loud");
         let then: Place = vec![(1, 0)];
-        app.editor_add(&then, "Use a tool");
+        app.editor_add(&then, "Tool");
         set(
             &mut app,
             &Target::Param(
@@ -1336,7 +1378,7 @@ mod tests {
         assert!(app.workflows.is_empty());
 
         set(&mut app, &Target::Name, "X");
-        app.editor_add(&Vec::new(), "Check something");
+        app.editor_add(&Vec::new(), "If");
         app.editor_toggle_expression(&top(0));
         set(&mut app, &Target::Field(top(0), 0), "ghost > 1");
         app.save_editor();
@@ -1369,7 +1411,7 @@ mod tests {
         let mut app = on_the_page(&db);
         app.new_workflow();
         set(&mut app, &Target::Name, "Old name");
-        app.editor_add(&Vec::new(), "Remember a value");
+        app.editor_add(&Vec::new(), "Edit Fields (Set)");
         set(&mut app, &Target::Field(top(0), 0), "a = 1");
         set(&mut app, &Target::Bind(top(0)), "made");
         app.save_editor();
@@ -1418,7 +1460,7 @@ mod tests {
         set(&mut app, &Target::Name, "Echo");
         app.editor_add_input();
         set(&mut app, &Target::InputName(0), "word");
-        app.editor_add(&Vec::new(), "Use a tool");
+        app.editor_add(&Vec::new(), "Tool");
         set(
             &mut app,
             &Target::Param(top(0), "command".into(), ArgKind::Text),
@@ -1508,7 +1550,7 @@ mod tests {
         let mut app = on_the_page(&db);
         app.new_workflow();
         set(&mut app, &Target::Name, "Ping");
-        app.editor_add(&Vec::new(), "Use a tool");
+        app.editor_add(&Vec::new(), "Tool");
         set(
             &mut app,
             &Target::Param(top(0), "command".into(), ArgKind::Text),
@@ -1564,7 +1606,7 @@ mod tests {
         set(&mut app, &Target::Name, "Chain");
         let command = |at: usize| Target::Param(top(at), "command".into(), ArgKind::Text);
         for _ in 0..3 {
-            app.editor_add(&Vec::new(), "Use a tool");
+            app.editor_add(&Vec::new(), "Tool");
         }
         // The first makes something different each time it runs, so a run again would show.
         set(&mut app, &command(0), "date +%s%N");
@@ -1642,11 +1684,11 @@ mod tests {
             place: vec![(1, 0)],
             index,
         };
-        app.editor_add(&Vec::new(), "Use a tool");
-        app.editor_add(&Vec::new(), "Repeat for each");
-        app.editor_add(&vec![(1, 0)], "Use a tool");
-        app.editor_add(&vec![(1, 0)], "Use a tool");
-        app.editor_add(&Vec::new(), "Use a tool");
+        app.editor_add(&Vec::new(), "Tool");
+        app.editor_add(&Vec::new(), "Loop Over Items");
+        app.editor_add(&vec![(1, 0)], "Tool");
+        app.editor_add(&vec![(1, 0)], "Tool");
+        app.editor_add(&Vec::new(), "Tool");
         set(&mut app, &command(top(0)), "echo first");
         set(&mut app, &Target::Field(top(1), 0), "[1, 2]");
         set(&mut app, &command(inside(0)), "echo item");
@@ -1701,7 +1743,7 @@ mod tests {
         app.new_workflow();
         assert!(app.workflows.is_empty(), "nothing to keep before a step");
         // The first step is made: the workflow is kept at once, with the name it started with.
-        app.editor_add(&Vec::new(), "Use a tool");
+        app.editor_add(&Vec::new(), "Tool");
         assert_eq!(app.workflows.len(), 1);
         assert_eq!(app.workflows[0].name, "My workflow");
         assert!(app.editor_saved());
@@ -1711,7 +1753,7 @@ mod tests {
             !app.editor_saved(),
             "what is typed waits for the next change"
         );
-        app.editor_add(&Vec::new(), "Use a tool");
+        app.editor_add(&Vec::new(), "Tool");
         set(
             &mut app,
             &Target::Param(top(1), "timeout_secs".into(), ArgKind::Whole),
@@ -1743,7 +1785,7 @@ mod tests {
         let db = TempDb::new();
         let mut app = on_the_page(&db);
         app.new_workflow();
-        app.editor_add(&Vec::new(), "Use a tool");
+        app.editor_add(&Vec::new(), "Tool");
         set(
             &mut app,
             &Target::Param(top(0), "command".into(), ArgKind::Text),
@@ -1800,8 +1842,8 @@ mod tests {
         let db = TempDb::new();
         let mut app = on_the_page(&db);
         app.new_workflow();
-        app.editor_add(&Vec::new(), "Use a tool");
-        app.editor_add(&Vec::new(), "Repeat for each");
+        app.editor_add(&Vec::new(), "Tool");
+        app.editor_add(&Vec::new(), "Loop Over Items");
         set(
             &mut app,
             &Target::Param(top(0), "command".into(), ArgKind::Text),

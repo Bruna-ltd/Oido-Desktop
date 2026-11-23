@@ -34,7 +34,7 @@ pub fn registered() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: RUN_WORKFLOW.into(),
-            description: "Run one of your saved workflows by name, with inputs if it takes any, and get its result. Use it when the person asks for something a saved workflow already does.".into(),
+            description: "Run one of your saved workflows by name (they are listed in your instructions), with inputs if it takes any, and get its result. Use it first, without asking, whenever the person asks for something a saved workflow already does.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {

@@ -12,7 +12,7 @@
 //! frame, and a join under a frame is the frame's end.
 
 use super::definition::{DECIDE, GENERATE, plain};
-use super::editor::{Editor, Loc, Node, Part, Place};
+use super::editor::{Editor, Loc, Node, Part, Place, branches};
 
 /// A step's square, as n8n draws a node; its words go under it, past the square's edge.
 pub const NODE_W: f32 = 96.0;
@@ -292,6 +292,16 @@ impl Layout {
             .iter()
             .filter(|s| (s[0] + s[1]) / 2.0 < p[1])
             .count();
+        // Not after an If or Switch that ends the list: its outputs have their own ends.
+        if index > 0 && index == region.spans.len() {
+            let last = Loc {
+                place: region.place.clone(),
+                index: index - 1,
+            };
+            if self.find(&last).is_some_and(|i| branches(&i.kind)) {
+                return None;
+            }
+        }
         let marker = match (
             region.spans.first(),
             region.spans.get(index.wrapping_sub(1)),
@@ -502,17 +512,22 @@ impl Pen {
                 rect,
             });
             if !node.blocks.is_empty() {
-                self.columns(node, &loc, rect);
+                // The outputs of an If or Switch at the end of its list do not meet again.
+                let closes = branches(&node.kind) && index + 1 == nodes.len();
+                self.columns(node, &loc, rect, closes);
             }
             previous = Some([centre, rect.bottom()]);
             cursor = rect.bottom() + GAP;
         }
         let last = previous.unwrap_or(first);
-        self.out.gaps.push(Gap {
-            place: place.clone(),
-            index: nodes.len(),
-            at: [centre, last[1] + END_GAP],
-        });
+        // After an If or Switch there is nothing to add to: each output has its own end.
+        if !nodes.last().is_some_and(|n| branches(&n.kind)) {
+            self.out.gaps.push(Gap {
+                place: place.clone(),
+                index: nodes.len(),
+                at: [centre, last[1] + END_GAP],
+            });
+        }
         self.out.lists.push(ListRegion {
             place: place.clone(),
             rect: Rect {
@@ -526,8 +541,9 @@ impl Pen {
         (first, last)
     }
 
-    /// The columns inside the frame of `node`, with the wires into and out of each.
-    fn columns(&mut self, node: &Node, at: &Loc, frame: Rect) {
+    /// The columns inside the frame of `node`, with the wires into each, and out of each to where
+    /// they meet unless the frame `closes` its list and nothing follows.
+    fn columns(&mut self, node: &Node, at: &Loc, frame: Rect, closes: bool) {
         let cols: Vec<(f32, f32)> = node.blocks.iter().map(|b| measure_list(&b.steps)).collect();
         let used: f32 = cols.iter().map(|c| c.0).sum::<f32>() + COL_GAP * (cols.len() - 1) as f32;
         let labelled = node.blocks.len() > 1;
@@ -574,15 +590,17 @@ impl Pen {
             }
             // Straight down to a join line under the tallest column, then in to the middle, so
             // a short column's wire does not cut across the one beside it.
-            let join = [centre, frame.bottom() - FOOT / 2.0];
-            self.out.wires.push(Wire {
-                from: last,
-                to: join,
-            });
-            self.out.wires.push(Wire {
-                from: join,
-                to: leave,
-            });
+            if !closes {
+                let join = [centre, frame.bottom() - FOOT / 2.0];
+                self.out.wires.push(Wire {
+                    from: last,
+                    to: join,
+                });
+                self.out.wires.push(Wire {
+                    from: join,
+                    to: leave,
+                });
+            }
             x += w + COL_GAP;
         }
     }
@@ -780,6 +798,68 @@ mod tests {
         }
     }
 
+    fn if_with(after: bool) -> Editor {
+        let mut steps = vec![
+            sh("a"),
+            json!({"id": "i", "kind": "if", "cond": "true", "then": [sh("t")], "else": [sh("e")]}),
+        ];
+        if after {
+            steps.push(sh("after"));
+        }
+        editor(Value::Array(steps))
+    }
+
+    #[test]
+    fn the_outputs_of_an_if_that_ends_its_list_do_not_meet_and_each_has_an_end_of_its_own() {
+        let lay = down(&if_with(false));
+        let frame = lay.find(&at(&[], 1)).unwrap().rect;
+        let meets = |l: &Layout| {
+            l.wires
+                .iter()
+                .any(|w| w.to == [frame.centre_x(), frame.bottom()])
+        };
+        assert!(!meets(&lay), "nothing leaves the frame");
+        assert!(
+            !lay.gaps.iter().any(|g| g.place.is_empty() && g.index == 2),
+            "nothing to add after it"
+        );
+        for output in 0..2 {
+            assert!(
+                lay.gaps
+                    .iter()
+                    .any(|g| g.place == [(1, output)] && g.index == 1),
+                "output {output} can be added to"
+            );
+        }
+        // One made before, with a step after, still joins them and shows where to go on.
+        let old = down(&if_with(true));
+        let frame = old.find(&at(&[], 1)).unwrap().rect;
+        assert!(
+            old.wires
+                .iter()
+                .any(|w| w.to == [frame.centre_x(), frame.bottom()])
+        );
+        assert!(old.gaps.iter().any(|g| g.place.is_empty() && g.index == 3));
+    }
+
+    #[test]
+    fn a_step_cannot_be_dropped_after_an_if_that_ends_its_list_but_can_before_it() {
+        let lay = down(&if_with(false));
+        let (a, frame) = (
+            lay.find(&at(&[], 0)).unwrap().rect,
+            lay.find(&at(&[], 1)).unwrap().rect,
+        );
+        let from = at(&[(1, 0)], 0);
+        assert!(
+            lay.drop_target(&from, [frame.centre_x(), frame.bottom() + 8.0])
+                .is_none()
+        );
+        assert!(
+            lay.drop_target(&from, [a.centre_x(), a.bottom() + GAP / 2.0])
+                .is_some()
+        );
+    }
+
     fn rich() -> Editor {
         editor(json!([
             sh("a"),
@@ -825,7 +905,7 @@ mod tests {
             (l.width, l.items[0].kind.as_str()),
             (NODE_W + 2.0 * MARGIN, "tool")
         );
-        assert_eq!(l.items[0].detail, "Use a tool");
+        assert_eq!(l.items[0].detail, "Tool");
         assert!(l.height > boxes[2].bottom());
     }
 
@@ -902,7 +982,7 @@ mod tests {
         ])));
         let marks: Vec<_> = l.items.iter().map(|i| i.model).collect();
         assert_eq!(marks, [false, true, true, true, false]);
-        assert_eq!(l.items[2].detail, "Let the AI choose");
+        assert_eq!(l.items[2].detail, "Text Classifier");
     }
 
     #[test]

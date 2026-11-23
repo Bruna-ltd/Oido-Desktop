@@ -193,7 +193,7 @@ impl App {
         let ed = self.wf_editor.as_ref()?;
         let line = self.shown_run().and_then(|r| {
             r.lines
-                .into_iter()
+                .iter()
                 .rev()
                 .find(|l| trace::loc_of(ed, &l.path).as_ref() == Some(at))
         });

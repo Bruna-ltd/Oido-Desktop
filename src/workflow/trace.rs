@@ -5,7 +5,7 @@
 //! list, then for each frame the name of the list in it and the position there. The editor names a
 //! step by the lists it went through, counted by number. [`loc_of`] turns one into the other.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::definition::{FOR_EACH, IF, PARALLEL, SWITCH, TRY, WHILE};
 use super::editor::{Editor, Loc, Node};
@@ -76,8 +76,17 @@ pub fn loc_of(ed: &Editor, path: &str) -> Option<Loc> {
 /// run is stopped at, if it is.
 pub fn runs_by_step(ed: &Editor, log: &[StepLog], waiting: Option<&str>) -> Vec<(Loc, NodeRun)> {
     let mut out: Vec<(Loc, NodeRun)> = Vec::new();
+    // Where each step is in `out`, and the line it last gave, whose output is taken at the end.
+    let mut slot: HashMap<Loc, usize> = HashMap::new();
+    let mut last: Vec<&StepLog> = Vec::new();
+    // A loop's rounds repeat their paths, so each is looked up once.
+    let mut places: HashMap<&str, Option<Loc>> = HashMap::new();
     for line in log {
-        let Some(at) = loc_of(ed, &line.path) else {
+        let Some(at) = places
+            .entry(line.path.as_str())
+            .or_insert_with(|| loc_of(ed, &line.path))
+            .clone()
+        else {
             continue;
         };
         let state = if line.error.is_some() {
@@ -89,11 +98,12 @@ pub fn runs_by_step(ed: &Editor, log: &[StepLog], waiting: Option<&str>) -> Vec<
         } else {
             State::Done
         };
-        match out.iter_mut().find(|(loc, _)| *loc == at) {
-            Some((_, run)) => {
+        match slot.get(&at) {
+            Some(&i) => {
+                let run = &mut out[i].1;
                 run.rounds += 1;
                 run.ms += line.ms;
-                run.output = line.output.clone();
+                last[i] = line;
                 // Failed outranks running, and running outranks done: the worst of its rounds.
                 run.state = match (run.state, state) {
                     (State::Failed, _) | (_, State::Failed) => State::Failed,
@@ -105,17 +115,24 @@ pub fn runs_by_step(ed: &Editor, log: &[StepLog], waiting: Option<&str>) -> Vec<
                     run.error = line.error.clone();
                 }
             }
-            None => out.push((
-                at,
-                NodeRun {
-                    state,
-                    rounds: 1,
-                    output: line.output.clone(),
-                    error: line.error.clone(),
-                    ms: line.ms,
-                },
-            )),
+            None => {
+                slot.insert(at.clone(), out.len());
+                last.push(line);
+                out.push((
+                    at,
+                    NodeRun {
+                        state,
+                        rounds: 1,
+                        output: String::new(),
+                        error: line.error.clone(),
+                        ms: line.ms,
+                    },
+                ));
+            }
         }
+    }
+    for ((_, run), line) in out.iter_mut().zip(last) {
+        run.output = line.output.clone();
     }
     out
 }
