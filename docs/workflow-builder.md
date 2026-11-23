@@ -95,6 +95,8 @@ did not run in the round; a step inside a `parallel` branch comes back as the `p
 It says what each round gives; without it a round gives what its last step gave. A loop with a `collect`
 also becomes the workflow's result if nothing runs after it.
 
+In a `shell` step's `command`, each `{{…}}` is filled in as exactly its text, quoted for where it sits (bare, inside `"…"` or inside `'…'`), so a value with quotes, `$(…)` or backticks can never become shell syntax; a plain word goes in as it is.
+
 `tool` steps gain MCP tools by name (`mcp__server__tool`). `bind` works on every kind. A container
 sees everything bound before it plus, inside its body, `item`/`index` (for_each) or `error` (catch).
 A name bound inside a body is visible only there; the container's own `bind` is what escapes.

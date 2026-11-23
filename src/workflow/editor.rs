@@ -1827,10 +1827,18 @@ impl Editor {
                     label: format!("Input: {n}"),
                     source: Source::Name(format!("inputs.{n}")),
                 }),
-                Seen::Item(n) => out.push(Found {
-                    label: format!("The current item ({n})"),
-                    source: Source::Name(n),
-                }),
+                Seen::Item(n) => {
+                    // Each field of the item too, so a condition can test one of them.
+                    let fields = self.item_fields(at, &n);
+                    out.push(Found {
+                        label: format!("The current item ({n})"),
+                        source: Source::Name(n.clone()),
+                    });
+                    out.extend(fields.into_iter().map(|f| Found {
+                        label: format!("Field {} of the current item ({n})", f.name),
+                        source: Source::Name(format!("{n}.{}", f.name)),
+                    }));
+                }
                 Seen::Index => out.push(Found {
                     label: "Which round this is (from 0)".to_owned(),
                     source: Source::Name("index".to_owned()),
@@ -3013,6 +3021,40 @@ mod tests {
             .find(|f| f.label.starts_with("Field score of: "))
             .unwrap();
         assert!(e.resolve(&found.source).unwrap().ends_with(".score"));
+    }
+
+    #[test]
+    fn inside_a_loop_each_field_of_the_current_item_can_be_chosen_on_its_own() {
+        let w = Saved {
+            id: "w".into(),
+            agent_id: "a1".into(),
+            name: "Email to Crm".into(),
+            goal: String::new(),
+            definition: serde_json::from_value(serde_json::json!({"steps": [
+                {"id": "s", "kind": "tool", "tool": "mcp__gmail__search", "bind": "mail",
+                 "args": {"query": "is:unread"},
+                 "found": [{"name": "messages", "kind": "list",
+                            "of": [{"name": "subject", "kind": "text"}, {"name": "from", "kind": "text"}]}]},
+                {"id": "l", "kind": "for_each", "over": "mail.messages", "steps": [
+                    {"id": "i", "kind": "if", "cond": "true",
+                     "then": [{"id": "t", "kind": "tool", "tool": "shell", "args": {"command": "x"}}]}]}
+            ]}))
+            .unwrap(),
+            created_at: 0,
+            published: None,
+        };
+        let mut e = Editor::from_saved(&w);
+        let found = e.results(&at(&[(1, 0)], 0), Some("cond"));
+        let subject = found
+            .iter()
+            .find(|f| f.label == "Field subject of the current item (item)")
+            .unwrap_or_else(|| panic!("{:?}", found.iter().map(|f| &f.label).collect::<Vec<_>>()));
+        assert_eq!(e.resolve(&subject.source).unwrap(), "item.subject");
+        assert!(
+            found
+                .iter()
+                .any(|f| f.label == "Field from of the current item (item)")
+        );
     }
 
     #[test]

@@ -1341,11 +1341,15 @@ impl Run<'_, '_> {
         match step.kind.as_str() {
             TOOL => {
                 let name = step.tool.as_deref().unwrap_or_default();
-                let args = template::resolve(
-                    scope,
-                    &Value::Object(step.args.clone().unwrap_or_default()),
-                    &self.eval,
-                )?;
+                let given = step.args.clone().unwrap_or_default();
+                let mut args = template::resolve(scope, &Value::Object(given.clone()), &self.eval)?;
+                // A command is shell syntax: what fills it in is quoted, never run.
+                if name == crate::tools::SHELL
+                    && let Some(Value::String(command)) = given.get("command")
+                {
+                    args["command"] =
+                        Value::String(template::render_shell(scope, command, &self.eval)?);
+                }
                 let outside = from_input.or(self.steered);
                 let done = (env.tool)(name, &args, outside);
                 self.touched = done.outside;
@@ -1919,11 +1923,11 @@ mod tests {
             ]
         }));
         let (out, ran) = run_shell(&d, json!({"n": 5}));
-        assert_eq!(ran, ["echo big", "echo echo big"]);
+        assert_eq!(ran, ["echo big", "echo 'echo big'"]);
         assert_eq!(out.steps[0].output, "then");
         assert_eq!(out.steps[1].path, "0.then.0");
         let (_, ran) = run_shell(&d, json!({"n": 0}));
-        assert_eq!(ran, ["echo small", "echo echo small"]);
+        assert_eq!(ran, ["echo small", "echo 'echo small'"]);
         // No `else`: nothing runs, and what it bound is null.
         let d = def(json!({"steps": [
             {"id": "c", "kind": "if", "cond": "false", "then": [sh("never", "x")]},
@@ -2300,7 +2304,7 @@ mod tests {
         ]}));
         let (out, _) = flaky(&d, 1);
         assert_eq!(out.ending, Ending::Succeeded);
-        assert!(out.output.contains("ok failed: busy"), "{}", out.output);
+        assert!(out.output.contains("ok 'failed: busy'"), "{}", out.output);
         assert_eq!(out.steps[0].output, "failed after 1 attempts, handled");
         let paths: Vec<_> = out.steps.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, ["0", "0.body.0", "0.catch.0", "1"]);
@@ -2394,10 +2398,10 @@ mod tests {
         let got = held(&d);
         let why = |c: &str| got.iter().find(|(x, _)| x == c).unwrap().1.clone();
         assert_eq!(why("echo plain"), None);
-        for held in ["echo page text", "echo written"] {
+        for held in ["echo 'page text'", "echo written"] {
             assert_eq!(why(held).as_deref(), Some("a web page"), "{held}");
         }
-        assert_eq!(why("echo written!").as_deref(), Some("a web page"));
+        assert_eq!(why("echo 'written!'").as_deref(), Some("a web page"));
         assert_eq!(
             why("echo mine"),
             None,
@@ -2524,7 +2528,7 @@ mod tests {
         let (out, seen) = with_flows(&d, &[("shout", shout)]);
         assert_eq!(out.ending, Ending::Succeeded, "{:?}", out.ending);
         let said: Vec<_> = seen.iter().map(|(c, _)| c.as_str()).collect();
-        assert_eq!(said, ["echo mine hello", "echo mine hello! mine"]);
+        assert_eq!(said, ["echo 'mine hello'", "echo 'mine hello!' mine"]);
         let paths: Vec<_> = out.steps.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, ["0", "0.flow.0", "0.flow.1", "1"]);
         assert_eq!(out.steps[0].output, "ran Shout");
@@ -2611,10 +2615,10 @@ mod tests {
                 ("echo fine", false),
                 ("echo own", false),
                 ("web_fetch", false),
-                ("echo page text", true),
+                ("echo 'page text'", true),
                 ("echo own", false),
                 ("echo after", false),
-                ("echo page text", true),
+                ("echo 'page text'", true),
             ]
         );
     }
@@ -2818,7 +2822,7 @@ mod tests {
                 "echo post-y",
                 "echo tick-0",
                 "echo tick-1",
-                "echo end page text",
+                "echo end 'page text'",
             ]
         );
         // Every step has one line in the log however many times its run was stopped and started.
@@ -2861,7 +2865,7 @@ mod tests {
         assert_eq!(done.ending, Ending::Succeeded, "{:?}", done.ending);
         assert_eq!(
             bench.said(),
-            ["echo no: You declined this step.", "echo after"]
+            ["echo no: 'You declined this step.'", "echo after"]
         );
         // A wait inside the catch pauses too, and goes on inside it.
         let both = def(json!({"steps": [
@@ -2924,7 +2928,7 @@ mod tests {
         let seen = bench.seen.borrow();
         assert_eq!(
             seen[1],
-            ("echo page text".to_owned(), Some("a web page".to_owned()))
+            ("echo 'page text'".to_owned(), Some("a web page".to_owned()))
         );
         assert_eq!(seen[2], ("echo fine".to_owned(), None));
         drop(seen);
@@ -2998,7 +3002,7 @@ mod tests {
             "one after another it would take {:?} or more",
             Duration::from_millis(120 * 5)
         );
-        assert_eq!(said.last().unwrap(), "echo echo a2+echo b1+echo c1");
+        assert_eq!(said.last().unwrap(), "echo 'echo a2'+'echo b1'+'echo c1'");
         // The log: the step, then each branch's steps in the order the branches are written.
         let paths: Vec<_> = out.steps.iter().map(|s| s.path.as_str()).collect();
         assert_eq!(paths, ["0", "0.a.0", "0.a.1", "0.b.0", "0.c.0", "1"]);
@@ -3090,7 +3094,7 @@ mod tests {
                 .find(|(said, _)| said == c)
                 .and_then(|(_, h)| h.clone())
         };
-        assert_eq!(held("echo page text").as_deref(), Some("a web page"));
+        assert_eq!(held("echo 'page text'").as_deref(), Some("a web page"));
         assert_eq!(held("echo fine"), None);
     }
 
@@ -3227,7 +3231,7 @@ mod tests {
         // Nothing is remembered, so the first two run, and each leaves a memo.
         let first = execute_through(&d, &none, 1, &[], &env);
         assert_eq!(first.ending, Ending::Succeeded);
-        assert_eq!(*calls.borrow(), ["ls", "cat <ls>"]);
+        assert_eq!(*calls.borrow(), ["ls", "cat '<ls>'"]);
         assert_eq!(first.memos.len(), 2);
         assert_eq!(first.steps.len(), 2);
         assert_eq!(
@@ -3240,7 +3244,7 @@ mod tests {
         let second = execute_through(&d, &none, 2, &first.memos, &env);
         assert_eq!(second.ending, Ending::Succeeded);
         assert_eq!(calls.borrow().len(), 3, "only the new step ran");
-        assert_eq!(calls.borrow()[2], "echo <cat <ls>>");
+        assert_eq!(calls.borrow()[2], "echo '<cat '\\''<ls>'\\''>'");
         assert_eq!(
             second.steps.len(),
             3,
@@ -3251,7 +3255,7 @@ mod tests {
         // A step asked for again runs again; the ones before it are still not run.
         let again = execute_through(&d, &none, 1, &second.memos, &env);
         assert_eq!(calls.borrow().len(), 4);
-        assert_eq!(calls.borrow()[3], "cat <ls>");
+        assert_eq!(calls.borrow()[3], "cat '<ls>'");
         assert_eq!(again.memos.len(), 2);
 
         // A step that waits for an answer cannot be tried alone, and says why.
