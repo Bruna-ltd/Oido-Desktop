@@ -2,7 +2,7 @@
 //! totals, a bar a day, and breakdowns by model, agent and source; pressing a line narrows the whole
 //! screen to it. A model with no price can be given one here.
 
-use rune::{El, ScrollSpec, TextStyle, col, el, row, text};
+use rune::{El, ScrollSpec, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, TextInput};
 
 use super::providers::section;
@@ -54,11 +54,7 @@ fn heading(k: &Kit) -> El {
         .gap(10.0)
         .child(
             text("Usage")
-                .font(TextStyle {
-                    size: 28.0,
-                    line_height: 34.0,
-                    ..k.ty.body_medium
-                })
+                .font(crate::theme::ty::title(k))
                 .color(k.c.text_base),
         )
         .child(
@@ -164,7 +160,7 @@ fn empty(s: &App, k: &Kit) -> El {
     };
     col().key("usage-empty").w_full().py(48.0).center().child(
         text(why)
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(k.c.text_muted)
             .wrap()
             .max_w(420.0),
@@ -225,11 +221,7 @@ fn tiles(r: &Report, k: &Kit) -> El {
             )
             .child(
                 text(value.clone())
-                    .font(TextStyle {
-                        size: 22.0,
-                        line_height: 28.0,
-                        ..k.ty.body_medium
-                    })
+                    .font(crate::theme::ty::figure(k))
                     .color(k.c.text_base)
                     .truncate(),
             )
@@ -585,7 +577,7 @@ fn price_form(s: &App, k: &Kit) -> El {
         .gap(10.0)
         .child(
             text("US dollars per million tokens. Leave a cache price blank to charge cached input as input.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .wrap(),
         )
@@ -594,7 +586,7 @@ fn price_form(s: &App, k: &Kit) -> El {
         form = form.child(
             text(why.clone())
                 .key("usage-price-error")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.warning.icon)
                 .wrap(),
         );

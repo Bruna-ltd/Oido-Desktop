@@ -121,7 +121,7 @@ A list of extensions: logo, name, one line, switch. Opening one shows:
 
 **P1: spine and Gmail read.** `Transport::Extension`, the trait, `State` and store, the Google
 account (paste client, sign-in, refresh, sign-out), the Extensions screen, Gmail tools
-`search`, `read_message`, `read_thread`, `list_labels`. Proof: unit tests on the trait, schemas,
+`search`, `read_message`, `read_attachment`, `read_thread`, `list_labels`. Proof: unit tests on the trait, schemas,
 scope union, and trimming with a fake `Http`; a sealed-secrets round trip; one live run against a
 real mailbox.
 

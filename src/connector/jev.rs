@@ -22,9 +22,9 @@ pub const NAME: &str = "browser_jev";
 
 const DEFAULT_STEPS: usize = 15;
 const MAX_STEPS: usize = 30;
-/// WAITs in a row before the page counts as stuck: about 9 s with [`WAIT_POLL`]. Live, Google
-/// Flights' results took longer than core's 3 × 0.75 s, and the drive gave up on a search that ran.
-const MAX_WAITS: usize = 6;
+/// How long WAITs in a row may go on before the page counts as stuck. Live, Google Flights'
+/// results took longer than core's 3 × 0.75 s, and the drive gave up on a search that ran.
+const LOADING_CAP: Duration = Duration::from_secs(9);
 /// Stale-target clicks retried from a fresh look, per call.
 const MAX_REREADS: usize = 2;
 /// Calls in a row that did nothing before the model is told to answer.
@@ -32,9 +32,9 @@ const NOOP_WARN: u32 = 2;
 const DEADLINE: Duration = Duration::from_secs(180);
 /// Each question to TypeSafe. Core asks from a server with 4 s; a home connection gets more room.
 const ASK_TIMEOUT: Duration = Duration::from_secs(8);
-/// How long a WAIT pauses before looking again. Each look asks TypeSafe once more, so fewer,
-/// longer pauses.
-const WAIT_POLL: Duration = Duration::from_millis(1500);
+/// How long a WAIT pauses before looking again. Short, so a page that finishes loading is acted on
+/// soon after; the look and the question after it add their own time.
+const WAIT_POLL: Duration = Duration::from_millis(400);
 
 /// Act on a pick only this sure; below, hand back.
 const FLOOR: f64 = 0.55;
@@ -90,6 +90,8 @@ const CARRY_ON: [&str; 8] = [
 ];
 const CARRY_ON_HINT: &str = "To carry on, call browser_jev again WITHOUT url: Jev continues from this page. A url reloads it and loses what was done.\n";
 
+/// The question that picks the operation.
+const NEXT: &str = "next";
 const DONE: &str = "DONE";
 const BLOCKED: &str = "BLOCKED";
 const WAIT: &str = "WAIT";
@@ -101,7 +103,7 @@ pub const PREFERENCE: &str = "browser_jev IS AVAILABLE: hand it whole tasks — 
 const DESCRIPTION: &str = r#"Hand a browsing goal to Jev, a fast action model that drives your browser tabs by itself, the way a person would: it clicks buttons, tabs, menus and toggles, types the values you give it in "fields" into the right boxes, picks answers in radio groups, checkboxes and dropdowns, answers page dialogs, opens same-site links, scrolls, goes back and presses Enter, one action at a time, until the goal shows on the page — the final step too (posting, sending, submitting, booking, paying). One call replaces many browser calls.
 
 How to call it:
-1. Decide every piece of text the task needs from the person's request and put each in "fields" as name → exact value: {"from": "Barcelona", "to": "Larnaca", "departure date": "Thu, 5 Nov"}. Jev decides which box each goes in and types nothing else. Write each value the way a person types it into a search box: a plain city or code ("Larnaca", "LCA"), not "Larnaca International Airport (LCA)". If the page says nothing matches, try the shorter form. Never put passwords or card numbers in fields.
+1. Decide every piece of text the task needs from the person's request and put each in "fields" as name → exact value: {"from": "Barcelona", "to": "Larnaca", "departure date": "Thu, 5 Nov"}. Jev decides which box each goes in and types nothing else. Fields are for typing only: answers to pick in a dropdown, radio group, scale or checkbox list go in the goal ("Rate our app: 5"), not in fields. Write each value the way a person types it into a search box: a plain city or code ("Larnaca", "LCA"), not "Larnaca International Airport (LCA)". If the page says nothing matches, try the shorter form. Never put passwords or card numbers in fields.
 2. Pass "url" on the FIRST call only, to start on the right site. Where the site has a search address that carries the whole query, start there and skip the form: Google Flights takes https://www.google.com/travel/flights?q=Flights%20from%20Barcelona%20to%20Larnaca%20on%202026-12-22%20through%202027-01-04, and many sites take ?q= or a /search path. To carry on after Jev stops, call again WITHOUT url: Jev continues from the page as it is, while a url reloads it and loses what earlier calls did. Jev stays on the site it starts on, and so do you: if it keeps stopping there, report where and what is left; never switch to a website the person did not name.
 3. Write the goal as the end state, not the clicks: "the results list return flights Barcelona → Larnaca for 5–12 Nov, sorted by price", "the Notifications settings page is open with Email alerts expanded". Name every answer to pick. When the task ends in a post, send, submit or purchase, say so ("…and the post is published"): Jev commits only when the goal asks for it. Bad: "click Settings, then Notifications" (a script), "fill the form with my answers" (name them), "click c10" (Jev sees no refs).
 4. Leave max_steps at 15 unless the flow is clearly long (at most 30). To go further, call again with the same goal and fields: it carries on from the page as it is.
@@ -640,45 +642,20 @@ fn ask_choices(
 /// Each box's answer to "which value belongs here", for one call, by question.
 type BoxMemo = HashMap<String, Answer>;
 
-/// Drops type actions that put a value in the wrong box. One "what next" question is too blunt for
-/// it: live, Jev typed the origin into the destination box at 0.69, the dialog's name in sight. So
-/// each box gets its own narrow question first (which value belongs here, or none), all in one
-/// request, and a type action survives unless that answer is confidently something else. If
-/// TypeSafe fails, nothing is dropped. Answers are kept in `memo` for the rest of the call.
-fn match_fields(
-    ask: &mut impl FnMut(&Value) -> Result<String, String>,
-    goal: &str,
-    page: &Page,
-    actions: Vec<Action>,
-    call: &Call,
-    memo: &mut BoxMemo,
-) -> Vec<Action> {
-    let keys = call.value_keys();
-    let mut criteria = Map::new();
-    criteria.insert(
-        "none".into(),
-        json!("None of these values belongs in this box"),
-    );
-    let mut key_of: HashMap<&str, String> = HashMap::new();
-    for (i, k) in keys.iter().enumerate() {
-        let id = format!("f{i}");
-        criteria.insert(id.clone(), json!(format!("the {k}: {:?}", call.fields[*k])));
-        key_of.insert(*k, id);
-    }
+/// The question for each box a type action fills, by id (`box_c3`). One "what next" question is
+/// too blunt to pair values with boxes: live, Jev typed the origin into the destination box at
+/// 0.69, the dialog's name in sight. So each box gets its own narrow question (which value belongs
+/// here, or none), asked in the same request as the next move, and worded the same each time so
+/// its answer is remembered for the rest of the call.
+fn box_questions(page: &Page, actions: &[Action]) -> BTreeMap<String, String> {
     let within = if page.modal.is_empty() {
         String::new()
     } else {
         format!(" in the {:?} dialog", page.modal)
     };
-    let mut questions = Map::new();
-    let mut asking: HashMap<String, String> = HashMap::new(); // question id → its words, the memo key
-    let mut answers: HashMap<String, Answer> = HashMap::new();
-    for a in &actions {
+    let mut out = BTreeMap::new();
+    for a in actions.iter().filter(|a| a.field.is_some()) {
         let r = a.reference();
-        let id = format!("box_{r}");
-        if a.field.is_none() || asking.contains_key(&id) {
-            continue;
-        }
         let Some(c) = r
             .strip_prefix('c')
             .and_then(|n| n.parse::<usize>().ok())
@@ -687,47 +664,52 @@ fn match_fields(
         else {
             continue;
         };
-        let words = format!(
-            "Which of these values should be typed into the text box {}{within} on this page? Judge by what the box is for — its label and the dialog or form it sits in — not by what it holds now.",
-            control_name(c)
+        out.entry(format!("box_{r}")).or_insert_with(|| {
+            format!(
+                "Which of these values should be typed into the text box {}{within} on this page? Judge by what the box is for — its label and the dialog or form it sits in — not by what it holds now.",
+                control_name(c)
+            )
+        });
+    }
+    out
+}
+
+/// The answers a box question chooses from: one per caller value (`f0`…), or none.
+fn box_criteria(call: &Call) -> Value {
+    let mut criteria = Map::new();
+    criteria.insert(
+        "none".into(),
+        json!("None of these values belongs in this box"),
+    );
+    for (i, k) in call.value_keys().iter().enumerate() {
+        criteria.insert(
+            format!("f{i}"),
+            json!(format!("the {k}: {:?}", call.fields[*k])),
         );
-        asking.insert(id.clone(), words.clone());
-        if let Some(known) = memo.get(&words) {
-            answers.insert(id, known.clone());
-            continue;
-        }
-        questions.insert(
-            id,
-            json!({"type": "choice", "instructions": words, "criteria": criteria}),
-        );
     }
-    if !questions.is_empty() {
-        let asked: Vec<String> = questions.keys().cloned().collect();
-        match ask_choices(ask, page_state(page, goal), questions) {
-            Ok(fresh) => {
-                for id in asked {
-                    if let Some(a) = fresh.get(&id) {
-                        memo.insert(asking[&id].clone(), a.clone());
-                        answers.insert(id, a.clone());
-                    }
-                }
-            }
-            Err(why) => eprintln!("oido: jev field match failed, keeping every box: {why}"),
-        }
-    }
-    if answers.is_empty() {
-        return actions;
-    }
-    actions
-        .into_iter()
-        .filter(|a| {
-            let Some(field) = &a.field else { return true };
-            let Some(m) = answers.get(&format!("box_{}", a.reference())) else {
-                return true;
-            };
-            let wrong = key_of.get(field.as_str()) != Some(&m.choice) && m.confidence >= MATCH_VETO;
-            !wrong
-        })
+    Value::Object(criteria)
+}
+
+/// Whether `a` types a value into a box that, by its own question's answer (by box id), is
+/// confidently for another value or for none.
+fn wrong_box(a: &Action, call: &Call, answers: &HashMap<String, Answer>) -> bool {
+    let Some(field) = &a.field else { return false };
+    let Some(m) = answers.get(&format!("box_{}", a.reference())) else {
+        return false;
+    };
+    let id = call
+        .value_keys()
+        .iter()
+        .position(|k| k == field)
+        .map(|i| format!("f{i}"));
+    id.as_ref() != Some(&m.choice) && m.confidence >= MATCH_VETO
+}
+
+/// The remembered answers for `questions` (id → words), by id.
+fn known(questions: &BTreeMap<String, String>, memo: &BoxMemo) -> HashMap<String, Answer> {
+    questions
+        .iter()
+        .filter_map(|(id, words)| Some((id.clone(), memo.get(words)?.clone())))
         .collect()
 }
 
@@ -743,6 +725,7 @@ enum Pick {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Decision {
     pick: Pick,
+    /// The operation's confidence, or for a grouped operation the lower of it and its target's.
     confidence: f64,
 }
 
@@ -763,62 +746,151 @@ impl Decision {
     }
 }
 
-/// Asks Jev for the next move. An answer outside the offered choices is an error, never a guess.
+/// An operation with targets of its own: its question id, its words among the operations, and
+/// what its target question adds to the instructions.
+struct Op {
+    id: &'static str,
+    words: &'static str,
+    target: &'static str,
+}
+
+const CLICK: Op = Op {
+    id: "click",
+    words: "Click a button, tab, menu item, toggle, suggestion or calendar day, or open a same-site link",
+    target: "Suppose the next action is a click: choose what to click or open. Another question decides whether a click is next; this one only picks among the clicks. Do not pick a toggle already in the state the goal asks for.",
+};
+const TYPE: Op = Op {
+    id: "type",
+    words: "Type one of the given values into a text box",
+    target: "Suppose the next action is typing: choose which value goes into which box. Another question decides whether typing is next; this one only picks among the boxes. Do not pick a box that already holds that value.",
+};
+const CHOOSE: Op = Op {
+    id: "choose",
+    words: "Pick or tick an answer in a dropdown, radio group or checkbox list",
+    target: "Suppose the next action is picking an answer: choose which one. Another question decides whether that is next; this one only picks among the answers. Do not pick an answer already in the state the goal asks for.",
+};
+
+/// The operation an action is a target of: clicks and same-site links, typing, and picking
+/// answers. Scrolls, Back, keys and dialog answers are operations of their own.
+fn operation(a: &Action) -> Option<&'static Op> {
+    match a.kind() {
+        "click" | "navigate" => Some(&CLICK),
+        "type" => Some(&TYPE),
+        "choose" | "check" => Some(&CHOOSE),
+        _ => None,
+    }
+}
+
+/// Asks Jev for the next move in one request: which operation (each grouped one, or a standalone
+/// action, or DONE, BLOCKED or WAIT), and for each grouped operation which of its actions, asked
+/// as if that operation were next. Only the chosen operation's target is used, so two decisions
+/// cost one round trip, and each target is judged only against actions of its kind. `boxes`
+/// (id → question) are asked alongside; every answer comes back by id. An answer outside the
+/// offered choices is an error, never a guess.
 fn decide(
     ask: &mut impl FnMut(&Value) -> Result<String, String>,
     goal: &str,
     page: &Page,
     actions: &[Action],
     history: &[String],
-) -> Result<Decision, String> {
-    let mut criteria = Map::new();
+    boxes: Map<String, Value>,
+) -> Result<(Decision, HashMap<String, Answer>), String> {
+    let mut operations = Map::new();
+    let mut targets: BTreeMap<&str, (&Op, Map<String, Value>)> = BTreeMap::new();
     for (i, a) in actions.iter().enumerate() {
         let desc = match a.hold {
             Some(_) => format!("{} — commits for real", a.desc),
             None => a.desc.clone(),
         };
-        criteria.insert(format!("a{i}"), json!(desc));
+        match operation(a) {
+            Some(op) => {
+                operations.entry(op.id).or_insert_with(|| json!(op.words));
+                targets
+                    .entry(op.id)
+                    .or_insert_with(|| (op, Map::new()))
+                    .1
+                    .insert(format!("a{i}"), json!(desc));
+            }
+            None => {
+                operations.insert(format!("a{i}"), json!(desc));
+            }
+        }
     }
-    criteria.insert(
+    operations.insert(
         DONE.into(),
         json!("The goal is achieved and visible on this page; stop for independent verification"),
     );
-    criteria.insert(
+    operations.insert(
         BLOCKED.into(),
         json!("No listed action can make progress safely; hand control back"),
     );
-    criteria.insert(
+    operations.insert(
         WAIT.into(),
         json!("The page is visibly still loading; look again without acting"),
     );
     let mut state = page_state(page, goal);
     let recent = &history[history.len().saturating_sub(HISTORY_CAP)..];
     state.insert("history".into(), json!(recent));
-    let mut questions = Map::new();
+    let mut questions = boxes;
     questions.insert(
-        "next".into(),
-        json!({"type": "choice", "instructions": INSTRUCTIONS, "criteria": criteria}),
+        NEXT.into(),
+        json!({"type": "choice", "instructions": INSTRUCTIONS, "criteria": operations}),
     );
-    let answers = ask_choices(ask, state, questions)?;
-    let a = answers.get("next").ok_or("TypeSafe returned no choice.")?;
-    if a.confidence.is_nan() || !(0.0..=1.0).contains(&a.confidence) {
-        return Err(format!("TypeSafe returned confidence {}.", a.confidence));
+    for (id, (op, criteria)) in &targets {
+        let instructions = format!("{INSTRUCTIONS}\n\n{}", op.target);
+        questions.insert(
+            (*id).to_owned(),
+            json!({"type": "choice", "instructions": instructions, "criteria": criteria}),
+        );
     }
-    let pick = match a.choice.as_str() {
-        DONE => Pick::Done,
-        BLOCKED => Pick::Blocked,
-        WAIT => Pick::Wait,
-        other => other
+    let answers = ask_choices(ask, state, questions)?;
+    let sure = |a: &Answer| -> Result<f64, String> {
+        if a.confidence.is_nan() || !(0.0..=1.0).contains(&a.confidence) {
+            return Err(format!("TypeSafe returned confidence {}.", a.confidence));
+        }
+        Ok(a.confidence)
+    };
+    let next = answers.get(NEXT).ok_or("TypeSafe returned no choice.")?;
+    let mut confidence = sure(next)?;
+    let offered = |choice: &str| {
+        choice
             .strip_prefix('a')
             .and_then(|n| n.parse::<usize>().ok())
             .filter(|i| *i < actions.len())
-            .map(Pick::Act)
-            .ok_or_else(|| format!("TypeSafe picked {other:?}, which was not offered."))?,
+            .ok_or_else(|| format!("TypeSafe picked {choice:?}, which was not offered."))
     };
-    Ok(Decision {
-        pick,
-        confidence: a.confidence,
-    })
+    let pick = match next.choice.as_str() {
+        DONE => Pick::Done,
+        BLOCKED => Pick::Blocked,
+        WAIT => Pick::Wait,
+        op if targets.contains_key(op) => {
+            let t = answers
+                .get(op)
+                .ok_or_else(|| format!("TypeSafe chose {op} but no target for it."))?;
+            confidence = confidence.min(sure(t)?);
+            if !targets[op].1.contains_key(&t.choice) {
+                return Err(format!(
+                    "TypeSafe picked {:?} to {op}, which was not offered.",
+                    t.choice
+                ));
+            }
+            Pick::Act(offered(&t.choice)?)
+        }
+        other => {
+            let i = offered(other)?;
+            if operation(&actions[i]).is_some() {
+                return Err(format!("TypeSafe picked {other:?}, which was not offered."));
+            }
+            Pick::Act(i)
+        }
+    };
+    Ok((Decision { pick, confidence }, answers))
+}
+
+/// The action `next` swaps back to, when doing it would make the last four tries A, B, A, B.
+fn back_and_forth<'t>(tried: &'t [String], next: &str) -> Option<&'t str> {
+    let [.., a, b, c] = tried else { return None };
+    (a == c && b == next && a != b).then_some(a.as_str())
 }
 
 /// How a drive ended, for the model, and whether it did nothing but confirm what was on screen.
@@ -835,6 +907,8 @@ struct Drive<'a> {
     deadline: Instant,
     /// What ran, as Jev saw it.
     done: Vec<String>,
+    /// What was tried, each as offered (without `done`'s notes), for telling a back-and-forth.
+    tried: Vec<String>,
     /// The newest page, or `None` once an action may have changed it.
     page: Option<Page>,
     /// The newest page as the model reads it.
@@ -863,6 +937,7 @@ impl<'a> Drive<'a> {
             cancel,
             deadline: Instant::now() + DEADLINE,
             done: Vec::new(),
+            tried: Vec::new(),
             page: None,
             shown: String::new(),
             typed: None,
@@ -888,7 +963,9 @@ impl<'a> Drive<'a> {
             }
         }
         let mut approved = self.call.approved.clone();
-        let (mut steps, mut waits, mut rereads) = (0, 0, 0);
+        let (mut steps, mut rereads) = (0, 0);
+        // When the WAITs in a row began.
+        let mut waiting: Option<Instant> = None;
         while steps < self.call.steps {
             if self.cancel.load(Ordering::Relaxed) {
                 return self.end("stopped", "the person pressed Stop");
@@ -926,15 +1003,20 @@ impl<'a> Drive<'a> {
                 }
                 continue;
             }
-            if !self.call.value_keys().is_empty() {
-                offered = match_fields(
-                    ask,
-                    &self.call.goal,
-                    &page,
-                    offered,
-                    self.call,
-                    &mut self.boxes,
-                );
+            // Boxes already answered this call drop their wrong values now; the rest are asked
+            // with the next move.
+            let boxes = box_questions(&page, &offered);
+            let answered = known(&boxes, &self.boxes);
+            offered.retain(|a| !wrong_box(a, self.call, &answered));
+            let mut asking = Map::new();
+            if !boxes.is_empty() {
+                let criteria = box_criteria(self.call);
+                for (id, words) in boxes.iter().filter(|(id, _)| !answered.contains_key(*id)) {
+                    asking.insert(
+                        id.clone(),
+                        json!({"type": "choice", "instructions": words, "criteria": criteria}),
+                    );
+                }
             }
             self.empty_boxes = page
                 .controls
@@ -950,10 +1032,37 @@ impl<'a> Drive<'a> {
                 .map(|c| c.label.clone())
                 .collect();
             let started = Instant::now();
-            let decision = match decide(ask, &self.call.goal, &page, &offered, &self.done) {
-                Ok(d) => d,
-                Err(why) => return self.end("decision_error", &why),
-            };
+            let mut decision =
+                match decide(ask, &self.call.goal, &page, &offered, &self.done, asking) {
+                    Ok((d, answers)) => {
+                        for (id, words) in &boxes {
+                            if let Some(a) = answers.get(id) {
+                                self.boxes.insert(words.clone(), a.clone());
+                            }
+                        }
+                        d
+                    }
+                    Err(why) => return self.end("decision_error", &why),
+                };
+            // A value picked for a box its own question, asked alongside, says is for another:
+            // drop the wrong pairings and ask once more, the boxes now known.
+            let answered = known(&boxes, &self.boxes);
+            if let Pick::Act(i) = decision.pick
+                && wrong_box(&offered[i], self.call, &answered)
+            {
+                offered.retain(|a| !wrong_box(a, self.call, &answered));
+                decision = match decide(
+                    ask,
+                    &self.call.goal,
+                    &page,
+                    &offered,
+                    &self.done,
+                    Map::new(),
+                ) {
+                    Ok((d, _)) => d,
+                    Err(why) => return self.end("decision_error", &why),
+                };
+            }
             if self.cancel.load(Ordering::Relaxed) {
                 return self.end("stopped", "the person pressed Stop");
             }
@@ -1010,8 +1119,8 @@ impl<'a> Drive<'a> {
                     );
                 }
                 Pick::Wait => {
-                    waits += 1;
-                    if waits > MAX_WAITS {
+                    let since = *waiting.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= LOADING_CAP {
                         return self.end("loading_timeout", "the page kept loading");
                     }
                     std::thread::sleep(WAIT_POLL);
@@ -1020,11 +1129,20 @@ impl<'a> Drive<'a> {
                 }
                 Pick::Act(i) => i,
             };
-            waits = 0;
+            waiting = None;
             if self.done.last() == Some(&format!("{desc} (nothing changed)")) {
                 return self.end("no_progress", &format!("{desc} changed nothing, twice"));
             }
             let chosen = offered.swap_remove(i);
+            if let Some(other) = back_and_forth(&self.tried, &desc) {
+                // Live on a Google Forms grid row (radios), Jev swapped between two answers
+                // fifteen times, chasing a goal that wanted both.
+                let mut why = format!("Jev keeps going back and forth between {desc} and {other}");
+                if chosen.kind() == "choose" {
+                    why.push_str(". That control holds one answer: choosing another replaces the one before, so both cannot show at once. Pick one, or check whether the goal really needs two");
+                }
+                return self.end("no_progress", &why);
+            }
             if let Some(why) = &chosen.hold
                 && self.commits == Commits::Ask
             {
@@ -1070,6 +1188,7 @@ impl<'a> Drive<'a> {
 
     /// Runs one browser call. The page is looked at again before the next pick.
     fn act(&mut self, browser: &mut impl Browse, args: Value, desc: String) -> Result<(), String> {
+        self.tried.push(desc.clone());
         let Value::Object(mut args) = args else {
             return Err("not a browser call".to_owned());
         };
@@ -1350,10 +1469,28 @@ mod tests {
         assert_eq!(strip_query("https://x.com/a?token=1#f"), "https://x.com/a");
     }
 
-    /// A pick as TypeSafe sends it.
+    /// Jev picking `choice` (`a3`, DONE…) at `p`; [`Script`] answers it as TypeSafe would, with
+    /// the operation that holds it and, for a grouped one, the target.
     fn pick(choice: &str, p: f64) -> String {
-        json!({"answers": {"next": {"type": "choice", "choice": choice, "confidence": p}}})
-            .to_string()
+        json!({"pick": choice, "p": p}).to_string()
+    }
+
+    /// TypeSafe's reply to `request` for a [`pick`]. Box questions get an answer too unsure to
+    /// drop anything.
+    fn answer_pick(request: &Value, choice: &str, p: f64) -> String {
+        let answer = |c: &str, p: f64| json!({"type": "choice", "choice": c, "confidence": p});
+        let questions = request["questions"].as_object().unwrap();
+        let mut answers = Map::new();
+        for (id, q) in questions {
+            if id.starts_with("box_") {
+                answers.insert(id.clone(), answer("none", 0.0));
+            } else if id != NEXT && q["criteria"].get(choice).is_some() {
+                answers.insert(NEXT.into(), answer(id, p));
+                answers.insert(id.clone(), answer(choice, p));
+            }
+        }
+        answers.entry(NEXT).or_insert_with(|| answer(choice, p));
+        json!({"answers": answers}).to_string()
     }
 
     /// TypeSafe answering from a script, keeping what it was asked.
@@ -1372,9 +1509,15 @@ mod tests {
 
         fn ask(&mut self, request: &Value) -> Result<String, String> {
             self.asked.push(request.clone());
-            self.replies
+            let reply = self
+                .replies
                 .pop_front()
-                .unwrap_or_else(|| Err("no more replies".into()))
+                .unwrap_or_else(|| Err("no more replies".into()))?;
+            let v: Value = serde_json::from_str(&reply).unwrap_or_default();
+            match (v["pick"].as_str(), v["p"].as_f64()) {
+                (Some(choice), Some(p)) => Ok(answer_pick(request, choice, p)),
+                _ => Ok(reply),
+            }
         }
     }
 
@@ -1463,9 +1606,7 @@ mod tests {
     fn a_step_that_commits_waits_for_the_person_and_runs_once_approved() {
         let buy = 2; // a2: Click "Buy now"
         let mut b = Fake::new(vec![settings_page()]);
-        // The first answer is the per-box field check, which keeps every box.
-        let no_boxes = Ok(json!({"answers": {}}).to_string());
-        let mut s = Script::new(vec![no_boxes, Ok(pick(&format!("a{buy}"), 0.95))]);
+        let mut s = Script::new(vec![Ok(pick(&format!("a{buy}"), 0.95))]);
         let c = call(json!({"goal": "bought", "fields": {"note": "hi"}}));
         let out = drive(&c, Commits::Ask, &mut b, &mut s);
         assert!(
@@ -1631,6 +1772,43 @@ mod tests {
     }
 
     #[test]
+    fn going_back_and_forth_between_two_actions_stops_the_drive() {
+        let row = page(json!({"url": "https://a.b/", "controls": [
+            {"kind": "radio-group", "selector": "#r", "label": "Row 1",
+             "options": [{"label": "A", "on": true}, {"label": "B"}, {"label": "C"}]}
+        ]}));
+        let flip = |on: &str| {
+            let mut p = row.clone();
+            for o in &mut p.controls[0].options {
+                o.on = o.label == on;
+            }
+            p
+        };
+        // Chosen answers are not offered again: with A on, a0 is B; with B on, a0 is A.
+        let mut b = Fake::new(vec![flip("A"), flip("B"), flip("A"), flip("B")]);
+        let mut s = Script::new(vec![Ok(pick("a0", 0.9)); 4]);
+        let out = drive(
+            &call(json!({"goal": "A and B"})),
+            Commits::Free,
+            &mut b,
+            &mut s,
+        );
+        assert!(
+            out.text.starts_with("[browser_jev] no_progress"),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("holds one answer"), "{}", out.text);
+        assert_eq!(b.acted.len(), 3, "A→B, B→A, A→B, then it stops");
+
+        // The same step again and again (Next, Next…) is not a back-and-forth.
+        let tried = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(back_and_forth(&tried(&["N", "N", "N"]), "N"), None);
+        assert_eq!(back_and_forth(&tried(&["A", "B", "A"]), "B"), Some("A"));
+        assert_eq!(back_and_forth(&tried(&["A", "B"]), "A"), None);
+    }
+
+    #[test]
     fn a_stale_target_is_retried_from_a_fresh_look() {
         let mut b = Fake::new(vec![settings_page(), settings_page(), settings_page()]);
         let mut tries = 0;
@@ -1681,16 +1859,11 @@ mod tests {
             (Some("type"), Some("c2")) => Err(COVERED_BY_PICKER.into()),
             _ => Ok("done".into()),
         });
-        let none = || Ok(json!({"answers": {}}).to_string());
         // Boxes × values, sorted: a0 departure→c1, a1 to→c1, a2 departure→c2, a3 to→c2.
         let mut s = Script::new(vec![
-            none(),
             Ok(pick("a1", 0.9)),
-            none(),
             Ok(pick("a2", 0.9)),
-            none(),
             Ok(pick("a0", 0.9)), // Choose "Larnaca (LCA)"
-            none(),
             Ok(pick(DONE, 0.9)),
         ]);
         let c = call(json!({"goal": "g", "fields": {"to": "Larnaca", "departure": "22 Dec"}}));
@@ -1707,7 +1880,7 @@ mod tests {
             out.text
         );
         assert_eq!(b.acted.last().unwrap()["option"], "Larnaca (LCA)");
-        let history = s.asked[5]["state"]["history"].to_string();
+        let history = s.asked[2]["state"]["history"].to_string();
         assert!(history.contains("covered by"), "Jev is told why: {history}");
     }
 
@@ -1739,7 +1912,76 @@ mod tests {
     }
 
     #[test]
-    fn field_matching_drops_a_value_from_the_wrong_box_and_asks_each_box_once() {
+    fn one_request_asks_the_operation_its_targets_and_each_new_box() {
+        let mut b = Fake::new(vec![
+            settings_page(),
+            with_title(settings_page(), "Settings"),
+        ]);
+        let mut s = Script::new(vec![Ok(pick("a0", 0.9)), Ok(pick(DONE, 0.9))]);
+        let c = call(json!({"goal": "settings open", "fields": {"q": "reports"}}));
+        drive(&c, Commits::Free, &mut b, &mut s);
+        let q = &s.asked[0]["questions"];
+        let ops = q[NEXT]["criteria"].as_object().unwrap();
+        for id in ["click", "type", "a6", DONE, BLOCKED, WAIT] {
+            assert!(ops.contains_key(id), "operation {id}: {ops:?}");
+        }
+        assert!(
+            !ops.contains_key("a0"),
+            "a click is a target, not an operation"
+        );
+        assert_eq!(q["click"]["criteria"]["a0"], "Click \"Settings\"");
+        assert!(
+            q["click"]["criteria"].get("a4").is_none(),
+            "typing is not a click"
+        );
+        assert_eq!(q["click"]["criteria"]["a5"], "Open link \"Billing\"");
+        assert!(
+            q["type"]["criteria"]["a4"]
+                .as_str()
+                .unwrap()
+                .starts_with("Type the q")
+        );
+        assert!(
+            q["box_c1"].is_object(),
+            "the search box is asked about alongside"
+        );
+        assert!(
+            s.asked[1]["questions"].get("box_c1").is_none(),
+            "a box is asked about once per call"
+        );
+
+        // A grouped pick is as sure as the less sure of its operation and its target.
+        let mut b = Fake::new(vec![settings_page()]);
+        let reply = json!({"answers": {
+            NEXT: {"type": "choice", "choice": "click", "confidence": 0.9},
+            "click": {"type": "choice", "choice": "a0", "confidence": 0.4}
+        }});
+        let mut s = Script::new(vec![Ok(reply.to_string())]);
+        let out = drive(&call(json!({"goal": "g"})), Commits::Free, &mut b, &mut s);
+        assert!(
+            out.text.starts_with("[browser_jev] low_confidence"),
+            "{}",
+            out.text
+        );
+
+        // A target from another operation's list is refused, not run.
+        let mut b = Fake::new(vec![settings_page()]);
+        let reply = json!({"answers": {
+            NEXT: {"type": "choice", "choice": "click", "confidence": 0.9},
+            "click": {"type": "choice", "choice": "a6", "confidence": 0.9}
+        }});
+        let mut s = Script::new(vec![Ok(reply.to_string())]);
+        let out = drive(&call(json!({"goal": "g"})), Commits::Free, &mut b, &mut s);
+        assert!(
+            out.text.starts_with("[browser_jev] decision_error"),
+            "{}",
+            out.text
+        );
+        assert!(b.acted.is_empty());
+    }
+
+    #[test]
+    fn a_value_its_box_rejects_is_dropped_and_jev_asked_again() {
         let p = page(
             json!({"url": "https://a.b/", "modal": "Where to?", "controls": [
                 {"tag": "input", "type": "text", "selector": "#o", "label": "Where from?"},
@@ -1747,57 +1989,39 @@ mod tests {
             ]}),
         );
         let c = call(json!({"goal": "g", "fields": {"from": "BCN", "to": "LCA"}}));
-        let all = actions(&p, &c, None);
-        // Box c1 is for "from" (f0), box c2 for "to" (f1); one answer is too unsure to veto.
-        let reply = json!({"answers": {
+        // Sorted: a0 from→c1, a1 to→c1, a2 from→c2, a3 to→c2. Jev puts "from" into the
+        // destination box, which its own question says is for "to" (f1).
+        let first = json!({"answers": {
+            NEXT: {"type": "choice", "choice": "type", "confidence": 0.9},
+            "type": {"type": "choice", "choice": "a2", "confidence": 0.7},
             "box_c1": {"type": "choice", "choice": "f0", "confidence": 0.9},
-            "box_c2": {"type": "choice", "choice": "f1", "confidence": 0.4}
-        }})
-        .to_string();
-        let mut s = Script::new(vec![Ok(reply)]);
-        let mut memo = BoxMemo::new();
-        let kept = match_fields(
-            &mut |r: &Value| s.ask(r),
-            "g",
-            &p,
-            all.clone(),
-            &c,
-            &mut memo,
+            "box_c2": {"type": "choice", "choice": "f1", "confidence": 0.9}
+        }});
+        let mut b = Fake::new(vec![p.clone(), p.clone(), p]);
+        let mut s = Script::new(vec![
+            Ok(first.to_string()),
+            Ok(pick("a1", 0.9)), // after the drop: a0 from→c1, a1 to→c2
+            Ok(pick(DONE, 0.9)),
+        ]);
+        let out = drive(&c, Commits::Free, &mut b, &mut s);
+        assert!(
+            out.text
+                .contains("1. Type the to \"LCA\" into \"Where to?\""),
+            "{}",
+            out.text
         );
-        let typed: Vec<&str> = descs(&kept)
-            .into_iter()
-            .filter(|d| d.starts_with("Type"))
+        assert_eq!(b.acted.len(), 1);
+        let again = &s.asked[1]["questions"];
+        assert!(again.get("box_c1").is_none() && again.get("box_c2").is_none());
+        let typed: Vec<&String> = again["type"]["criteria"]
+            .as_object()
+            .unwrap()
+            .keys()
             .collect();
-        assert_eq!(
-            typed,
-            [
-                "Type the from \"BCN\" into \"Where from?\" in the \"Where to?\" dialog",
-                "Type the from \"BCN\" into \"Where to?\" in the \"Where to?\" dialog",
-                "Type the to \"LCA\" into \"Where to?\" in the \"Where to?\" dialog",
-            ]
+        assert_eq!(typed, ["a0", "a1"], "only the right pairings are left");
+        assert!(
+            s.asked[2]["questions"].get("box_c2").is_none(),
+            "answers are remembered"
         );
-        assert_eq!(s.asked.len(), 1);
-        let again = match_fields(
-            &mut |r: &Value| s.ask(r),
-            "g",
-            &p,
-            all.clone(),
-            &c,
-            &mut memo,
-        );
-        assert_eq!(again.len(), kept.len());
-        assert_eq!(s.asked.len(), 1, "remembered for the rest of the call");
-
-        // When TypeSafe fails, nothing is dropped.
-        let mut s = Script::new(vec![Err("down".into())]);
-        let kept = match_fields(
-            &mut |r: &Value| s.ask(r),
-            "g",
-            &p,
-            all.clone(),
-            &c,
-            &mut BoxMemo::new(),
-        );
-        assert_eq!(kept.len(), all.len());
     }
 }

@@ -20,8 +20,8 @@ pub const API: &str = "https://api.telegram.org";
 pub(super) const POLL_SECS: u64 = 50;
 /// The longest a message may be, in characters (UTF-16 units, strictly; see `format::split`).
 pub const MAX_TEXT: usize = 4096;
-/// The biggest picture fetched from someone, in bytes.
-pub const MAX_PICTURE: u64 = 10 * 1024 * 1024;
+/// The biggest picture or file fetched from someone, in bytes: what a bot may fetch.
+pub const MAX_PICTURE: u64 = 20 * 1024 * 1024;
 /// The biggest file sent as a photo (Telegram's limit); bigger pictures go as files.
 const MAX_PHOTO: usize = 10 * 1024 * 1024;
 /// The biggest file a bot can send (Telegram's limit).
@@ -122,19 +122,24 @@ pub struct Message {
 }
 
 impl Message {
-    /// The picture in it, if any: the biggest size of a photo, or a file that is an image.
+    /// The picture or file in it, if any: the biggest size of a photo, or a file sent as one.
     pub fn picture_file(&self) -> Option<(&str, Option<u64>)> {
         if let Some(p) = self.photo.last() {
             return Some((&p.file_id, p.file_size));
         }
         self.document
             .as_ref()
-            .filter(|d| {
-                d.mime_type
-                    .as_deref()
-                    .is_some_and(|m| m.starts_with("image/"))
-            })
             .map(|d| (d.file_id.as_str(), d.file_size))
+    }
+
+    /// What the picture or file in it is called: a file's own name where it has one.
+    pub fn file_name(&self) -> String {
+        self.document
+            .as_ref()
+            .filter(|_| self.photo.is_empty())
+            .and_then(|d| d.file_name.clone())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| format!("telegram-photo-{}", self.message_id))
     }
 }
 
@@ -484,6 +489,11 @@ fn send_once(agent: &ureq::Agent, base: &str, token: &Token, out: &Out) -> Resul
         // Telegram has no mark for a message being worked on; "typing…" stands in. A bot keeps no
         // session to sign out of.
         Out::Working { on: false, .. } | Out::Unlink => Ok(()),
+        // Files go up on their own (`send_file`), not through the listener.
+        Out::File { reply, .. } => {
+            reply.answer(Err("Telegram sends files on their own".into()));
+            Ok(())
+        }
         Out::Typing { to } | Out::Working { to, on: true, .. } => call::<bool>(
             agent,
             base,
@@ -554,6 +564,23 @@ fn keyboard(buttons: &[Button]) -> Value {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn any_file_sent_is_fetched_under_its_own_name_and_a_photo_under_one_made_up() {
+        let doc: Message = serde_json::from_str(
+            r#"{"message_id":7,"date":1,"chat":{"id":1,"type":"private"},
+                "document":{"file_id":"d1","file_name":"plan.docx","file_size":9}}"#,
+        )
+        .unwrap();
+        assert_eq!(doc.picture_file(), Some(("d1", Some(9))));
+        assert_eq!(doc.file_name(), "plan.docx");
+        let photo: Message = serde_json::from_str(
+            r#"{"message_id":8,"date":1,"chat":{"id":1,"type":"private"},
+                "photo":[{"file_id":"p1"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(photo.file_name(), "telegram-photo-8");
+    }
 
     #[test]
     fn only_a_token_shaped_like_botfathers_is_taken() {

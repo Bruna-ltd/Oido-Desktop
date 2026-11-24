@@ -108,13 +108,13 @@ fn facts(s: &App, run: &Run, step: &Step, k: &Kit) -> El {
                 .gap(12.0)
                 .child(
                     text(label.to_owned())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.text_faint)
                         .w(84.0),
                 )
                 .child(
                     text(value)
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.text_base)
                         .wrap()
                         .selectable(true),

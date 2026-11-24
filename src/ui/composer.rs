@@ -6,9 +6,7 @@
 
 use std::path::Path;
 
-use rune::{
-    Align, El, Side, SurfaceFit, TextStyle, auto_grow, col, el, icon, row, text, text_input,
-};
+use rune::{Align, El, Side, SurfaceFit, auto_grow, col, el, icon, row, text, text_input};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Placement, PopupItem,
     PopupList, glyphs,
@@ -46,10 +44,7 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
     };
     let blind = s.composer.attachments.iter().any(Attachment::is_image) && !s.sees_images();
 
-    let style = TextStyle {
-        line_height: 22.0,
-        ..k.ty.body
-    };
+    let style = crate::theme::ty::field(k);
     let field = super::text_menu::composer(
         text_input(&s.composer.edit, style)
             .key("composer-input")
@@ -166,11 +161,16 @@ pub fn build(s: &App, agent: &Agent, k: &Kit, layer: &mut Vec<El>) -> El {
                 .w_full()
                 .px(16.0)
                 .pt(10.0)
-                .child(text(why).font(k.ty.small).color(k.c.warning.icon).wrap()),
+                .child(
+                    text(why)
+                        .font(k.ty.caption())
+                        .color(k.c.warning.icon)
+                        .wrap(),
+                ),
         );
     }
-    if let Some(waiting) = s.queued_here() {
-        card = card.child(queued(waiting, k));
+    for (at, waiting) in s.queued_here().iter().enumerate() {
+        card = card.child(queued(at, waiting, k));
     }
     if let Some(at) = s.composer.editing() {
         card = card.child(editing(s, at, k));
@@ -258,7 +258,7 @@ fn estimate(s: &App) -> String {
 }
 
 /// The message waiting for the reply to end, with a way to take it back.
-fn queued(waiting: &crate::prompt::Prompt, k: &Kit) -> El {
+fn queued(at: usize, waiting: &crate::prompt::Prompt, k: &Kit) -> El {
     let first = waiting.text.lines().next().unwrap_or_default();
     let summary = match waiting.attachments.len() {
         0 => first.to_owned(),
@@ -266,7 +266,7 @@ fn queued(waiting: &crate::prompt::Prompt, k: &Kit) -> El {
         n => format!("{first} (+{n} files)"),
     };
     row()
-        .key("composer-queued")
+        .key(format!("composer-queued-{at}"))
         .w_full()
         .px(16.0)
         .pt(10.0)
@@ -290,9 +290,9 @@ fn queued(waiting: &crate::prompt::Prompt, k: &Kit) -> El {
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
                 .help("Take it back into the box, to change it or not send it")
-                .on_press(|s: &mut App| s.unqueue())
+                .on_press(move |s: &mut App| s.unqueue_one(at))
                 .build(k)
-                .key("unqueue"),
+                .key(format!("unqueue-{at}")),
         )
 }
 
@@ -321,7 +321,7 @@ fn editing(s: &App, at: usize, k: &Kit) -> El {
         .center_y()
         .child(
             text(note)
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .grow(1.0)
                 .shrink()

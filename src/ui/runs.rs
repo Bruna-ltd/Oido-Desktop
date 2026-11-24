@@ -268,7 +268,7 @@ fn header(s: &App, run: &Run, k: &Kit) -> El {
                 .border(1.0, c.border_muted)
                 .child(
                     text(why.clone())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.warning.icon)
                         .wrap()
                         .selectable(true),

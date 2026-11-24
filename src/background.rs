@@ -211,6 +211,15 @@ impl Processes {
             .count()
     }
 
+    /// The commands chat `sid` has running, one line each, oldest first.
+    pub fn running_commands(&self, sid: &str) -> Vec<String> {
+        self.list
+            .iter()
+            .filter(|p| p.sid == sid && p.state() == State::Running)
+            .map(|p| name(&p.command))
+            .collect()
+    }
+
     /// Ends every process chat `sid` started.
     pub fn stop_chat(&self, sid: &str) {
         for p in self.list.iter().filter(|p| p.sid == sid) {

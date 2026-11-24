@@ -113,6 +113,46 @@ impl Look {
     }
 }
 
+/// Oido's type roles above the kit's own scale, each built on a kit style so a theme's `Type`
+/// carries through.
+pub mod ty {
+    use rune::TextStyle;
+    use rune_kit::Kit;
+
+    /// A page's name at its top: Providers, Usage, an agent's name in its form.
+    pub fn title(k: &Kit) -> TextStyle {
+        TextStyle {
+            size: 28.0,
+            line_height: 34.0,
+            ..k.ty.body_medium
+        }
+    }
+
+    /// A pane's or an empty state's heading, a step below `title`.
+    pub fn heading(k: &Kit) -> TextStyle {
+        TextStyle {
+            size: 20.0,
+            line_height: 26.0,
+            ..k.ty.body_medium
+        }
+    }
+
+    /// A headline number on a tile, with digits of one width so a changing value keeps still.
+    pub fn figure(k: &Kit) -> TextStyle {
+        TextStyle {
+            size: 22.0,
+            line_height: 28.0,
+            ..k.ty.body_medium
+        }
+        .features("'tnum' 1")
+    }
+
+    /// Text the person types into a field or the composer: body on a roomier line.
+    pub fn field(k: &Kit) -> TextStyle {
+        k.ty.body.lh(22.0)
+    }
+}
+
 /// How often the desktop is checked for a theme switch.
 const FOLLOW_EVERY: Duration = Duration::from_secs(2);
 

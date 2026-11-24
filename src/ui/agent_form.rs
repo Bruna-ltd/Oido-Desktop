@@ -1,7 +1,7 @@
 //! Making and changing agents: one form for a new agent, an edit, and a new team member, and the
 //! delete confirmation. The name is the page; everything else is optional and can change later.
 
-use rune::{Color, El, ScrollSpec, TextStyle, col, icon, row, text};
+use rune::{Color, El, ScrollSpec, col, el, icon, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Kit, TextArea, TextInput};
 
@@ -14,6 +14,10 @@ use crate::picker::Item;
 use crate::theme;
 
 const PAGE: f32 = 720.0;
+
+/// A plain text field's text sits this far in from its box; the name pulls back by it so its first
+/// letter lines up with the caption above.
+const NAME_INSET: f32 = 8.0;
 
 /// The instructions field stops growing here and scrolls: a long brief must not fill the screen.
 const PROMPT_MAX: f32 = 320.0;
@@ -62,8 +66,8 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .max_w(PAGE)
         .px(24.0)
         .py(32.0)
-        .gap(24.0)
-        .child(hero(s, &kind, member, k));
+        .gap(16.0)
+        .child(hero(s, &kind, member, k).pb(12.0));
     if matches!(kind, FormKind::NewAgent) {
         page = page.child(templates(s, k));
     }
@@ -96,13 +100,14 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 TextInput::new(&r.form.description)
                     .placeholder("e.g. Checks a draft's numbers against their sources.")
                     .label("When to use")
+                    .width(None)
                     .on_edit(|s: &mut App| &mut s.roster.form.description)
                     .build(k)
                     .key("description"),
                 k,
             )
         }))
-        .child(card(
+        .child(inline_card(
             if member { "Which AI should it use?" } else { "Which AI should answer?" },
             &match &parent_name {
                 Some(p) if member => format!("Leave it on the default and it uses the same one as {p}."),
@@ -183,16 +188,13 @@ fn hero(s: &App, kind: &FormKind, member: bool, k: &Kit) -> El {
             "Agent name"
         })
         .plain()
-        .text_style(TextStyle {
-            size: 28.0,
-            line_height: 34.0,
-            ..k.ty.body_medium
-        })
+        .text_style(crate::theme::ty::title(k))
         .width(None)
         .on_edit(|s: &mut App| &mut s.roster.form.name)
         .on_submit(|s: &mut App, _| s.submit_form())
         .build(k)
-        .key("name");
+        .key("name")
+        .ml(-NAME_INSET);
     let mut out = col().w_full().gap(16.0).child(
         row()
             .w_full()
@@ -233,31 +235,31 @@ fn hero(s: &App, kind: &FormKind, member: bool, k: &Kit) -> El {
 fn face_picker(s: &App, k: &Kit) -> El {
     let f = &s.roster.form;
     let c = &k.c;
-    let heading = |words: &str| {
-        text(words.to_owned())
-            .font(k.ty.small_medium)
-            .color(c.text_muted)
+    // A heading sits close to its tiles; the two groups stand apart.
+    let group = |words: &str| {
+        col().w_full().gap(8.0).child(
+            text(words.to_owned())
+                .font(k.ty.small_medium)
+                .color(c.text_muted),
+        )
     };
-    let mut col_ = col()
-        .w_full()
-        .gap(10.0)
-        .child(heading("Colour"))
-        .child(swatches(s, k))
-        .child(heading("Picture"))
-        .child(pictures(s, k))
-        .child(hint(
-            "Or drop your own picture anywhere on this page. PNG or JPEG: the middle square of it is used.",
-            k,
-        ));
+    let mut picture = group("Picture").child(pictures(s, k)).child(hint(
+        "Or drop your own picture anywhere on this page. PNG or JPEG: the middle square of it is used.",
+        k,
+    ));
     if let Some(why) = &f.avatar_error {
-        col_ = col_.child(
+        picture = picture.child(
             text(why.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.warning.icon)
                 .wrap(),
         );
     }
-    col_
+    col()
+        .w_full()
+        .gap(20.0)
+        .child(group("Colour").child(swatches(s, k)))
+        .child(picture)
 }
 
 /// The auto colour (from the name) and a few to choose from.
@@ -362,6 +364,9 @@ fn pictures(s: &App, k: &Kit) -> El {
     }
 }
 
+/// Below this width a pair of example tiles moves to its own line: their titles would clip.
+const TEMPLATE_PAIR: f32 = 300.0;
+
 /// Four starting points. They fill the name and instructions and nothing else.
 fn templates(s: &App, k: &Kit) -> El {
     let c = &k.c;
@@ -373,8 +378,8 @@ fn templates(s: &App, k: &Kit) -> El {
                 .key(format!("template-{i}"))
                 .grow(1.0)
                 .min_w(0.0)
-                .px(14.0)
-                .py(12.0)
+                .px(12.0)
+                .py(10.0)
                 .gap(2.0)
                 .radius(k.radius.md)
                 .fill(c.layer_01)
@@ -394,35 +399,91 @@ fn templates(s: &App, k: &Kit) -> El {
                 .font(k.ty.small_medium)
                 .color(c.text_muted),
         )
-        .child(row().w_full().gap(8.0).child(one(0)).child(one(1)))
-        .child(row().w_full().gap(8.0).child(one(2)).child(one(3)))
+        // Two pairs that wrap: four across when there is room, two by two when there is not, never
+        // three and one.
+        .child(
+            row()
+                .w_full()
+                .flex_wrap()
+                .gap(8.0)
+                .children((0..TEMPLATES.len()).step_by(2).map(|i| {
+                    row()
+                        .grow(1.0)
+                        .min_w(TEMPLATE_PAIR)
+                        .gap(8.0)
+                        .child(one(i))
+                        .child(one(i + 1))
+                })),
+        )
 }
 
 /// The muted line under a section's title. It wraps: a long description must stay inside its card.
 fn hint(words: impl Into<String>, k: &Kit) -> El {
-    text(words).font(k.ty.small).color(k.c.text_muted).wrap()
+    text(words)
+        .font(k.ty.caption())
+        .color(k.c.text_muted)
+        .wrap()
 }
 
-fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
-    let c = &k.c;
+/// A title and the muted line under it. `field` titles sit a step below a card's.
+fn head(title: &str, description: &str, style: rune::TextStyle, k: &Kit) -> El {
+    col()
+        .min_w(0.0)
+        .gap(2.0)
+        .child(text(title.to_owned()).font(style).color(k.c.text_base))
+        .child(hint(description, k))
+}
+
+/// The box every section of the form sits in.
+fn panel(k: &Kit) -> El {
     col()
         .w_full()
+        .radius(k.radius.lg)
+        .fill(k.c.layer_01)
+        .border(1.0, k.c.border_muted)
+}
+
+/// A section whose control needs the width: the title and line above it.
+fn card(title: &str, description: &str, body: El, k: &Kit) -> El {
+    panel(k)
         .padding(20.0)
         .gap(14.0)
-        .radius(k.radius.lg)
-        .fill(c.layer_01)
-        .border(1.0, c.border_muted)
-        .child(
-            col()
-                .gap(4.0)
-                .child(
-                    text(title.to_owned())
-                        .font(k.ty.body_medium)
-                        .color(c.text_base),
-                )
-                .child(hint(description, k)),
-        )
+        .child(head(title, description, k.ty.body_medium, k))
         .child(body)
+}
+
+/// A section that is one choice: the title and line on the left, the control on the right. When
+/// the two do not fit side by side the control wraps under the words, as in `card`.
+fn inline_card(title: &str, description: &str, control: El, k: &Kit) -> El {
+    panel(k).padding(20.0).child(
+        row()
+            .w_full()
+            .flex_wrap()
+            .gaps(14.0, 24.0)
+            .center_y()
+            .child(
+                head(title, description, k.ty.body_medium, k)
+                    .grow(1.0)
+                    .min_w(INLINE_WORDS),
+            )
+            .child(control),
+    )
+}
+
+/// The narrowest the words of an `inline_card` get before its control wraps under them.
+const INLINE_WORDS: f32 = 260.0;
+
+/// One setting inside More options: its title and what it does, then the control.
+fn field(title: &str, about: &str, k: &Kit) -> El {
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(head(title, about, k.ty.ui_medium, k))
+}
+
+/// The line between two settings in More options.
+fn rule(k: &Kit) -> El {
+    el().w_full().h(1.0).fill(k.c.border_muted)
 }
 
 /// What the agent used over the last 30 days, and a way to see it in full on Usage.
@@ -546,42 +607,35 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                     .color(c.text_muted),
             ),
     );
-    let mut out = col()
-        .w_full()
-        .radius(k.radius.lg)
-        .fill(c.layer_01)
-        .border(1.0, c.border_muted)
-        .child(head);
+    let mut out = panel(k).child(head);
     if f.advanced {
-        out = out.child(
-            col()
-                .w_full()
-                .px(20.0)
-                .pb(20.0)
-                .gap(20.0)
-                .child(skills_field(s, k, layer))
-                .child(tools_field(s, k, layer))
-                .child(workdir_field(s, k, layer))
-                .child(topics_field(s, k))
-                .child(blocked_field(s, k, layer)),
-        );
+        let fields = [
+            skills_field(s, k, layer),
+            tools_field(s, k, layer),
+            workdir_field(s, k, layer),
+            topics_field(s, k),
+            blocked_field(s, k, layer),
+        ];
+        let mut body = col().w_full().px(20.0).pb(20.0).gap(20.0);
+        for (i, f) in fields.into_iter().enumerate() {
+            if i > 0 {
+                body = body.child(rule(k));
+            }
+            body = body.child(f);
+        }
+        out = out.child(rule(k)).child(body.pt(20.0));
     }
     out
 }
 
 /// The skills block: a title, what it is for, and the multi-select.
 fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    let c = &k.c;
     let about = if s.skills.is_empty() {
         "No skills found. Put them in ~/.agents/skills, one folder each with a SKILL.md."
     } else {
         "Ready-made know-how you can hand it. Its text goes to the model with the brief."
     };
-    col()
-        .w_full()
-        .gap(8.0)
-        .child(text("Skills").font(k.ty.body_medium).color(c.text_base))
-        .child(hint(about, k))
+    field("Skills", about, k)
         .child(super::multi_picker::build(
             s,
             k,
@@ -626,7 +680,7 @@ fn cost(s: &App, k: &Kit) -> Option<El> {
     }
     Some(
         text(line)
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(if big {
                 k.c.warning.icon
             } else {
@@ -641,39 +695,23 @@ const BIG_SKILLS: usize = 2_000;
 
 /// The working folder block: where this agent's commands run.
 fn workdir_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    let c = &k.c;
-    col()
-        .w_full()
-        .gap(8.0)
-        .child(
-            text("Working folder")
-                .font(k.ty.body_medium)
-                .color(c.text_base),
-        )
-        .child(hint(
-            "Where its commands run. If you choose none, that is your home folder.",
-            k,
-        ))
-        .child(super::folder_picker::build(s, k, layer))
-        .child(trust_field(s, k))
+    field(
+        "Working folder",
+        "Where its commands run. If you choose none, that is your home folder.",
+        k,
+    )
+    .child(super::folder_picker::build(s, k, layer))
+    .child(trust_field(s, k))
 }
 
 /// What the agent answers about on channels (see `guard::intake`).
 fn topics_field(s: &App, k: &Kit) -> El {
-    let c = &k.c;
-    col()
-        .w_full()
-        .gap(8.0)
-        .child(
-            text("On channels, only answer about")
-                .font(k.ty.body_medium)
-                .color(c.text_base),
-        )
-        .child(hint(
-            "Words or topics, split by commas. A message from Telegram, Slack or WhatsApp that names none of them is turned away before it reaches the agent. Empty, it answers anything.",
-            k,
-        ))
-        .child(
+    field(
+        "On channels, only answer about",
+        "Words or topics, split by commas. A message from Telegram, Slack or WhatsApp that names none of them is turned away before it reaches the agent. Empty, it answers anything.",
+        k,
+    )
+    .child(
             TextInput::new(&s.roster.form.topics)
                 .placeholder("e.g. billing, refunds, orders")
                 .label("Channel topics")
@@ -685,19 +723,12 @@ fn topics_field(s: &App, k: &Kit) -> El {
 
 /// Places this agent may not reach, beside the ones blocked for every agent.
 fn blocked_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    col()
-        .w_full()
-        .gap(8.0)
-        .child(
-            text("Never touch")
-                .font(k.ty.body_medium)
-                .color(k.c.text_base),
-        )
-        .child(hint(
-            "Folders and files this agent's tools may not reach, split by commas, on top of the places blocked for every agent on the Guardrails screen. Add (reading) to stop only reading, (changing) to stop only changing.",
-            k,
-        ))
-        .child(
+    field(
+        "Never touch",
+        "Folders and files this agent's tools may not reach, split by commas, on top of the places blocked for every agent on the Guardrails screen. Add (reading) to stop only reading, (changing) to stop only changing.",
+        k,
+    )
+    .child(
             row()
                 .w_full()
                 .gap(8.0)
@@ -728,6 +759,7 @@ fn trust_field(s: &App, k: &Kit) -> El {
     let on = s.roster.form.trust_workdir;
     row()
         .key("trust-workdir")
+        .pt(8.0)
         .w_full()
         .gap(16.0)
         .center_y()
@@ -758,20 +790,12 @@ fn trust_field(s: &App, k: &Kit) -> El {
 /// The tools block: the TypeSafe and MCP tools the agent may use. The app's own tools are every
 /// agent's, so they are neither listed nor chosen here.
 fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    let c = &k.c;
-    col()
-        .w_full()
-        .gap(8.0)
-        .child(
-            text("What it can use (Tools)")
-                .font(k.ty.body_medium)
-                .color(c.text_base),
-        )
-        .child(hint(
-            "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and save and run workflows. Add tools from MCP servers, TypeSafe or your browser here, and the ones that manage schedules, agents and MCP servers.",
-            k,
-        ))
-        .child(super::multi_picker::build(
+    field(
+        "What it can use (Tools)",
+        "Every agent can ask you, run commands, work with files in its folder, fetch web pages, and save and run workflows. Add tools from MCP servers, TypeSafe or your browser here, and the ones that manage schedules, agents and MCP servers.",
+        k,
+    )
+    .child(super::multi_picker::build(
             s,
             k,
             layer,

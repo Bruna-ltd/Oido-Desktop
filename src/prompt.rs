@@ -1,6 +1,6 @@
 //! What you send an agent: your words and the files that go with them. A text file travels as its
-//! contents, read when it was attached; a picture as PNG or JPEG bytes, shrunk to a size models
-//! take. Saved inside the chat's message, so a chat reads the same tomorrow even if the file
+//! contents, read when it was attached; a PDF or a Word document as its words; a picture as PNG
+//! or JPEG bytes, shrunk to a size models take. Files sent from a channel are read the same way. Saved inside the chat's message, so a chat reads the same tomorrow even if the file
 //! changed or went.
 
 use std::path::Path;
@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 /// The longest side a picture is sent at. Anthropic shrinks anything bigger itself, so sending
 /// more only costs upload time; OpenAI's high detail tiles fit inside it as well.
 const MAX_SIDE: u32 = 1568;
-/// The biggest file read as a picture, before shrinking.
-const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+/// The biggest file read: a picture before shrinking, or a PDF or document before its words are
+/// taken out.
+const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 /// The biggest text file attached whole. Bigger ones would crowd the model's context out.
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
 
@@ -185,13 +186,13 @@ impl Attachment {
         }
     }
 
-    /// Reads the file at `path` as a picture (PNG or JPEG) or as text, named `name` (what the
-    /// model and the chip show).
+    /// Reads the file at `path` as [`Attachment::from_bytes`] does, named `name` (what the model
+    /// and the chip show).
     ///
     /// # Errors
     ///
-    /// The file cannot be read, is too big, or is neither a picture we can send nor UTF-8 text;
-    /// the message says which, in words.
+    /// The file cannot be read, or [`Attachment::from_bytes`] turns it away; the message says
+    /// why, in words.
     pub fn read(path: &Path, name: &str) -> Result<Attachment, String> {
         let size = std::fs::metadata(path)
             .map_err(|e| format!("{name} could not be read: {e}."))?
@@ -199,18 +200,38 @@ impl Attachment {
         if !path.is_file() {
             return Err(format!("{name} is a folder, not a file."));
         }
-        if size > MAX_IMAGE_BYTES {
+        if size > MAX_FILE_BYTES {
             return Err(format!(
                 "{name} is too big to attach ({}).",
                 megabytes(size)
             ));
         }
         let bytes = std::fs::read(path).map_err(|e| format!("{name} could not be read: {e}."))?;
+        Attachment::from_bytes(name, bytes)
+    }
+
+    /// The file `name` holding `bytes` as something to send: a picture (PNG or JPEG), a PDF's or
+    /// a Word document's words, or UTF-8 text (Markdown, HTML, CSV, code…).
+    ///
+    /// # Errors
+    ///
+    /// It is too big, or is none of those; the message says which, in words.
+    pub fn from_bytes(name: &str, bytes: Vec<u8>) -> Result<Attachment, String> {
+        let size = bytes.len() as u64;
+        if size > MAX_FILE_BYTES {
+            return Err(format!(
+                "{name} is too big to attach ({}).",
+                megabytes(size)
+            ));
+        }
         if image::guess_format(&bytes).is_ok() {
             return Image::fit(name, &bytes).map(Attachment::Image);
         }
         if bytes.starts_with(b"%PDF-") {
-            return pdf_attachment(name, &bytes);
+            return words_attachment(name, pdf_text(name, &bytes)?);
+        }
+        if is_docx(name, &bytes) {
+            return words_attachment(name, docx_text(name, &bytes)?);
         }
         if size > MAX_TEXT_BYTES {
             return Err(format!(
@@ -244,9 +265,55 @@ pub fn pdf_text(name: &str, bytes: &[u8]) -> Result<String, String> {
     Ok(text.to_owned())
 }
 
-/// A PDF's words as a text attachment.
-fn pdf_attachment(name: &str, bytes: &[u8]) -> Result<Attachment, String> {
-    let text = pdf_text(name, bytes)?;
+/// Whether file `name` holding `bytes` is a Word document (`.docx`: a zip of XML).
+fn is_docx(name: &str, bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK\x03\x04") && name.to_lowercase().ends_with(".docx")
+}
+
+/// The biggest `word/document.xml` unpacked from a Word document.
+const MAX_DOCX_XML: u64 = 64 * 1024 * 1024;
+
+/// A Word document's words: its paragraphs, one a line, with tabs and line breaks kept.
+pub fn docx_text(name: &str, bytes: &[u8]) -> Result<String, String> {
+    use std::io::Read as _;
+    let unreadable = || format!("{name} is a Word document that could not be read.");
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| unreadable())?;
+    let mut xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .map_err(|_| unreadable())?
+        // A tiny file can unpack to a huge one; past this it is not read on.
+        .take(MAX_DOCX_XML)
+        .read_to_string(&mut xml)
+        .map_err(|_| unreadable())?;
+    let doc = roxmltree::Document::parse(&xml).map_err(|_| unreadable())?;
+    // One pass in document order, so text in a paragraph within another (a text box) is read once.
+    let mut text = String::new();
+    for n in doc.descendants().filter(roxmltree::Node::is_element) {
+        if n.tag_name().namespace() != Some(W) {
+            continue;
+        }
+        match n.tag_name().name() {
+            "p" if !text.is_empty() => text.push('\n'),
+            "t" => text.push_str(n.text().unwrap_or_default()),
+            "tab" => text.push('\t'),
+            "br" | "cr" => text.push('\n'),
+            _ => {}
+        }
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(format!("{name} has no text in it."));
+    }
+    Ok(text.to_owned())
+}
+
+/// WordprocessingML's namespace.
+const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+/// A PDF's or document's words as a text attachment.
+fn words_attachment(name: &str, text: String) -> Result<Attachment, String> {
     if text.len() as u64 > MAX_TEXT_BYTES {
         return Err(format!(
             "{name} is too long to attach whole ({} of text). Ask the agent to read the part you need.",
@@ -351,6 +418,71 @@ mod tests {
             .write_to(&mut out, image::ImageFormat::Png)
             .unwrap();
         out.into_inner()
+    }
+
+    /// A Word document holding `body` (WordprocessingML inside `<w:body>`), stored unpacked.
+    fn docx(body: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("word/document.xml", stored).unwrap();
+        write!(
+            zip,
+            r#"<?xml version="1.0"?><w:document xmlns:w="{W}"><w:body>{body}</w:body></w:document>"#
+        )
+        .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_word_document_is_sent_as_its_words_a_paragraph_a_line() {
+        let bytes = docx(concat!(
+            r#"<w:p><w:r><w:t>Launch plan</w:t></w:r></w:p>"#,
+            r#"<w:p><w:r><w:t>Day</w:t><w:tab/><w:t>Task</w:t><w:br/><w:t>next</w:t></w:r></w:p>"#,
+            // A text box: a paragraph within a paragraph, read once.
+            r#"<w:p><w:r><w:t>Box:</w:t><w:txbxContent><w:p><w:r><w:t>inside</w:t></w:r></w:p></w:txbxContent></w:r></w:p>"#,
+        ));
+        assert_eq!(
+            Attachment::from_bytes("plan.docx", bytes).unwrap(),
+            Attachment::File {
+                name: "plan.docx".into(),
+                text: "Launch plan\nDay\tTask\nnext\nBox:\ninside".into(),
+            }
+        );
+        assert!(
+            Attachment::from_bytes("empty.docx", docx("<w:p/>"))
+                .unwrap_err()
+                .contains("no text")
+        );
+        assert!(
+            Attachment::from_bytes("odd.docx", b"PK\x03\x04 not a zip".to_vec())
+                .unwrap_err()
+                .contains("could not be read")
+        );
+        // A zip that is not named a Word document is not opened as one.
+        assert!(
+            Attachment::from_bytes("archive.zip", docx("<w:p/>"))
+                .unwrap_err()
+                .contains("not a text file")
+        );
+    }
+
+    #[test]
+    fn markdown_html_and_plain_text_sent_as_bytes_go_as_their_text() {
+        for (name, text) in [
+            ("notes.md", "# hi\nthere"),
+            ("page.html", "<h1>hi</h1>"),
+            ("a.txt", "plain"),
+        ] {
+            assert_eq!(
+                Attachment::from_bytes(name, text.as_bytes().to_vec()).unwrap(),
+                Attachment::File {
+                    name: name.into(),
+                    text: text.into(),
+                }
+            );
+        }
     }
 
     #[test]

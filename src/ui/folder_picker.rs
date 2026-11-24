@@ -242,7 +242,7 @@ fn browser(s: &App, target: Target, k: &Kit) -> El {
     results = if let Some(why) = &b.error {
         results.child(
             text(why.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.warning.icon)
                 .wrap()
                 .px(8.0),

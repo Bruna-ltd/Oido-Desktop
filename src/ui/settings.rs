@@ -325,7 +325,7 @@ pub(super) fn setting(key: &str, name: &str, help: &str, control: El, k: &Kit) -
                 )
                 .child(
                     text(help.to_owned())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.text_muted)
                         .wrap(),
                 ),

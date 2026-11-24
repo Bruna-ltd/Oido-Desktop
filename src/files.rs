@@ -100,6 +100,25 @@ pub(crate) fn resolve(root: &Path, given: &str) -> Result<PathBuf, String> {
     Ok(missing.iter().rev().fold(real, |p, n| p.join(n)))
 }
 
+/// Like [`resolve`], for reading: a path inside one of the skill folders is fine too.
+fn resolve_for_reading(root: &Path, given: &str) -> Result<PathBuf, String> {
+    resolve_reading_in(root, given, &crate::skills::read_roots())
+}
+
+fn resolve_reading_in(root: &Path, given: &str, skills: &[PathBuf]) -> Result<PathBuf, String> {
+    resolve(root, given).or_else(|outside| {
+        let real = Path::new(given)
+            .canonicalize()
+            .map_err(|_| outside.clone())?;
+        skills
+            .iter()
+            .filter_map(|r| r.canonicalize().ok())
+            .any(|r| real.starts_with(r))
+            .then_some(real)
+            .ok_or(outside)
+    })
+}
+
 /// A path for the model to read: relative to the working folder when it is inside it.
 fn shown(root: &Path, path: &Path) -> String {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -119,7 +138,7 @@ fn read_text(path: &Path, root: &Path) -> Result<String, String> {
 }
 
 fn read(root: &Path, v: &Value) -> Result<String, String> {
-    let path = resolve(root, text(v, "path")?)?;
+    let path = resolve_for_reading(root, text(v, "path")?)?;
     let body = match std::fs::read(&path) {
         // Only for reading: an edit must never write a PDF's text back over the PDF.
         Ok(bytes) if bytes.starts_with(b"%PDF-") => {
@@ -266,6 +285,22 @@ mod tests {
             assert!(resolve(&r, bad).is_err(), "{bad}");
         }
         std::fs::remove_dir_all(r).unwrap();
+    }
+
+    #[test]
+    fn skill_folders_can_be_read_but_not_written() {
+        let r = root();
+        let skills = std::env::temp_dir().join(format!("oido-skills-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(skills.join("a")).unwrap();
+        std::fs::write(skills.join("a/SKILL.md"), "how").unwrap();
+        let path = skills.join("a/SKILL.md").to_string_lossy().into_owned();
+        let open = |p: &str| resolve_reading_in(&r, p, std::slice::from_ref(&skills));
+        assert!(open(&path).is_ok());
+        assert!(open("/etc/passwd").is_err());
+        let got = call(&r, WRITE, json!({"path": path, "content": "x"}));
+        assert!(got.contains("outside"), "{got}");
+        std::fs::remove_dir_all(r).unwrap();
+        std::fs::remove_dir_all(skills).unwrap();
     }
 
     #[cfg(unix)]

@@ -132,7 +132,7 @@ fn agents_row(s: &App, kind: Kind, k: &Kit, layer: &mut Vec<El>) -> El {
             col()
                 .gap(2.0)
                 .child(text("Agents").font(k.ty.ui_medium).color(k.c.text_base))
-                .child(text(help).font(k.ty.small).color(k.c.text_muted).wrap()),
+                .child(text(help).font(k.ty.caption()).color(k.c.text_muted).wrap()),
         )
         .child(super::multi_picker::build(s, k, layer, spec))
 }
@@ -379,7 +379,7 @@ fn qr_row(key: &str, name: &str, help: &str, data: &str, action: El, k: &Kit) ->
                 )
                 .child(
                     text(help.to_owned())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.text_muted)
                         .wrap(),
                 ),

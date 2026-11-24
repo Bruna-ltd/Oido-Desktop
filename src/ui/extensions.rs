@@ -26,11 +26,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
                 .gap(10.0)
                 .child(
                     text("Extensions")
-                        .font(rune::TextStyle {
-                            size: 28.0,
-                            line_height: 34.0,
-                            ..k.ty.body_medium
-                        })
+                        .font(crate::theme::ty::title(k))
                         .color(c.text_base),
                 )
                 .child(
@@ -45,7 +41,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
         page = page.child(
             text(note.clone())
                 .key("ext-notice")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_base)
                 .wrap(),
         );
@@ -182,7 +178,7 @@ fn account_card(s: &App, k: &Kit) -> El {
         )
         .child(
             text("Google's services sign in through a client of your own, so your data never passes through anyone else. In Google Cloud Console make a project, turn on the APIs you want, make an OAuth client of type Desktop app, and paste its id and secret here. Set the app's publishing status to In production, or Google ends the sign-in every 7 days.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_faint)
                 .wrap(),
         )
@@ -255,7 +251,7 @@ fn extension_card(s: &App, ext: &'static dyn Extension, k: &Kit) -> El {
         );
     let mut r = card(k).key(format!("ext-{id}")).child(head).child(
         text(ext.blurb())
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(c.text_faint)
             .wrap(),
     );
@@ -263,7 +259,7 @@ fn extension_card(s: &App, ext: &'static dyn Extension, k: &Kit) -> El {
         r = r.child(
             text(why)
                 .key(format!("ext-blocked-{id}"))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.danger.fg)
                 .wrap(),
         );

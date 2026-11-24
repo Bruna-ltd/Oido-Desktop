@@ -3,8 +3,8 @@
 //! the same commands on the edit screen, so none is hidden behind a gesture.
 
 use rune::{El, PointerPress, el, row, text};
-use rune_kit::shell::{RowStatus, Sidebar, SidebarRow, SidebarSection};
-use rune_kit::{IconButton, IconButtonVariant, Kit, Menu, MenuItem, context_menu, glyphs};
+use rune_kit::shell::{Sidebar, SidebarRow, SidebarSection};
+use rune_kit::{IconButton, IconButtonVariant, Kit, Menu, MenuItem, Spinner, context_menu, glyphs};
 
 use super::icons;
 use crate::agents::{Agent, Target};
@@ -15,7 +15,12 @@ use crate::update::VERSION;
 
 pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let r = &s.roster;
-    let mut sb = Sidebar::new().label("Agents").inset(0.0).row_gap(2.0);
+    // The list's items are its sections: a clear break above each header, so Pinned and Agents
+    // read as two groups, while rows inside one sit 2 points apart (the kit's).
+    let mut sb = Sidebar::new()
+        .label("Agents")
+        .inset(0.0)
+        .row_gap(SECTION_GAP);
     if !r.pinned().is_empty() {
         let rows = group(s, r.pinned(), k, layer);
         sb = sb.section(
@@ -66,14 +71,26 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     .build(k)
 }
 
-/// Each agent's row, then its team (when unfolded).
+/// Points between sections.
+const SECTION_GAP: f32 = 14.0;
+
+/// Each agent's row, then its team (when unfolded). Members hang close under their lead, and an
+/// unfolded team ends with a little air, so a family reads as one unit before the next agent.
 fn group(s: &App, agents: Vec<&Agent>, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
     let mut rows = Vec::new();
-    for a in agents {
+    let count = agents.len();
+    for (i, a) in agents.into_iter().enumerate() {
         rows.push(agent_row(s, a, None, k, layer));
-        if s.roster.team_open(&a.id) {
+        if s.roster.team_open(&a.id) && !a.subagents.is_empty() {
             for m in &a.subagents {
                 rows.push(agent_row(s, m, Some(&a.id), k, layer));
+            }
+            if i + 1 < count {
+                rows.push(
+                    el().key(format!("after-team-{}", a.id))
+                        .h(4.0)
+                        .a11y_hidden(),
+                );
             }
         }
     }
@@ -87,61 +104,102 @@ fn agent_row(s: &App, a: &Agent, parent: Option<&str>, k: &Kit, layer: &mut Vec<
     };
     let member = parent.is_some();
     let selected = s.route == Route::Chat && s.roster.selected.as_ref() == Some(&target);
-    let mut r = SidebarRow::new(a.name.clone())
-        .height(if member { 30.0 } else { 36.0 })
+    // The status is drawn in the trailing slot (see `controls`), so the ⋯ button can take its
+    // place under the pointer; the row still says it in words.
+    let status = row_status(s, a);
+    let said = match status {
+        Some(AgentStatus::Running) => "Working",
+        Some(AgentStatus::Waiting) => "Waiting on you",
+        _ => "",
+    };
+    let t = target.clone();
+    SidebarRow::new(a.name.clone())
+        .height(if member { 28.0 } else { 36.0 })
         .avatar(avatar(a, k, if member { 14.0 } else { 18.0 }))
         .depth(u8::from(member))
         .selected(selected)
-        .trailing(controls(s, a, &target, member, k, layer))
+        .trailing(controls(s, a, &target, member, status, k, layer))
         .on_select({
             let t = target.clone();
             move |s: &mut App, _| s.select_agent(t.clone())
-        });
-    match a.family_status() {
-        AgentStatus::Running => r = r.status(RowStatus::Busy),
-        AgentStatus::Waiting => r = r.status(RowStatus::Attention),
-        // Between turns, but a process it started is still going.
-        AgentStatus::Idle if s.background_running(a) > 0 => r = r.status(RowStatus::Busy),
-        AgentStatus::Idle => {}
-    }
-    let t = target.clone();
-    r.build(k)
+        })
+        .build(k)
+        .description(said)
         .key(format!("agent-{}", a.id))
         .on_secondary_press(move |s: &mut App, p, _| {
             s.roster.open_menu(t.clone(), Some((p.x, p.y)))
         })
 }
 
-/// Team count and fold button (agents with a team), and the ⋯ menu.
-fn controls(s: &App, a: &Agent, target: &Target, member: bool, k: &Kit, layer: &mut Vec<El>) -> El {
+/// What the row's status slot shows: working (its team counts, and so does a process it started
+/// that is still going between turns) or waiting on you. `None` when there is nothing to say.
+fn row_status(s: &App, a: &Agent) -> Option<AgentStatus> {
+    match a.family_status() {
+        AgentStatus::Idle if s.background_running(a) > 0 => Some(AgentStatus::Running),
+        AgentStatus::Idle => None,
+        st => Some(st),
+    }
+}
+
+/// The row's trailing column, one quiet mark per slot at rest and its control under the pointer:
+/// the team's size turns into the fold button, and the status (spinner or dot) into the ⋯ menu.
+/// Both slots have a fixed width, so marks line up down the list whatever each row carries.
+fn controls(
+    s: &App,
+    a: &Agent,
+    target: &Target,
+    member: bool,
+    status: Option<AgentStatus>,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
     let c = &k.c;
+    // A mark at rest that gives way to a control under the pointer, in one 24 point slot.
+    let slot = |key: String, mark: Option<El>, control: El, pinned: bool| {
+        let mut sl = row().key(key).size(SLOT, SLOT).center();
+        if let Some(m) = mark {
+            sl = sl.child(
+                row()
+                    .size(SLOT, SLOT)
+                    .center()
+                    .a11y_hidden()
+                    .child(m)
+                    .group_opacity(if pinned { 0.0 } else { 1.0 }, 0.0),
+            );
+        }
+        sl.child(
+            row()
+                .absolute(0.0, 0.0)
+                .child(control)
+                .group_opacity(if pinned { 1.0 } else { 0.0 }, 1.0),
+        )
+    };
     let mut r = row().gap(2.0).center_y();
     if !member && !a.subagents.is_empty() {
         let open = s.roster.team_open(&a.id);
         let id = a.id.clone();
-        r = r
-            .child(
-                text(a.subagents.len().to_string())
-                    .font(k.ty.small)
-                    .color(c.text_faint),
-            )
-            .child(
-                IconButton::new(if open {
-                    &glyphs::CHEVRON_DOWN
-                } else {
-                    &glyphs::CARET_RIGHT
-                })
-                .variant(IconButtonVariant::GhostMuted)
-                .label(if open {
-                    "Hide team members"
-                } else {
-                    "Show team members"
-                })
-                .on_press(move |s: &mut App| s.toggle_team(&id))
-                .build(k)
-                .key(format!("team-{}", a.id)),
-            );
+        let fold = IconButton::new(if open {
+            &glyphs::CHEVRON_DOWN
+        } else {
+            &glyphs::CARET_RIGHT
+        })
+        .variant(IconButtonVariant::GhostMuted)
+        .label(if open {
+            "Hide team members"
+        } else {
+            "Show team members"
+        })
+        .on_press(move |s: &mut App| s.toggle_team(&id))
+        .build(k);
+        let count = text(a.subagents.len().to_string())
+            .font(k.ty.small)
+            .color(c.text_faint);
+        r = r.child(slot(format!("team-{}", a.id), Some(count), fold, false));
     }
+    let mark = status.map(|st| match st {
+        AgentStatus::Running => Spinner::new().size(12.0).color(c.icon_muted).build(k),
+        _ => el().size(7.0, 7.0).radius(3.5).fill(c.warning.icon),
+    });
     let here = s
         .roster
         .menu_open_for(target)
@@ -162,8 +220,17 @@ fn controls(s: &App, a: &Agent, target: &Target, member: bool, k: &Kit, layer: &
         target,
         a,
     );
-    r.child(menu.build(k, layer))
+    // While its menu is open the ⋯ stays put, so the menu hangs from something visible.
+    r.child(slot(
+        format!("actions-{}", a.id),
+        mark,
+        menu.build(k, layer),
+        here,
+    ))
 }
+
+/// One trailing slot: the size of a regular icon button.
+const SLOT: f32 = 24.0;
 
 /// The row's commands. Unavailable ones are left out, not dimmed; the destructive one is last.
 fn entries(menu: Menu, target: &Target, a: &Agent) -> Menu {

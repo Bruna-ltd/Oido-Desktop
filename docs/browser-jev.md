@@ -35,9 +35,10 @@ Non-functional:
 
 - Stop ends the drive between steps. Core can't do this (its drive only checks its 3-minute
   deadline).
-- One Jev request per step (plus one for field matching on a page with new boxes), each with an
-  8-second timeout (core uses 4 s, but it asks from a server, not a home connection). The whole
-  drive is capped at 3 minutes.
+- One Jev request per step, the per-box value checks included (plus one more only when Jev's
+  pick puts a value in a box its own check rejects). Each has an 8-second timeout (core uses 4 s,
+  but it asks from a server, not a home connection), over one shared HTTP client so steps reuse
+  the connection. The whole drive is capped at 3 minutes.
 - No new dependencies. TypeSafe's request code is shared with `src/typesafe.rs`.
 - Tests use a fake browser and fake decisions. One ignored end-to-end test runs the real Connector
   with a real TypeSafe key.
@@ -61,7 +62,7 @@ Modules:
 
 | Where | What |
 |---|---|
-| `src/connector/jev.rs` | Tool spec and description, the page's action list (`JevActions`), field matching, the drive loop and its result text. The drive is generic over a small `Browse` trait (look, act) and a decide function, so tests use fakes. |
+| `src/connector/jev.rs` | Tool spec and description, the page's action list, the operation and target questions, the per-box value checks, the drive loop and its result text. The drive is generic over a small `Browse` trait (look, act) and a decide function, so tests use fakes. |
 | `src/connector/commit.rs` | Port of core's `judge`: whether an action commits, and why. Rules: a click whose label matches the consequential-word regex (counter icons excepted, unknown or unlabelled targets held), any `submit`, Enter outside a search box, `drag`, accepting a dialog. |
 | `src/connector/mod.rs` | `Connector::look(chat)`, which returns the parsed `render::Page` with its rendered text and remembers its refs. `act` is split into `send` (dispatch, lost-result guard) and `seen` (take in a read), which `look` shares. Jev acts with `read: false` and then looks once itself. The chat's memory also counts look-only Jev calls in a row, for the STOP warning. |
 | `src/typesafe.rs` | `pub fn systemone(base, key, &Value, images) -> Result<Value, String>`, taken out of `ask`, so the drive and the four tools share one HTTP path and one set of error words. |
@@ -80,6 +81,19 @@ scroll, 0.8 commit), 120 options per question, 12 history lines, 8 fields, 15 bo
 stale re-reads. Rejected: letting the model drive Jev step by step (that is the `browser` tool),
 and a local model (no calibrated choice model is installed, and TypeSafe is what the person
 connected).
+
+**ADR-J7: operation and target heads in one request** (2026-11-24, from browser-use's
+jev-ultrafast). The step's question is split: `next` picks an operation (`click`, `type`,
+`choose`, each standalone action such as a scroll, Back, Escape, Enter or a dialog answer, or
+DONE, BLOCKED, WAIT), and `click`, `type` and `choose` each pick a target among their own actions,
+asked as if that operation were next. One request carries them all, plus the box questions not yet
+answered this call; only the chosen operation's target is used. A target outside its operation's
+list is a `decision_error`. A grouped pick counts as sure as the lower of its two confidences,
+against the same floors. Why: one flat list of up to 120 options spread the probability thin
+(calendar days at 0.50–0.53 under the 0.55 floor), and field matching cost a second round trip on
+every form page. Not taken from jev-ultrafast: its LLM-written text (Jev types only `fields`, which
+the person saw on the card, ADR-J2) and its lack of approvals. The floors were tuned on the flat
+list and need checking on live runs.
 
 **ADR-J2: approvals: one card per call, a second for each step that commits.** Desktop's one
 browser setting decides both, through the existing `Approvals::check(Kind::Act, outside)`:
@@ -144,7 +158,10 @@ page as last read). Not used: `held` and `not_approved` (ADR-J2 and ADR-J4 leave
 
 - TypeSafe errors (key refused, HTTP error, unknown choice, confidence outside 0 to 1):
   `decision_error`, with the Providers-page hint for a refused key. Nothing is guessed.
-- A field-matching request fails: its check is skipped and the step goes on unfiltered, as in core.
+- A box question goes unanswered: that box keeps every value, as in core. The box questions ride
+  in the same request as the next move, so a failed request is a `decision_error`, not a skipped
+  check.
+- TypeSafe busy (HTTP 429, 503, 529): asked again after 0.5 s, then 1 s, then the error stands.
 - Connector not connected, or dropped mid-action: `action_error` with the Connector's own words
   (install link, or "may have been applied, read first"). The lost-result guard then refuses a
   blind repeat.
@@ -170,13 +187,20 @@ page as last read). Not used: `held` and `not_approved` (ADR-J2 and ADR-J4 leave
   (LCA)", which matched nothing), and to start from a search address that carries the query when
   the site has one (Google Flights' `?q=Flights from X to Y on DATE through DATE`), which skips the
   form.
-- A page still loading: Jev's WAIT pauses 1.5 s, up to 6 times (about 9 s) before
+- A page still loading: Jev's WAIT pauses 0.4 s and looks again, for up to 9 s in a row before
   `loading_timeout`. Core's 3 × 0.75 s gave up on Google Flights while its results loaded, after
-  the search had run.
+  the search had run. The short pause (was 1.5 s) acts sooner once the page is ready, at the cost
+  of more questions while it loads.
 - Unsure: a `low_confidence` result names the ref of Jev's best guess, and says to take it with
   `browser` when the agent has it, and otherwise not to resend the same call on an unchanged page.
   Live, a model with only `browser_jev` resent it five times.
 - No effect twice in a row ("nothing changed on the page"): `no_progress`.
+- Back and forth (A, B, A, then B again): `no_progress` before the fourth. Live on a Google Forms
+  grid row, which takes one answer, Jev swapped between two answers fifteen times for a goal that
+  asked for both. When the swap is between answers, the result says the control holds one answer.
+  A step repeated on its own (Next, Next…) is not counted.
+- "Clear", "Reset" and "Discard" count as committing (ADR-J3's word list): live, Jev cleared a
+  Google Forms row the goal said to keep.
 - The browser leaves the starting host (compared without `www.`): `left_site`.
 - Stop: the drive checks the cancel flag before each step and after each request, and ends
   `stopped`. An action already sent to the browser finishes.

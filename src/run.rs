@@ -249,6 +249,24 @@ impl App {
             .sum()
     }
 
+    /// The commands agent `a` has running in the background, in all its chats.
+    pub fn background_commands(&self, a: &crate::agents::Agent) -> Vec<String> {
+        a.sessions
+            .iter()
+            .flat_map(|s| self.processes.running_commands(&s.id))
+            .collect()
+    }
+
+    /// Ends every background process agent `a` has, in all its chats.
+    pub fn stop_background(&mut self, agent: &str) {
+        let Some(a) = self.roster.list.iter().find(|a| a.id == agent) else {
+            return;
+        };
+        for s in &a.sessions {
+            self.processes.stop_chat(&s.id);
+        }
+    }
+
     /// Seconds the open chat's reply has been in progress.
     pub fn writing_secs(&self) -> Option<u64> {
         let id = &self.current()?.chat().id;
@@ -453,15 +471,16 @@ impl App {
         let carries_on = (resumed || !asked && trailing.iter().all(|t| t.role == Role::Tool))
             && self.traces.contains_key(&sid);
         let (brief, skills) = self.brief_of(agent);
-        let brief = crate::delegate::lead_brief(&brief);
+        let brief = crate::delegate::lead_brief(&brief, &agent.subagents);
         let mut tools = crate::delegate::tools_for(
             agent,
             &skills,
             self.typesafe_connected(),
             &crate::mcp::specs(&self.mcp.servers),
         );
-        // A list-and-judge task reads through a script, not a call at a time.
-        let brief = if self.bulk.contains(&sid) {
+        // A list-and-judge task reads through a script, not a call at a time; a lead with a team
+        // hands it on instead.
+        let brief = if self.bulk.contains(&sid) && agent.subagents.is_empty() {
             let (kept, hidden) = crate::delegate::without_readers(tools);
             tools = kept;
             crate::delegate::bulk_brief(&brief, &hidden, self.typesafe_connected())
@@ -484,7 +503,11 @@ impl App {
             .providers
             .model_info(&model)
             .is_none_or(|i| crate::models::can_think(&i.caps));
-        let context = crate::context::now_text(&self.workdir_of(&sid));
+        let mut context = crate::context::now_text(&self.workdir_of(&sid));
+        if let Some(line) = self.channel_context(&sid) {
+            context.push('\n');
+            context.push_str(&line);
+        }
         let mut request = Request {
             model: model.id.clone(),
             system,
@@ -953,8 +976,21 @@ impl App {
                 live.thought = Some(live.began.elapsed());
             }
         }
-        // Found before the chat is borrowed: whether a name is an MCP server's tool depends on the app.
-        let known_calls: Vec<bool> = calls.iter().map(|c| self.tool_known(&c.name)).collect();
+        // Found before the chat is borrowed. Only a tool this call offered counts: a name copied
+        // from earlier in the chat, or one another agent has, is refused like a made-up one. A
+        // TypeSafe tool while TypeSafe is off goes on to be refused saying so, without running.
+        let offered = self.live.get(sid).and_then(|l| l.request.as_ref());
+        let typesafe_off = !self.typesafe_connected();
+        let known_calls: Vec<bool> = calls
+            .iter()
+            .map(|c| match offered {
+                Some(request) => {
+                    request.tools.iter().any(|t| t.name == c.name)
+                        || typesafe_off && crate::tools::needs_typesafe(&c.name)
+                }
+                None => self.tool_known(&c.name),
+            })
+            .collect();
         if let Some(Message::Assistant {
             text: body,
             thinking: thought,
@@ -1158,6 +1194,22 @@ impl App {
         self.run_setup_calls(sid);
         self.start_delegations(sid);
         self.start_next_command(sid);
+        // Calls answered at once (a tool the model made up) have nothing that will finish and
+        // carry the run on, so a reply whose calls all came back that way carries on here.
+        let answered = self
+            .roster
+            .owner_of(sid)
+            .and_then(|a| a.sessions.iter().find(|s| s.id == sid))
+            .is_some_and(|chat| {
+                matches!(
+                    chat.messages.last(),
+                    Some(Message::Assistant { tools, .. })
+                        if !tools.is_empty() && tools.iter().all(|t| t.output.is_some())
+                )
+            });
+        if answered {
+            self.begin_in(sid);
+        }
     }
 
     /// Says in a desktop notification that chat `sid`'s turn is over, unless the window is in
@@ -2602,9 +2654,12 @@ mod tests {
         app.composer.edit = TextEdit::new("and more");
         app.send();
         assert_eq!(
-            app.queued_here().map(|p| p.text.as_str()),
-            Some("another\n\nand more"),
-            "a second message joins the one waiting"
+            app.queued_here()
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            ["another", "and more"],
+            "a second message waits beside the first"
         );
 
         app.settle(&sid, "r", Ok(()));
@@ -2714,7 +2769,7 @@ data: [DONE]
         app.composer.edit = TextEdit::new("anything");
         app.send();
         assert_eq!(
-            app.queued_here().map(|p| p.text.as_str()),
+            app.queued_here().first().map(|p| p.text.as_str()),
             Some("anything"),
             "a message written meanwhile waits, and is not sent before the question is answered"
         );
@@ -3054,6 +3109,57 @@ data: [DONE]
     }
 
     #[test]
+    fn a_reply_that_only_calls_made_up_tools_carries_on_with_the_error() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    "text/event-stream",
+                    call_stream("ls -la /tmp", serde_json::json!({})),
+                ),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        app.composer.edit = TextEdit::new("look");
+        app.send();
+        let _ = seen.recv().unwrap();
+        let second = seen.recv().unwrap();
+        assert!(
+            second.contains("there is no tool called ls -la /tmp"),
+            "{second}"
+        );
+        assert!(matches!(last(&app), Message::Assistant { text, .. } if text == "Hello!"));
+    }
+
+    #[test]
+    fn a_tool_the_app_has_but_this_agent_was_not_offered_is_refused() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    "text/event-stream",
+                    call_stream(crate::connector::NAME, serde_json::json!({})),
+                ),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        assert!(app.tool_known(crate::connector::NAME), "the app has it");
+        app.roster.current_mut().unwrap().tools = vec![crate::tools::SHELL.into()];
+        app.composer.edit = TextEdit::new("open the page");
+        app.send();
+        let _ = seen.recv().unwrap();
+        let second = seen.recv().unwrap();
+        let refusal = format!("there is no tool called {}", crate::connector::NAME);
+        assert!(second.contains(&refusal), "{second}");
+        assert!(matches!(last(&app), Message::Assistant { text, .. } if text == "Hello!"));
+    }
+
+    #[test]
     fn a_command_still_waiting_when_the_app_closed_is_marked_not_run_and_never_started() {
         let db = TempDb::new();
         let mut app = db.open_with_samples();
@@ -3322,6 +3428,59 @@ data: [DONE]
     }
 
     #[test]
+    fn a_team_member_is_offered_its_own_connected_tools_and_its_call_runs() {
+        let script =
+            std::env::temp_dir().join(format!("oido-mcp-test-{}.sh", uuid::Uuid::new_v4()));
+        std::fs::write(&script, crate::mcp::client::tests::fake_script()).unwrap();
+        let tool = "mcp__fake_server__echo";
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    "text/event-stream",
+                    delegate_stream("checker", "echo ping"),
+                ),
+                (
+                    200,
+                    "text/event-stream",
+                    call_stream(tool, serde_json::json!({"text": "ping"})),
+                ),
+                (200, "text/event-stream", STREAM),
+                (200, "text/event-stream", STREAM),
+            ],
+        );
+        app.mcp_set_kind(crate::mcp::Kind::Local);
+        app.mcp.form.name = TextEdit::new("Fake server");
+        app.mcp.form.command = TextEdit::new("sh");
+        app.mcp.form.args = TextEdit::new(script.display().to_string());
+        app.mcp_add();
+        app.mcp_add();
+        assert_eq!(app.mcp.servers.len(), 1);
+        with_team(&mut app);
+        let team = &mut app.roster.current_mut().unwrap().subagents;
+        team.iter_mut().find(|m| m.name == "checker").unwrap().tools = vec![tool.into()];
+        app.composer.edit = TextEdit::new("echo it");
+        app.send();
+        let lead = seen.recv().unwrap();
+        assert!(
+            !lead.contains(&format!("\"name\":\"{tool}\"")),
+            "the lead does not have it"
+        );
+        let member = seen.recv().unwrap();
+        assert!(
+            member.contains(&format!("\"name\":\"{tool}\"")),
+            "the member is offered its tool: {member}"
+        );
+        let after = seen.recv().unwrap();
+        assert!(after.contains("pong"), "the member's call ran: {after}");
+        let _ = seen.recv().unwrap();
+        assert!(!app.busy() && app.delegating.is_empty());
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[test]
     fn a_lead_hands_a_task_to_a_team_member_that_starts_fresh_and_its_answer_comes_back() {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(
@@ -3343,6 +3502,12 @@ data: [DONE]
         assert!(
             lead.contains("\"name\":\"delegate\"") && lead.contains("checks arithmetic."),
             "the lead is offered the team: {lead}"
+        );
+        assert!(
+            lead.contains("you lead a team, and the team does the work.")
+                && lead.contains("your team:\\n")
+                && lead.contains("\\n- checker: checks arithmetic."),
+            "the lead is told to hand every task on: {lead}"
         );
         let member = seen.recv().unwrap();
         assert!(

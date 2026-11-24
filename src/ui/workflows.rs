@@ -41,7 +41,7 @@ fn examples_button(k: &Kit) -> El {
 fn notice(s: &App, k: &Kit) -> Option<El> {
     s.wf_notice.as_ref().map(|why| {
         text(why.clone())
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(k.c.text_muted)
             .max_w(460.0)
             .wrap()
@@ -58,7 +58,7 @@ fn empty(s: &App, k: &Kit) -> El {
         .child(text("No workflows yet").font(k.ty.body_medium).color(k.c.text_base))
         .child(
             text("Have an agent do something with its tools, then press Save as workflow above the chat. It becomes steps you can run again. Or add a few examples to try the builder on.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .max_w(460.0)
                 .wrap(),
@@ -345,7 +345,7 @@ pub(super) fn step_log(
     if let Some(failure) = failure {
         out = out.child(
             text(failure)
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.warning.icon)
                 .wrap()
                 .selectable(true),
@@ -358,7 +358,7 @@ pub(super) fn step_log(
         let indent = st.depth() as f32 * 16.0;
         out = out.child(
             text(format!("{}. {}{note}", i + 1, st.what))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_base)
                 .wrap()
                 .pl(indent),

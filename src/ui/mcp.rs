@@ -66,11 +66,7 @@ pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
                 .gap(10.0)
                 .child(
                     text("MCP servers")
-                        .font(rune::TextStyle {
-                            size: 28.0,
-                            line_height: 34.0,
-                            ..k.ty.body_medium
-                        })
+                        .font(crate::theme::ty::title(k))
                         .color(c.text_base),
                 )
                 .child(
@@ -85,7 +81,7 @@ pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
         page = page.child(
             text(note.clone())
                 .key("mcp-notice")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_base)
                 .wrap(),
         );
@@ -111,7 +107,7 @@ pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
         page = page.child(
             text("No servers yet. Add one above, or start from a preset below.")
                 .key("mcp-empty")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_faint)
                 .wrap(),
         );
@@ -119,7 +115,7 @@ pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
         page = page.child(
             text("Nothing matches. Clear the search, or add a server by its address above.")
                 .key("mcp-none")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_faint)
                 .wrap(),
         );
@@ -305,7 +301,7 @@ fn tools_list(server: &Server, k: &Kit) -> El {
     if server.tools.is_empty() {
         list = list.child(
             text("No tools yet. They appear once the server has been reached.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_faint)
                 .wrap(),
         );
@@ -573,7 +569,7 @@ fn form(s: &App, k: &Kit) -> El {
                 .border(1.0, c.border_muted)
                 .child(
                     text("Adding this runs a program on your computer, with your permissions, now and whenever an agent uses it:")
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.text_muted)
                         .wrap(),
                 )
@@ -582,7 +578,7 @@ fn form(s: &App, k: &Kit) -> El {
     }
     box_.child(buttons).child(
         text("Keys, variables and sign-ins are saved encrypted on this computer. The key that unlocks them stays in your system keyring.")
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(c.text_faint)
             .wrap(),
     )

@@ -16,9 +16,10 @@ use super::render::Page;
 /// A control caption that commits something. Word-bounded, so "Posts" and "Following feed" (tabs)
 /// don't match while "Post", "Follow" and "Following" (the unfollow toggle) do. Not "change":
 /// "Change language" or "change number of passengers" open a picker, and the click that commits in
-/// it is its own Save or Confirm.
+/// it is its own Save or Confirm. "clear", "reset" and "discard" throw away answers already given:
+/// live, Jev cleared a Google Forms row the goal said to keep.
 static CONSEQUENTIAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(follow|following|unfollow|send|post|tweet|reply|repost|retweet|pay|buy|purchase|order|checkout|delete|remove|submit|subscribe|unsubscribe|confirm|publish|book|donate|transfer|apply|approve|save|update|place|complete|finish|sign ?up|register|create|invite|connect|add to (cart|basket))\b")
+    Regex::new(r"(?i)\b(follow|following|unfollow|send|post|tweet|reply|repost|retweet|pay|buy|purchase|order|checkout|delete|remove|clear|reset|discard|submit|subscribe|unsubscribe|confirm|publish|book|donate|transfer|apply|approve|save|update|place|complete|finish|sign ?up|register|create|invite|connect|add to (cart|basket))\b")
         .unwrap_or_else(|e| panic!("bad consequential-label pattern: {e}"))
 });
 
@@ -101,7 +102,9 @@ mod tests {
                 {"tag": "button", "label": "92 Replies. Reply"},
                 {"tag": "button", "label": "1.2K Reposts. Repost"},
                 {"tag": "button", "label": "Reply"},
-                {"tag": "button", "label": "Change number of passengers"}
+                {"tag": "button", "label": "Change number of passengers"},
+                {"tag": "button", "label": "Clear selection"},
+                {"tag": "button", "label": "Clearance sale"}
             ]
         }))
         .unwrap()
@@ -136,6 +139,8 @@ mod tests {
             (json!({"action": "click", "ref": "c9"}), false),
             (json!({"action": "click", "ref": "c10"}), true),
             (json!({"action": "click", "ref": "c11"}), false),
+            (json!({"action": "click", "ref": "c12"}), true),
+            (json!({"action": "click", "ref": "c13"}), false),
             (
                 json!({"action": "click", "ref": "c3", "button": "right"}),
                 false,

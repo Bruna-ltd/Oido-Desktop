@@ -153,7 +153,7 @@ pub fn delegation(s: &App, t: &ToolCall, writing: bool, j: usize, k: &Kit) -> El
         if running && !d.text.is_empty() {
             card = card.child(
                 text(tail(&d.text))
-                    .font(k.ty.small)
+                    .font(k.ty.caption())
                     .color(c.text_muted)
                     .wrap(),
             );
@@ -162,7 +162,7 @@ pub fn delegation(s: &App, t: &ToolCall, writing: bool, j: usize, k: &Kit) -> El
     if let Some(out) = &t.output {
         let (shown, cut) = crate::runs::clip(out, 600);
         let shown = if cut { format!("{shown}…") } else { shown };
-        card = card.child(text(shown).font(k.ty.small).color(c.text_faint).wrap());
+        card = card.child(text(shown).font(k.ty.caption()).color(c.text_faint).wrap());
     }
     card
 }

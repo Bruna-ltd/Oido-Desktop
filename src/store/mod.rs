@@ -178,6 +178,13 @@ impl Store {
         Store::init(Connection::open(path)?, vault)
     }
 
+    /// The folder the database file is in; `None` for one in memory. What else Oido keeps beside
+    /// the database (a WhatsApp session) goes here, so a copy elsewhere keeps its own.
+    pub fn folder(&self) -> Option<PathBuf> {
+        let path = self.conn.path().filter(|p| !p.is_empty())?;
+        Path::new(path).parent().map(Path::to_path_buf)
+    }
+
     pub fn in_memory(vault: Vault) -> Result<Store> {
         Store::init(Connection::open_in_memory()?, vault)
     }

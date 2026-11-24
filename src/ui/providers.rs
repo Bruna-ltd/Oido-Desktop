@@ -2,7 +2,7 @@
 //! One connect form is open at a time, so closed rows stay a single quiet line.
 
 use rune::color::hex;
-use rune::{Color, El, ScrollSpec, TextStyle, col, el, row, text};
+use rune::{Color, El, ScrollSpec, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Divider, Kit, TextInput};
 
 use super::model_picker::ModelPicker;
@@ -15,11 +15,7 @@ const PAGE: f32 = 768.0;
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let p = &s.providers;
     let c = &k.c;
-    let title = TextStyle {
-        size: 28.0,
-        line_height: 34.0,
-        ..k.ty.body_medium
-    };
+    let title = crate::theme::ty::title(k);
     let status = match p.list.iter().filter(|x| x.connected).count() {
         0 => "None connected yet".to_owned(),
         1 => "1 connected".to_owned(),
@@ -262,7 +258,7 @@ pub(super) fn names(label: &str, detail: String, error: Option<&String>, k: &Kit
     if let Some(why) = error {
         col_ = col_.child(
             text(why.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.danger.fg)
                 .wrap()
                 .key("row-error"),
@@ -497,7 +493,7 @@ fn chatgpt_panel(s: &App, id: &str, waiting: Option<&str>, k: &Kit) -> El {
                 text(
                     "Run Codex models on your ChatGPT Plus, Pro or Business plan, with no API key.",
                 )
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .wrap(),
             )
@@ -526,7 +522,7 @@ fn chatgpt_panel(s: &App, id: &str, waiting: Option<&str>, k: &Kit) -> El {
                 .center_y()
                 .child(
                     text("Approve Oido in your browser. This continues by itself once you have.")
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.text_muted)
                         .wrap()
                         .grow(1.0),
@@ -582,7 +578,7 @@ fn subscription_panel(s: &App, id: &str, url: &str, k: &Kit) -> El {
                 .center_y()
                 .child(
                     text("Approve Oido in your browser, then paste the code Anthropic shows.")
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.text_muted)
                         .wrap(),
                 )
@@ -611,7 +607,7 @@ fn form_box(s: &App, k: &Kit, content: El) -> El {
     if let Some(why) = &s.providers.error {
         f = f.child(
             text(why.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.danger.fg)
                 .wrap()
                 .key("form-error"),
@@ -619,7 +615,7 @@ fn form_box(s: &App, k: &Kit, content: El) -> El {
     }
     f.child(
         text("Saved encrypted on this computer. The key that unlocks it stays in your system keyring.")
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(k.c.text_faint)
             .wrap(),
     )

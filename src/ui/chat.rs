@@ -503,7 +503,7 @@ fn web_picture(url: &str, alt: &str, k: &Kit) -> El {
                         .color(k.c.text_base)
                         .truncate(),
                 )
-                .child(text(note).font(k.ty.small).color(ink).wrap()),
+                .child(text(note).font(k.ty.caption()).color(ink).wrap()),
         )
         .child(button)
 }
@@ -683,7 +683,7 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
 fn ended(note: &str, ink: rune::Color, retry: bool, k: &Kit) -> El {
     let mut r = row().w_full().center_y().gap(8.0).child(
         text(note.to_owned())
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(ink)
             .wrap()
             .selectable(true),
@@ -719,7 +719,7 @@ fn question(s: &App, t: &ToolCall, last: bool, j: usize, k: &Kit) -> El {
         return card(
             k.c.success.icon,
             text(format!("You answered: {answer}"))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap()
                 .selectable(true),
@@ -741,10 +741,7 @@ fn question(s: &App, t: &ToolCall, last: bool, j: usize, k: &Kit) -> El {
             ),
         );
     }
-    let style = rune::TextStyle {
-        line_height: 22.0,
-        ..k.ty.body
-    };
+    let style = crate::theme::ty::field(k);
     body = body
         .child(
             col()
@@ -885,7 +882,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
         if !d.goal.is_empty() {
             body = body.child(
                 text(d.goal.clone())
-                    .font(k.ty.small)
+                    .font(k.ty.caption())
                     .color(c.text_muted)
                     .wrap(),
             );
@@ -896,7 +893,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
                 i + 1,
                 crate::workflow::definition::describe(st)
             ))
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(c.text_base)
             .wrap()
         }));
@@ -916,7 +913,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
                 .collect();
             body = body.child(
                 text(format!("Takes: {}", inputs.join(", ")))
-                    .font(k.ty.small)
+                    .font(k.ty.caption())
                     .color(c.text_faint)
                     .wrap(),
             );
@@ -924,7 +921,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
         if !d.definition.success.is_empty() {
             body = body.child(
                 text(format!("Done when: {}", d.definition.success))
-                    .font(k.ty.small)
+                    .font(k.ty.caption())
                     .color(c.text_faint)
                     .wrap(),
             );
@@ -937,7 +934,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
         Some(Teach::Failed(why)) => {
             body = body.child(
                 text(why.clone())
-                    .font(k.ty.small)
+                    .font(k.ty.caption())
                     .color(k.c.warning.icon)
                     .wrap()
                     .selectable(true),
@@ -947,10 +944,7 @@ fn draft(s: &App, sid: &str, k: &Kit) -> Option<El> {
     }
     let working = matches!(state, Some(Teach::Working(_)));
     if draft.is_some() {
-        let style = rune::TextStyle {
-            line_height: 22.0,
-            ..k.ty.body
-        };
+        let style = crate::theme::ty::field(k);
         body = body
             .child(
                 col()
@@ -1048,7 +1042,7 @@ fn schedule_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
         .filter(|p| p.session_id == sid)
         .map(|p| {
             let x = &p.schedule;
-            let line = |t: String| text(t).font(k.ty.small).color(c.text_base).wrap();
+            let line = |t: String| text(t).font(k.ty.caption()).color(c.text_base).wrap();
             let mut body = col()
                 .w_full()
                 .gap(8.0)
@@ -1058,7 +1052,7 @@ fn schedule_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
             if !next.is_empty() {
                 body = body.child(
                     text(format!("Next: {}", next.join(" · ")))
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.text_faint)
                         .wrap(),
                 );
@@ -1071,7 +1065,7 @@ fn schedule_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
             {
                 body = body.child(
                     text(why.clone())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.warning.icon)
                         .wrap(),
                 );
@@ -1127,7 +1121,7 @@ fn schedule_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
 fn mcp_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
     use crate::mcp::{Proposal, Server, Transport};
     let c = &k.c;
-    let line = |t: String| text(t).font(k.ty.small).color(c.text_base).wrap();
+    let line = |t: String| text(t).font(k.ty.caption()).color(c.text_base).wrap();
     let target = |x: &Server| {
         match &x.transport {
         Transport::Http { .. } => line(format!("Address: {}", x.target())),
@@ -1192,7 +1186,7 @@ fn mcp_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
             if let Some((_, why)) = s.mcp.draft_notice.as_ref().filter(|(call, _)| *call == id) {
                 body = body.child(
                     text(why.clone())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.warning.icon)
                         .wrap(),
                 );
@@ -1247,7 +1241,7 @@ const DRAFT_BRIEF: usize = 400;
 fn agent_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
     use crate::agent_tool::Proposal;
     let c = &k.c;
-    let line = |t: String| text(t).font(k.ty.small).color(c.text_base).wrap();
+    let line = |t: String| text(t).font(k.ty.caption()).color(c.text_base).wrap();
     // One line per part of the agent; `only` limits it to the parts that change.
     let parts = |a: &Agent, only: Option<&[&str]>| {
         let wanted = |p: &str| only.is_none_or(|o| o.contains(&p));
@@ -1297,7 +1291,7 @@ fn agent_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
                 } else {
                     brief
                 })
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
             );
@@ -1359,7 +1353,7 @@ fn agent_drafts(s: &App, sid: &str, k: &Kit) -> Vec<El> {
             {
                 body = body.child(
                     text(why.clone())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.warning.icon)
                         .wrap(),
                 );
@@ -1530,7 +1524,7 @@ fn tool(t: &ToolCall, writing: bool, j: usize, k: &Kit) -> El {
         // A file read can be long; the full text is in the run's record.
         let (shown, cut) = crate::runs::clip(out, 600);
         let shown = if cut { format!("{shown}…") } else { shown };
-        r = r.child(text(shown).font(k.ty.small).color(c.text_faint).wrap());
+        r = r.child(text(shown).font(k.ty.caption()).color(c.text_faint).wrap());
     }
     r
 }

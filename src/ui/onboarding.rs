@@ -1,7 +1,7 @@
 //! The first-run screens: pick a look, then connect a model. Once one is connected the chat opens on the Setup agent
 //! (see `crate::onboarding`).
 
-use rune::{El, ScrollSpec, TextStyle, col, text};
+use rune::{El, ScrollSpec, col, text};
 use rune_kit::{Button, ButtonVariant, Kit};
 
 use super::{providers, settings};
@@ -10,11 +10,7 @@ use crate::app::App;
 const PAGE: f32 = 768.0;
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    let title = TextStyle {
-        size: 28.0,
-        line_height: 34.0,
-        ..k.ty.body_medium
-    };
+    let title = crate::theme::ty::title(k);
     let (heading, lead) = if s.setup_look_done {
         (
             "Connect a model",
