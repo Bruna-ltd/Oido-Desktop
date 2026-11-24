@@ -4,6 +4,7 @@
 //! [`crate::tools::offered`]).
 
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -327,6 +328,20 @@ fn ask(
     answer(&body, (name == LOCATE).then(|| pictures[0].size))
 }
 
+/// One client for every request, so a Jev drive's steps reuse one connection instead of paying a
+/// TCP and TLS handshake each. Timeouts are set per request.
+static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into()
+});
+/// Answers that mean "busy, try again shortly": asked again up to [`RETRIES`] times, after
+/// [`RETRY_PAUSE`], then twice that.
+const BUSY: [u16; 3] = [429, 503, 529];
+const RETRIES: u32 = 2;
+const RETRY_PAUSE: Duration = Duration::from_millis(500);
+
 /// Posts one `/systemone` request and gives back the reply's body, or what went wrong in words for
 /// the agent. `images`: the request holds images, which TypeSafe takes only when told so. Blocks on
 /// the network, at most `timeout`.
@@ -338,27 +353,34 @@ pub fn systemone(
     timeout: Duration,
 ) -> Result<String, String> {
     let body = request.to_string();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .http_status_as_error(false)
-        .build()
-        .into();
-    let mut call = agent
-        .post(&format!("{base}/systemone"))
-        .header("Content-Type", "application/json")
-        .header("Authorization", &format!("Bearer {key}"));
-    if images {
-        // Images are off unless each request that has one says so.
-        call = call.header("TypeSafe-Danger-Zone-Images", "true");
-    }
-    let mut resp = call
-        .send(body.as_str())
-        .map_err(|_| "TypeSafe could not be reached.".to_owned())?;
-    let status = resp.status().as_u16();
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|_| "TypeSafe could not be reached.".to_owned())?;
+    let mut attempt = 0;
+    let (status, text) = loop {
+        let mut call = AGENT
+            .post(&format!("{base}/systemone"))
+            .config()
+            .timeout_global(Some(timeout))
+            .build()
+            .header("Content-Type", "application/json")
+            .header("Authorization", &format!("Bearer {key}"));
+        if images {
+            // Images are off unless each request that has one says so.
+            call = call.header("TypeSafe-Danger-Zone-Images", "true");
+        }
+        let mut resp = call
+            .send(body.as_str())
+            .map_err(|_| "TypeSafe could not be reached.".to_owned())?;
+        let status = resp.status().as_u16();
+        if BUSY.contains(&status) && attempt < RETRIES {
+            std::thread::sleep(RETRY_PAUSE * 2u32.pow(attempt));
+            attempt += 1;
+            continue;
+        }
+        let text = resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|_| "TypeSafe could not be reached.".to_owned())?;
+        break (status, text);
+    };
     match status {
         200..=299 => Ok(text),
         401 | 403 => Err("TypeSafe did not accept the key. The person can connect it again on the Providers page.".into()),
@@ -489,6 +511,19 @@ mod tests {
         assert!(seen.recv().unwrap().contains("list my mail"));
         let (base, _) = serve(vec![(500, "{}")]);
         assert!(probability(&format!("{base}/v1"), "k", "x", "q", TIMEOUT).is_err());
+    }
+
+    #[test]
+    fn a_busy_answer_is_asked_again_and_gives_up_after_two_retries() {
+        let ok = r#"{"answers":{"q":{"type":"noul","noul":0.4}}}"#;
+        let (base, seen) = serve(vec![(503, "{}"), (429, "{}"), (200, ok)]);
+        let p = probability(&format!("{base}/v1"), "k", "x", "q", TIMEOUT);
+        assert_eq!(p, Ok(0.4));
+        assert_eq!(seen.try_iter().count(), 3);
+
+        let (base, seen) = serve(vec![(529, "{}"), (529, "{}"), (529, "{}"), (200, ok)]);
+        assert!(probability(&format!("{base}/v1"), "k", "x", "q", TIMEOUT).is_err());
+        assert_eq!(seen.try_iter().count(), 3, "two retries, then the error");
     }
 
     #[test]
