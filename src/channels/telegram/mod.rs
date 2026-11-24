@@ -196,6 +196,7 @@ fn person(u: &User) -> Person {
         name: u.name(),
         first_name: u.first_name.clone(),
         handle: u.username.clone(),
+        owner: false,
     }
 }
 
@@ -227,6 +228,7 @@ fn heard(u: Update) -> Option<Heard> {
         thread: None,
     };
     let has_picture = m.picture_file().is_some();
+    let file_name = m.file_name();
     let text = m.text.or(m.caption).unwrap_or_default();
     if !has_picture && let Some(command) = text.trim().strip_prefix('/') {
         let (name, arg) = command
@@ -244,7 +246,7 @@ fn heard(u: Update) -> Option<Heard> {
         });
     }
     let picture = has_picture.then(|| Picture {
-        name: format!("telegram-photo-{}", m.message_id),
+        name: file_name,
         bytes: m
             .picture
             .unwrap_or_else(|| Err("Telegram did not hand it over".to_owned())),
@@ -314,6 +316,7 @@ mod tests {
                     name: "Ada".into(),
                     first_name: "Ada".into(),
                     handle: None,
+                    owner: false,
                 },
                 id: "cb".into(),
                 data: "agent:x".into(),
@@ -377,7 +380,7 @@ mod tests {
         assert!(
             api::download(&base, &token, "huge")
                 .unwrap_err()
-                .contains("bigger than 10 MB")
+                .contains("bigger than 20 MB")
         );
     }
 }

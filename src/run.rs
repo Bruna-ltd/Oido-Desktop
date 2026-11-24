@@ -484,7 +484,11 @@ impl App {
             .providers
             .model_info(&model)
             .is_none_or(|i| crate::models::can_think(&i.caps));
-        let context = crate::context::now_text(&self.workdir_of(&sid));
+        let mut context = crate::context::now_text(&self.workdir_of(&sid));
+        if let Some(line) = self.channel_context(&sid) {
+            context.push('\n');
+            context.push_str(&line);
+        }
         let mut request = Request {
             model: model.id.clone(),
             system,

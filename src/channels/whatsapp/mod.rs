@@ -5,13 +5,14 @@
 //! keeps its session (the keys its messages are encrypted with) in a file of its own, encrypted
 //! with a key sealed in the database like a bot token.
 //!
-//! Only private chats are heard. A stranger is not answered: only someone who sends the invite
+//! Only private chats are heard, and the number's own "Message yourself" chat: what the owner
+//! writes there from the phone is heard like anyone's, while what this device sent is not. A stranger is not answered: only someone who sends the invite
 //! on show (`pair <token>`, written for them by the link its QR code holds) is paired. Buttons go
 //! as a poll under the message, and a vote presses one.
 
 pub mod format;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,10 +36,16 @@ use crate::app::App;
 
 /// How often "typing…" is said again while a chat is busy (WhatsApp shows it for about 25 s).
 const TYPING_EVERY: Duration = Duration::from_secs(10);
-/// The biggest picture fetched from someone, in bytes.
-const MAX_PICTURE: u64 = 10 * 1024 * 1024;
+/// The biggest picture or document fetched from someone, in bytes.
+const MAX_INCOMING: u64 = 20 * 1024 * 1024;
+/// The biggest file an agent sends, in bytes: WhatsApp's limit for a document.
+pub const MAX_FILE: u64 = 100 * 1024 * 1024;
+/// The biggest picture or video sent to show in the chat; a bigger one goes as a document.
+const MAX_MEDIA: u64 = 16 * 1024 * 1024;
 /// The most options a WhatsApp poll holds.
 const MAX_OPTIONS: usize = 12;
+/// How many of the messages this device sent are remembered, so their echoes are not heard.
+const SENT_KEPT: usize = 256;
 /// What a poll standing in for buttons asks.
 const PICK: &str = "Choose one";
 
@@ -85,17 +92,13 @@ impl Key {
     }
 }
 
-/// The folder session files live in: the database's. `None` when the database is in memory.
-fn folder() -> Option<PathBuf> {
-    let db = crate::store::default_location().ok().flatten()?;
-    db.parent().map(Path::to_path_buf)
-}
-
 const PREFIX: &str = "whatsapp-";
 
-/// The session file kept with `key`.
-fn session_file(key: &Key) -> Option<PathBuf> {
-    Some(folder()?.join(format!("{PREFIX}{}.db", key.id())))
+/// The session file kept with `key` in `folder`: the folder of the database the app has open
+/// ([`crate::store::Store::folder`]), never the default one, so a test or a copy on another
+/// database never touches the real session.
+fn session_file(folder: &Path, key: &Key) -> PathBuf {
+    folder.join(format!("{PREFIX}{}.db", key.id()))
 }
 
 /// Removes the session file at `path`, with SQLite's files beside it.
@@ -109,19 +112,14 @@ fn remove_session(path: &Path) {
 
 /// Forgets the session kept with `key`. The phone still lists the device until it is removed
 /// there (WhatsApp → Linked devices).
-pub fn forget(key: &Key) {
-    if let Some(path) = session_file(key) {
-        remove_session(&path);
-    }
+pub fn forget(folder: &Path, key: &Key) {
+    remove_session(&session_file(folder, key));
 }
 
 /// Removes every session file but `keep`'s: those of links never finished, or not unlinked.
 /// Run before any link starts.
-pub fn sweep(keep: Option<&Key>) {
-    let Some(dir) = folder() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+pub fn sweep(folder: &Path, keep: Option<&Key>) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
         return;
     };
     let kept = keep.map(|k| format!("{PREFIX}{}.db", k.id()));
@@ -176,9 +174,25 @@ impl App {
 /// kept with `key`, hands what it hears to [`App::channel_heard`] and sends what the app hands
 /// over, tagged with `generation` so a link since replaced is ignored. It ends when the link is
 /// dropped.
-pub fn start(app: rune::AppHandle<App>, key: Key, allowlist: Allowlist, generation: u64) -> Link {
+pub fn start(
+    app: rune::AppHandle<App>,
+    key: Key,
+    folder: Option<PathBuf>,
+    allowlist: Allowlist,
+    generation: u64,
+) -> Link {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || run(&app, &key, &allowlist, rx, generation));
+    thread::spawn(move || {
+        let Some(path) = folder.map(|f| session_file(&f, &key)) else {
+            report(
+                &app,
+                generation,
+                Health::Stopped("Oido has no folder to keep the session in".into()),
+            );
+            return;
+        };
+        run(&app, &key, &path, &allowlist, rx, generation);
+    });
     Link::new(Arc::new(AtomicBool::new(false)), tx)
 }
 
@@ -189,6 +203,7 @@ fn report(app: &rune::AppHandle<App>, generation: u64, health: Health) {
 fn run(
     app: &rune::AppHandle<App>,
     key: &Key,
+    path: &Path,
     allowlist: &Allowlist,
     rx: Receiver<Out>,
     generation: u64,
@@ -217,7 +232,7 @@ fn run(
             }
         }
     });
-    runtime.block_on(session(app, key, allowlist, inbox, generation));
+    runtime.block_on(session(app, key, path, allowlist, inbox, generation));
 }
 
 /// Hands every event the client raises to the session, in order.
@@ -237,6 +252,31 @@ struct Poll {
     options: Vec<([u8; 32], String)>,
 }
 
+/// The ids of the messages this device sent lately. WhatsApp echoes them back as the owner's,
+/// and in the owner's own chat they would otherwise be heard as written to the agent.
+#[derive(Default)]
+struct Sent {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl Sent {
+    fn add(&mut self, id: String) {
+        if self.ids.insert(id.clone()) {
+            self.order.push_back(id);
+        }
+        while self.order.len() > SENT_KEPT {
+            if let Some(old) = self.order.pop_front() {
+                self.ids.remove(&old);
+            }
+        }
+    }
+
+    fn has(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+}
+
 /// How a session ends, for its file.
 #[derive(PartialEq)]
 enum End {
@@ -249,19 +289,16 @@ enum End {
 async fn session(
     app: &rune::AppHandle<App>,
     key: &Key,
+    path: &Path,
     allowlist: &Allowlist,
     inbox: async_channel::Receiver<Out>,
     generation: u64,
 ) {
-    let Some(path) = session_file(key) else {
-        report(
-            app,
-            generation,
-            Health::Stopped("Oido has no folder to keep the session in".into()),
-        );
-        return;
-    };
     let mut linked = path.exists();
+    log(&format!(
+        "starting with {} session",
+        if linked { "its saved" } else { "a new" }
+    ));
     let pragma = key.pragma();
     let config = SqliteStoreConfig::default().with_connection_init(move |conn| {
         conn.batch_execute(&pragma)?;
@@ -302,6 +339,7 @@ async fn session(
     let handle = bot.spawn();
     let client = handle.client();
     let mut polls: HashMap<String, Poll> = HashMap::new();
+    let mut sent = Sent::default();
     let mut typing = tokio::time::interval(TYPING_EVERY);
     let mut signed_in = false;
     let end = loop {
@@ -312,7 +350,10 @@ async fn session(
                     Event::PairingQrCode(qr) => {
                         report(app, generation, Health::Linking(qr.code.clone()));
                     }
-                    Event::PairSuccess(_) => linked = true,
+                    Event::PairSuccess(_) => {
+                        log("linked by its QR code");
+                        linked = true;
+                    }
                     Event::PairError(e) => {
                         report(app, generation, Health::Stopped(format!("linking failed: {}", e.error)));
                     }
@@ -321,6 +362,7 @@ async fn session(
                         break End::Gone;
                     }
                     Event::Connected(_) => {
+                        log("connected");
                         signed_in = true;
                         let name = client.pn().map_or_else(
                             || client.push_name(),
@@ -328,12 +370,31 @@ async fn session(
                         );
                         report(app, generation, Health::SignedIn(name));
                     }
-                    Event::Disconnected(_) if signed_in => {
-                        report(app, generation, Health::Retrying("the connection dropped".into()));
+                    Event::Disconnected(d) => {
+                        log(&format!("disconnected: {:?}", d.reason));
+                        if signed_in {
+                            report(app, generation, Health::Retrying("the connection dropped".into()));
+                        }
                     }
-                    Event::LoggedOut(_) => {
+                    Event::LoggedOut(out) => {
+                        log(&format!("logged out (on connect: {}): {:?}", out.on_connect, out.reason));
                         report(app, generation, Health::Stopped("it was unlinked on the phone".into()));
                         break End::Gone;
+                    }
+                    // Another client signed in with this session; it is not fought over.
+                    Event::StreamReplaced(_) => {
+                        log("another client took this session over");
+                        report(app, generation, Health::Stopped("another copy of Oido took this link over".into()));
+                        break End::Kept;
+                    }
+                    Event::ConnectFailure(f) => {
+                        log(&format!("could not connect: {:?} {:?}", f.reason, f.message));
+                    }
+                    Event::StreamError(e) => log(&format!("stream error {}", e.code)),
+                    Event::TemporaryBan(b) => {
+                        log(&format!("temporarily banned: {b:?}"));
+                        report(app, generation, Health::Stopped("WhatsApp banned this number for a while".into()));
+                        break End::Kept;
                     }
                     Event::ClientOutdated(_) => {
                         report(app, generation, Health::Stopped("WhatsApp turned this version of Oido away".into()));
@@ -342,7 +403,7 @@ async fn session(
                     Event::Messages(batch) => {
                         let mut heard = Vec::new();
                         for m in batch.messages.iter() {
-                            if let Some(h) = hear(&client, m, allowlist, &polls).await {
+                            if let Some(h) = hear(&client, m, allowlist, &polls, &sent).await {
                                 heard.push(h);
                             }
                         }
@@ -362,7 +423,7 @@ async fn session(
                 }
                 Ok(out) => {
                     let saying = matches!(out, Out::Say { .. });
-                    if let Err(why) = send(&client, out, &mut polls).await
+                    if let Err(why) = send(&client, out, &mut polls, &mut sent).await
                         && saying
                     {
                         app.update(move |s: &mut App, _| {
@@ -380,8 +441,18 @@ async fn session(
     };
     handle.shutdown().await;
     if end == End::Gone || !linked {
-        remove_session(&path);
+        log(if linked {
+            "session removed: it was unlinked"
+        } else {
+            "session removed: it was never linked"
+        });
+        remove_session(path);
     }
+}
+
+/// Notes how the link goes, for whoever runs Oido from a terminal.
+fn log(what: &str) {
+    eprintln!("oido: WhatsApp: {what}");
 }
 
 /// Who wrote in a private chat, named the same however WhatsApp addressed them: by their LID
@@ -398,17 +469,40 @@ fn writer(chat: &Jid, alt: Option<&Jid>) -> Option<Jid> {
     chat.is_pn().then_some(chat)
 }
 
+/// Whether a message the owner sent is one to hear: written in their own chat, and not by this
+/// device. What they write to others from the phone is theirs, not the agent's.
+fn owner_wrote_to_self(chat: &Jid, pn: Option<&Jid>, lid: Option<&Jid>, sent: bool) -> bool {
+    !sent
+        && match (pn, lid) {
+            (Some(pn), lid) => chat.matches_user_or_lid(pn, lid),
+            (None, Some(lid)) => chat.matches_user_or_lid(lid, None),
+            (None, None) => false,
+        }
+}
+
 /// What the core hears in a message: a vote on one of the bot's polls, a command, or words and
-/// a picture from a private chat. Anything else (a group, what this device sent, a reaction, a
-/// receipt) is nothing. A picture is fetched only from someone paired.
+/// a picture from a private chat or the owner's own chat. Anything else (a group, what this
+/// device sent, what the owner wrote to others, a reaction, a receipt) is nothing. A picture is
+/// fetched only from someone paired.
 async fn hear(
     client: &Arc<Client>,
     m: &InboundMessage,
     allowlist: &Allowlist,
     polls: &HashMap<String, Poll>,
+    sent: &Sent,
 ) -> Option<Heard> {
     let source = &m.info.source;
-    if source.is_from_me || source.is_group {
+    if source.is_group {
+        return None;
+    }
+    if source.is_from_me
+        && !owner_wrote_to_self(
+            &source.chat,
+            client.pn().as_ref(),
+            client.lid().as_ref(),
+            sent.has(&m.info.id),
+        )
+    {
         return None;
     }
     let who = writer(&source.chat, source.sender_alt.as_ref())?;
@@ -424,6 +518,8 @@ async fn hear(
         first_name: name.split_whitespace().next().unwrap_or(&name).to_owned(),
         name,
         handle: None,
+        // Past the check above, a message of the owner's is one written in their own chat.
+        owner: source.is_from_me,
     };
     let place = Place::private(&id);
     let base = m.message.get_base_message();
@@ -466,13 +562,16 @@ async fn hear(
     let at = m.info.timestamp.timestamp();
     let message_id = Some(m.info.id.to_string());
     let image = base.image_message.as_option();
+    let document = base.document_message.as_option();
     let text = m
         .message
         .text_content()
         .map(str::to_owned)
         .or_else(|| image.and_then(|i| i.caption.clone()))
+        .or_else(|| document.and_then(|d| d.caption.clone()))
         .unwrap_or_default();
     if image.is_none()
+        && document.is_none()
         && let Some(command) = text.trim().strip_prefix('/')
     {
         let (name, arg) = command
@@ -487,30 +586,30 @@ async fn hear(
             arg: arg.trim().to_owned(),
         });
     }
-    let picture = match image {
-        Some(img) => {
-            let paired = allowlist.read().is_ok_and(|ids| ids.contains(&id));
-            if !paired {
-                // A stranger's picture is never fetched; their words may still be an invite.
-                None
-            } else {
-                let bytes = if img.file_length.unwrap_or_default() > MAX_PICTURE {
-                    Err(format!(
-                        "it is bigger than {} MB",
-                        MAX_PICTURE / (1024 * 1024)
-                    ))
-                } else {
-                    client.download(img).await.map_err(|e| e.to_string())
-                };
-                Some(Picture {
-                    name: format!("whatsapp-photo-{}", m.info.id),
-                    bytes,
-                })
-            }
+    // A stranger's file is never fetched; their words may still be an invite.
+    let paired = allowlist.read().is_ok_and(|ids| ids.contains(&id));
+    let picture = match (image, document) {
+        _ if !paired => None,
+        (Some(img), _) => Some(
+            fetch(
+                client,
+                img,
+                img.file_length,
+                format!("whatsapp-photo-{}", m.info.id),
+            )
+            .await,
+        ),
+        (None, Some(doc)) => {
+            let name = doc
+                .file_name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| format!("whatsapp-file-{}", m.info.id));
+            Some(fetch(client, doc, doc.file_length, name).await)
         }
-        None => None,
+        (None, None) => None,
     };
-    // Other things a person sends (a voice note, a sticker, a file) are heard, to be turned away
+    // Other things a person sends (a voice note, a sticker, a video) are heard, to be turned away
     // in words; what WhatsApp sends on its own (a reaction, an edit, keys) is not.
     let sent_something = picture.is_some()
         || !text.trim().is_empty()
@@ -528,11 +627,30 @@ async fn hear(
     })
 }
 
+/// Fetches a picture or file someone sent, named `name`, unless it is too big.
+async fn fetch(
+    client: &Arc<Client>,
+    media: &dyn whatsapp_rust::download::Downloadable,
+    len: Option<u64>,
+    name: String,
+) -> Picture {
+    let bytes = if len.unwrap_or_default() > MAX_INCOMING {
+        Err(format!(
+            "it is bigger than {} MB",
+            MAX_INCOMING / (1024 * 1024)
+        ))
+    } else {
+        client.download(media).await.map_err(|e| e.to_string())
+    };
+    Picture { name, bytes }
+}
+
 /// Sends one thing. Says why if it did not go.
 async fn send(
     client: &Arc<Client>,
     out: Out,
     polls: &mut HashMap<String, Poll>,
+    sent: &mut Sent,
 ) -> Result<(), String> {
     let jid = |place: &Place| -> Result<Jid, String> {
         place
@@ -544,13 +662,14 @@ async fn send(
         Out::Say { to, text, buttons } => {
             let to = jid(&to)?;
             for part in format::render(&text) {
-                client
+                let done = client
                     .send_message(to.clone(), wa::Message::text(part))
                     .await
                     .map_err(|e| e.to_string())?;
+                sent.add(done.message_id);
             }
             if !buttons.is_empty() {
-                send_poll(client, &to, &buttons, polls).await?;
+                send_poll(client, &to, &buttons, polls, sent).await?;
             }
             Ok(())
         }
@@ -569,12 +688,113 @@ async fn send(
                 wa::Message::text(format!("_{note}_")),
             )
             .await
-            .map(drop)
+            .map(|done| sent.add(done.message_id))
             .map_err(|e| e.to_string()),
         // A poll cannot be taken back; each button still works once (the core sees to that).
         Out::Answered { note: None, .. } | Out::Unbutton { .. } | Out::Working { .. } => Ok(()),
         Out::Unlink => Ok(()),
+        Out::File {
+            to,
+            path,
+            name,
+            caption,
+            reply,
+        } => {
+            let sent = match jid(&to) {
+                Ok(to) => send_file(client, to, &path, name, caption, sent).await,
+                Err(why) => Err(why),
+            };
+            reply.answer(sent);
+            // How it went is the job's to say, not a failed message's.
+            Ok(())
+        }
     }
+}
+
+/// How a file shows in the chat.
+#[derive(Debug, PartialEq)]
+enum Shown {
+    Image(&'static str),
+    Video,
+    Document,
+}
+
+/// How file `name`, `len` bytes long, is sent: a picture or an MP4 small enough shows in the
+/// chat, anything else comes as a document to download.
+fn shown(name: &str, len: u64) -> Shown {
+    let lower = name.to_lowercase();
+    let ext = lower.rsplit_once('.').map_or("", |(_, e)| e);
+    if len > MAX_MEDIA {
+        return Shown::Document;
+    }
+    match ext {
+        "png" => Shown::Image("image/png"),
+        "jpg" | "jpeg" => Shown::Image("image/jpeg"),
+        "webp" => Shown::Image("image/webp"),
+        "mp4" => Shown::Video,
+        _ => Shown::Document,
+    }
+}
+
+/// Uploads the file at `path` and sends it to `to`.
+async fn send_file(
+    client: &Arc<Client>,
+    to: Jid,
+    path: &Path,
+    name: String,
+    caption: Option<String>,
+    sent: &mut Sent,
+) -> Result<(), String> {
+    use whatsapp_rust::download::MediaType;
+    use whatsapp_rust::media::{self, DocumentOptions, ImageOptions, VideoOptions};
+
+    let path = path.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("it could not be read: {e}"))?;
+    let how = shown(&name, bytes.len() as u64);
+    let kind = match how {
+        Shown::Image(_) => MediaType::Image,
+        Shown::Video => MediaType::Video,
+        Shown::Document => MediaType::Document,
+    };
+    let up = client
+        .upload(bytes, kind, whatsapp_rust::UploadOptions::default())
+        .await
+        .map_err(|e| e.to_string())?;
+    let message = match how {
+        Shown::Image(mime) => media::image_message(
+            up,
+            ImageOptions {
+                caption,
+                mimetype: Some(mime.into()),
+                ..Default::default()
+            },
+        ),
+        Shown::Video => media::video_message(
+            up,
+            VideoOptions {
+                caption,
+                ..Default::default()
+            },
+        ),
+        Shown::Document => media::document_message(
+            up,
+            DocumentOptions {
+                title: Some(name.clone()),
+                file_name: Some(name),
+                caption,
+                ..Default::default()
+            },
+        ),
+    };
+    let done = client
+        .send_message(to, message)
+        .await
+        .map_err(|e| e.to_string())?;
+    sent.add(done.message_id);
+    Ok(())
 }
 
 /// Sends `buttons` as a poll to `to`, one option each, and keeps what decrypts its votes.
@@ -583,6 +803,7 @@ async fn send_poll(
     to: &Jid,
     buttons: &[Button],
     polls: &mut HashMap<String, Poll>,
+    sent: &mut Sent,
 ) -> Result<(), String> {
     let mut names: Vec<String> = Vec::new();
     for b in buttons.iter().take(MAX_OPTIONS) {
@@ -595,12 +816,13 @@ async fn send_poll(
         }
         names.push(name);
     }
-    let (sent, secret) = client
+    let (poll, secret) = client
         .polls()
         .create(to.clone(), PICK, &names, 1)
         .await
         .map_err(|e| e.to_string())?;
-    let creator = if sent.to.is_lid() {
+    sent.add(poll.message_id.clone());
+    let creator = if poll.to.is_lid() {
         client.lid()
     } else {
         client.pn()
@@ -614,7 +836,7 @@ async fn send_poll(
         .map(|(name, b)| (compute_option_hash(name), b.data.clone()))
         .collect();
     polls.insert(
-        sent.message_id,
+        poll.message_id,
         Poll {
             secret,
             creator,
@@ -657,5 +879,39 @@ mod tests {
         assert_eq!(writer(&pn, Some(&lid)), Some(lid));
         assert_eq!(writer(&pn, None), Some(pn));
         assert_eq!(writer(&group, None), None);
+    }
+
+    #[test]
+    fn the_owner_is_heard_only_in_their_own_chat_and_never_this_devices_echo() {
+        let pn: Jid = "35799123456@s.whatsapp.net".parse().unwrap();
+        let lid: Jid = "123456789@lid".parse().unwrap();
+        let friend: Jid = "35799000000@s.whatsapp.net".parse().unwrap();
+        assert!(owner_wrote_to_self(&pn, Some(&pn), Some(&lid), false));
+        assert!(owner_wrote_to_self(&lid, Some(&pn), Some(&lid), false));
+        assert!(
+            !owner_wrote_to_self(&pn, Some(&pn), Some(&lid), true),
+            "an echo"
+        );
+        assert!(!owner_wrote_to_self(&friend, Some(&pn), Some(&lid), false));
+        assert!(
+            !owner_wrote_to_self(&pn, None, None, false),
+            "not signed in"
+        );
+
+        let mut sent = Sent::default();
+        for n in 0..=SENT_KEPT {
+            sent.add(n.to_string());
+        }
+        assert!(!sent.has("0") && sent.has(&SENT_KEPT.to_string()));
+    }
+
+    #[test]
+    fn pictures_and_mp4s_show_in_the_chat_and_the_rest_come_as_documents() {
+        assert_eq!(shown("launch.MP4", 1000), Shown::Video);
+        assert_eq!(shown("a.png", 1000), Shown::Image("image/png"));
+        assert_eq!(shown("a.jpeg", 1000), Shown::Image("image/jpeg"));
+        assert_eq!(shown("a.mov", 1000), Shown::Document);
+        assert_eq!(shown("report", 1000), Shown::Document);
+        assert_eq!(shown("big.mp4", MAX_MEDIA + 1), Shown::Document);
     }
 }

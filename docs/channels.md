@@ -61,12 +61,17 @@ Each button belongs to the person it was sent to and works once; pressing one ta
 buttons away (`src/channels/press.rs`). Buttons live while the app runs: after a restart a press is
 turned away, and a question can still be answered by writing.
 
-**Pictures.** A photo, or a picture sent as a file, goes to the agent with its caption, shrunk
-like one attached in the app. The poller fetches it before the app hears the message, so messages
-keep their order, and only from people paired (it reads a shared copy of the allowlist), up to
-10 MB. One that cannot be fetched or read is not sent, and the sender is told why. A picture sent
-while a question waits goes after the answer. Other kinds (voice, stickers, other files) are turned
-away for now.
+**Pictures and files.** A photo, or a file, goes to the agent with its caption, read like a file
+attached in the app (`Attachment::from_bytes` in `src/prompt.rs`): a picture shrunk, a PDF or Word
+document (`.docx`) as its words, a text file (Markdown, HTML, CSV, code…) as its text. The poller
+fetches it before the app hears the message, so messages keep their order, and only from people
+paired (it reads a shared copy of the allowlist), up to 20 MB (what a bot may fetch). One that
+cannot be fetched or read is not sent, and the sender is told why. A file sent while a question
+waits goes after the answer. Other kinds (voice, stickers, video) are turned away for now.
+
+**Where the agent is.** In a chat carried on from a channel, the agent's context says so (a
+`Channel:` line beside the date and folder, `App::channel_context`): who it talks with, on which
+channel, and that a file it makes reaches them only through `send_file`.
 
 **Sending files.** In a chat carried on from Telegram, the agent is also offered `send_file`
 (`src/channels/send.rs`): a file from its working folder (the home folder if it has none, as for
@@ -106,9 +111,11 @@ Commands are `/oido agent|new|stop|help` (answered privately wherever they are t
 words alone. A press takes its message's buttons off at once; Slack has no note on a press, so a
 note goes to the person as a message.
 
-**Pictures and files.** A picture shared in a direct message (or with a mention) goes to the agent
-with the message's words: the first image of what was shared, fetched with the bot token from
-Slack's file host only (`files.slack.com`), only for people paired, up to 10 MB. In a direct
+**Pictures and files.** A file shared in a direct message (or with a mention) goes to the agent
+with the message's words, read as on Telegram: the first file shared, fetched with the bot token
+from Slack's file host only (`files.slack.com`), only for people paired, up to 20 MB. Slack hands
+back a web page when the app cannot read files, so a web page is refused unless the file shared is
+one. In a direct
 message the agent is offered `send_file`: Slack's upload in three steps (an address for the file,
 the bytes, then the file shared in the person's private chat), up to 50 MB. Never into a channel's
 thread. Both need the `files:read` and `files:write` scopes in the manifest; an app made from an
@@ -126,7 +133,9 @@ never your personal one.
 WhatsApp hands out (a new one every few seconds) to scan from the phone (Settings → Linked devices
 → Link a device). Once it signs in, the number is saved like a bot: `channel_bots` holds the key,
 sealed, and the name `+<number>`. The client keeps its session (the keys its messages are
-encrypted with) in a file of its own beside the database, `whatsapp-<id>.db`, encrypted with that
+encrypted with) in a file of its own beside the database the app opened (`Store::folder`, never
+the default location, so tests and copies on other databases leave it alone), `whatsapp-<id>.db`,
+encrypted with that
 key (SQLCipher: the SQLite Oido links is SQLCipher, and a database opened without a key, like
 `oido.db`, is plain SQLite as before). Cancelling, a code never scanned, disconnecting (which
 unlinks the device on the phone too) and unlinking on the phone all remove the file; one left by
@@ -134,7 +143,9 @@ a link never finished is removed at the next start. The number's past chats are 
 
 **Listening.** The client runs on Tokio, on a thread of its own, while the app runs; WhatsApp
 keeps what is sent while Oido is closed and hands it over on the next start (older than 10 minutes:
-the sender is asked to send it again). The connection comes back on its own after a drop.
+the sender is asked to send it again). The connection comes back on its own after a drop. If
+another client takes the session over, the link stops and says so, keeping the session. How the
+link goes is written to the terminal (`oido: WhatsApp: …`).
 
 **Who is answered.** Private chats only. A stranger is not answered at all: the number may be one
 people know, so nobody gets a pairing code. "Invite by QR" shows a code holding
@@ -151,11 +162,15 @@ has no buttons for a number like this, so the buttons go as a poll under the mes
 one"), and a vote presses one. A poll cannot be taken back; each still works once, and a note on a
 press comes as a message. Polls live while the app runs.
 
-**Pictures.** A picture from someone paired goes to the agent with its caption, up to 10 MB;
-voice notes, stickers and files are turned away in words. `send_file` is not offered on WhatsApp
-yet.
+**Your own chat.** What the number's owner writes in its "Message yourself" chat is heard too, and
+the owner is paired without an invite. What this device sent (WhatsApp echoes it back) is never
+heard: the ids of its last 256 messages are kept.
+
+**Pictures and files.** A picture or document from someone paired goes to the agent with its
+caption, read as on Telegram, up to 20 MB; voice notes, stickers and videos are turned away in
+words. `send_file` goes through the running client: a PNG, JPEG or WebP picture or an MP4 up to
+16 MB shows in the chat, anything else comes as a document, up to 100 MB.
 
 ## Not yet
 
-- Voice notes (would need speech to text), other files in, Telegram groups.
-- `send_file` on WhatsApp (a file would go through the running client).
+- Voice notes (would need speech to text), video in, Telegram groups.

@@ -57,6 +57,8 @@ regex = "1.13"
 rhai = { version = "1.27", features = ["serde", "sync", "no_module"] }
 # A PDF attached to a message: its text is pulled out and sent like a text file.
 pdf-extract = "0.12"
+zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2"] }
+roxmltree = "0.21"
 
 # Our copy of Rune (../rune, branch oido-wheel-notch): the upstream revision above with its scroll
 # speed raised on Linux, where the system gives no acceleration: a mouse wheel notch scrolls 180

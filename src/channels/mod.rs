@@ -44,6 +44,9 @@ pub const COMMANDS: [(&str, &str); 4] = [
 const PAIRING_SECS: i64 = 600;
 /// A message older than this when it is heard was sent while Oido was closed.
 const STALE_SECS: i64 = 600;
+/// What is said for something sent that cannot be read (a voice note, a sticker, a video).
+const READABLE: &str = "Only text, pictures, PDFs, Word documents and text files (Markdown, HTML, CSV…) can be read for now.";
+
 /// How long an invite is good for, in seconds.
 const INVITE_SECS: i64 = 600;
 /// The most people waiting to be paired at once; more are turned away until some expire.
@@ -133,9 +136,14 @@ pub struct Person {
     /// What to greet them by.
     pub first_name: String,
     pub handle: Option<String>,
+    /// Whether they own the account the channel speaks as (on WhatsApp, the linked number,
+    /// writing in its own chat). The owner is paired without an invite.
+    pub owner: bool,
 }
 
-/// A picture someone sent: its name, and its bytes or why there are none.
+/// A file someone sent (a picture, a PDF, a Word document, a text file): its name, and its bytes
+/// or why there are none. It is read as a file attached on the desktop is
+/// ([`crate::prompt::Attachment::from_bytes`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picture {
     pub name: String,
@@ -209,6 +217,42 @@ pub enum Out {
     /// Ends the link for good where the channel keeps a session of its own: a linked WhatsApp
     /// device is unlinked from its phone.
     Unlink,
+    /// A file to send through the channel's running client (WhatsApp, which has no stateless
+    /// upload): how it went is answered on `reply`.
+    File {
+        to: Place,
+        path: std::path::PathBuf,
+        name: String,
+        caption: Option<String>,
+        reply: Reply,
+    },
+}
+
+/// Where a channel's client answers how sending a file went. Two are equal only if they are
+/// the same one.
+#[derive(Clone)]
+pub struct Reply(Arc<Sender<Result<(), String>>>);
+
+impl Reply {
+    pub fn new(tx: Sender<Result<(), String>>) -> Reply {
+        Reply(Arc::new(tx))
+    }
+
+    pub fn answer(&self, result: Result<(), String>) {
+        let _ = self.0.send(result);
+    }
+}
+
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reply")
+    }
+}
+
+impl PartialEq for Reply {
+    fn eq(&self, other: &Reply) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// How a channel's link stands, as its listener reports it.
@@ -263,6 +307,11 @@ impl Link {
 
     fn send(&self, out: Out) {
         let _ = self.outbox.send(out);
+    }
+
+    /// What hands things to the channel's thread, for a job that sends on its own.
+    fn outbox(&self) -> Sender<Out> {
+        self.outbox.clone()
     }
 }
 
@@ -357,6 +406,9 @@ pub struct Channel {
     /// Drafts already offered with buttons, by their key.
     offered: HashSet<String>,
     link: Option<Link>,
+    /// The open database's folder, where a channel keeps a session of its own (WhatsApp);
+    /// `None` for a database in memory.
+    folder: Option<std::path::PathBuf>,
     /// What the bot listening signs in with, for sending files; `None` while it is not.
     creds: Option<Creds>,
     allowlist: Allowlist,
@@ -443,9 +495,13 @@ impl Channel {
                 Creds::Slack(tokens) => {
                     slack::start(app.clone(), tokens, allowlist, self.generation)
                 }
-                Creds::WhatsApp(key) => {
-                    whatsapp::start(app.clone(), key, allowlist, self.generation)
-                }
+                Creds::WhatsApp(key) => whatsapp::start(
+                    app.clone(),
+                    key,
+                    self.folder.clone(),
+                    allowlist,
+                    self.generation,
+                ),
             });
         }
     }
@@ -554,6 +610,7 @@ impl App {
         };
         let what = kind.title();
         let c = self.channels.get_mut(kind);
+        c.folder = db.folder();
         match db.channel_users(kind) {
             Ok(list) => c.users = list,
             Err(e) => eprintln!("oido: could not load {what}'s paired people: {e}"),
@@ -574,7 +631,9 @@ impl App {
                 .ok()
                 .and_then(Option::as_ref)
                 .and_then(|bot| whatsapp::Key::parse(&bot.secret));
-            whatsapp::sweep(keep.as_ref());
+            if let Some(folder) = &c.folder {
+                whatsapp::sweep(folder, keep.as_ref());
+            }
         }
         match saved {
             Ok(Some(bot)) => {
@@ -650,9 +709,10 @@ impl App {
             c.send(Out::Unlink);
         } else if let Some(Creds::WhatsApp(key)) =
             saved.and_then(|bot| Creds::parse(kind, &bot.secret))
+            && let Some(folder) = &c.folder
         {
             // Not listening, so nothing can tell the phone; the session is forgotten here.
-            whatsapp::forget(&key);
+            whatsapp::forget(folder, &key);
         }
         c.stop();
         c.bot = None;
@@ -874,6 +934,14 @@ impl App {
                 (from.clone(), Some(*at))
             }
         };
+        if self.channels.get(kind).user(&from.id).is_none() && from.owner {
+            self.pair(
+                kind,
+                from.id.clone(),
+                from.name.clone(),
+                from.handle.clone(),
+            );
+        }
         if self.channels.get(kind).user(&from.id).is_none() {
             let text = match &heard {
                 Heard::Message { text, .. } => text.as_str(),
@@ -916,27 +984,23 @@ impl App {
                 let text = text.trim();
                 let mut prompt = Prompt::from(text);
                 if let Some(p) = picture {
-                    let image = p
+                    let file = p
                         .bytes
-                        .map_err(|why| format!("it could not be fetched: {why}"))
-                        .and_then(|bytes| crate::prompt::Image::fit(&p.name, &bytes));
-                    match image {
-                        Ok(image) => prompt
-                            .attachments
-                            .push(crate::prompt::Attachment::Image(image)),
+                        .map_err(|why| format!("it could not be fetched: {why}."))
+                        .and_then(|bytes| crate::prompt::Attachment::from_bytes(&p.name, bytes));
+                    match file {
+                        Ok(file) => prompt.attachments.push(file),
                         Err(why) => {
                             self.channels.get_mut(kind).say(
                                 &from.id,
-                                &format!("⚠️ The picture was not sent to the agent: {why}."),
+                                &format!("⚠️ {} was not sent to the agent: {why}", p.name),
                             );
                             return;
                         }
                     }
                 }
                 if prompt.is_empty() {
-                    self.channels
-                        .get_mut(kind)
-                        .say(&from.id, "Only text and pictures can be read for now.");
+                    self.channels.get_mut(kind).say(&from.id, READABLE);
                     return;
                 }
                 if let Some(why) = self.intake_refusal(kind, &from.id, text, at) {
@@ -1425,6 +1489,29 @@ impl App {
         self.channels.kind_of(sid)
     }
 
+    /// For the context block of chat `sid` when it is carried on from a channel: where the person
+    /// is, and how a file you make reaches them.
+    pub(crate) fn channel_context(&self, sid: &str) -> Option<String> {
+        let kind = self.channels.kind_of(sid)?;
+        let channel = self.channels.get(kind);
+        let name = channel
+            .user_of(sid)
+            .and_then(|id| channel.user(&id))
+            .map_or_else(|| "the person".to_owned(), |p| p.name.clone());
+        let files = if self.channels.files_go(sid).is_some() {
+            format!(
+                "a file you make reaches them only if you send it with `{}`",
+                send::NAME
+            )
+        } else {
+            "files you make here do not reach them".to_owned()
+        };
+        Some(format!(
+            "- Channel: you are talking with {name} on {}. Your replies reach them there as messages; they are not at this computer, so {files}.",
+            kind.title()
+        ))
+    }
+
     /// When chat `sid` is carried on by a paired person you have not marked trusted, what their
     /// messages are in words ("messages from Ada on Telegram"): outside text (see `guard::taint`).
     pub(crate) fn outside_person(&self, sid: &str) -> Option<String> {
@@ -1467,6 +1554,7 @@ mod tests {
             name: "Ada".into(),
             first_name: "Ada".into(),
             handle: Some("ada".into()),
+            owner: false,
         }
     }
 
@@ -2151,6 +2239,11 @@ mod tests {
 
     /// Ada sends a picture, as fetched (or not), with `caption`.
     fn picture(app: &mut App, bytes: Result<Vec<u8>, String>, caption: &str) {
+        file(app, "telegram-photo-1", bytes, caption);
+    }
+
+    /// Ada sends file `name`, as fetched (or not), with `caption`.
+    fn file(app: &mut App, name: &str, bytes: Result<Vec<u8>, String>, caption: &str) {
         let at = now();
         let heard = Heard::Message {
             from: from(ADA),
@@ -2159,11 +2252,33 @@ mod tests {
             at,
             text: caption.into(),
             picture: Some(Picture {
-                name: "telegram-photo-1".into(),
+                name: name.into(),
                 bytes,
             }),
         };
         app.hear(T, heard, at);
+    }
+
+    #[test]
+    fn a_document_or_text_file_goes_to_the_agent_as_its_words() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(&db, vec![text_stream("Read it.")]);
+        file(
+            &mut app,
+            "notes.md",
+            Ok(b"# Launch\nship friday".to_vec()),
+            "summarize",
+        );
+        let request = seen.recv().unwrap();
+        assert!(
+            request.contains("summarize") && request.contains("ship friday"),
+            "{request}"
+        );
+        let sid = bound(&app);
+        let Message::User(p) = &messages(&app, &sid)[0] else {
+            panic!("the person's message");
+        };
+        assert_eq!(p.attachments[0].name(), "notes.md");
     }
 
     #[test]
@@ -2191,14 +2306,15 @@ mod tests {
         picture(&mut app, Err("it is bigger than 10 MB".into()), "");
         let told = said(&mut app);
         assert!(told[0].contains("bigger than 10 MB"), "{told:?}");
-        picture(&mut app, Ok(b"not a picture".to_vec()), "");
-        assert!(said(&mut app)[0].contains("cannot be sent"));
+        file(&mut app, "tool.bin", Ok(vec![0, 159, 146, 150]), "");
+        let told = said(&mut app);
+        assert!(
+            told[0].contains("tool.bin was not sent") && told[0].contains("not a text file"),
+            "{told:?}"
+        );
         // A sticker, say: nothing the core can read.
         write(&mut app, "");
-        assert_eq!(
-            said(&mut app),
-            vec!["Only text and pictures can be read for now.".to_owned()]
-        );
+        assert_eq!(said(&mut app), vec![READABLE.to_owned()]);
         assert!(app.channels.telegram.chats.is_empty());
     }
 
@@ -2500,6 +2616,40 @@ mod tests {
     }
 
     #[test]
+    fn on_whatsapp_the_owner_is_paired_without_an_invite_and_heard_at_once() {
+        let db = TempDb::new();
+        let mut app = whatsapp(&db);
+        let at = now();
+        let mut owner = heard(ADA, "hey", at);
+        if let Heard::Message { from, .. } = &mut owner {
+            from.owner = true;
+        }
+        app.hear(W, owner, at);
+        assert_eq!(app.channels.whatsapp.users.len(), 1);
+        assert_eq!(app.channels.whatsapp.users[0].id, ADA);
+        assert_eq!(
+            app.channels.whatsapp.chats.len(),
+            1,
+            "the message went to the agent"
+        );
+        let sid = app.channels.whatsapp.chats[0].session.clone();
+        let Message::User(p) = &messages(&app, &sid)[0] else {
+            panic!("the owner's message");
+        };
+        assert!(p.text.contains("hey"));
+        assert_eq!(
+            app.channels.files_go(&sid),
+            Some(W),
+            "files go to the owner"
+        );
+        let told = app.channel_context(&sid).unwrap();
+        assert!(
+            told.contains("on WhatsApp") && told.contains("send_file"),
+            "{told}"
+        );
+    }
+
+    #[test]
     fn on_whatsapp_a_stranger_gets_no_answer_and_only_an_invite_pairs_once() {
         let db = TempDb::new();
         let mut app = whatsapp(&db);
@@ -2556,6 +2706,28 @@ mod tests {
         app.cancel_invite(W);
         write_whatsapp(&mut app, ADA, &format!("pair {token}"));
         assert!(app.channels.whatsapp.users.is_empty());
+    }
+
+    #[test]
+    fn whatsapp_sessions_are_swept_beside_the_open_database_and_nowhere_else() {
+        let root = std::env::temp_dir().join(format!("oido-wa-sweep-{}", uuid::Uuid::new_v4()));
+        let (mine, elsewhere) = (root.join("mine"), root.join("elsewhere"));
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let stale = mine.join("whatsapp-0123456789abcdef.db");
+        let live = elsewhere.join("whatsapp-0123456789abcdef.db");
+        std::fs::write(&stale, b"").unwrap();
+        std::fs::write(&live, b"").unwrap();
+
+        let db = TempDb(mine.join("oido.db"));
+        let app = db.open();
+        assert_eq!(
+            app.channels.whatsapp.folder.as_deref(),
+            Some(mine.as_path())
+        );
+        assert!(!stale.exists(), "a session no link is saved with goes");
+        assert!(live.exists(), "another database's session is never touched");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

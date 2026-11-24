@@ -205,10 +205,10 @@ fn listen(
                 .or_insert_with(|| api::person(&agent, API, &tokens.bot, id))
                 .clone()
         };
-        // Only the pictures of people paired are fetched.
-        let mut fetch = |user: &str, url: &str| {
+        // Only the files of people paired are fetched.
+        let mut fetch = |user: &str, url: &str, declared: &str| {
             if allowlist.read().is_ok_and(|p| p.contains(user)) {
-                api::download(&agent, &tokens.bot, url)
+                api::download(&agent, &tokens.bot, url, declared)
             } else {
                 Err("they are not paired".to_owned())
             }
@@ -327,19 +327,16 @@ fn bare_command(text: &str) -> Option<(String, String)> {
 }
 
 /// Fetches a shared picture: whose it is, and where it is.
-type Fetch<'a> = dyn FnMut(&str, &str) -> Result<Vec<u8>, String> + 'a;
+type Fetch<'a> = dyn FnMut(&str, &str, &str) -> Result<Vec<u8>, String> + 'a;
 
 /// The first picture shared with a message, fetched by `fetch` (from whom, from where), or why
 /// it could not be.
 fn picture_of(event: &Value, user: &str, fetch: &mut Fetch<'_>) -> Option<Picture> {
-    let file = event["files"].as_array()?.iter().find(|f| {
-        f["mimetype"]
-            .as_str()
-            .is_some_and(|m| m.starts_with("image/"))
-    })?;
+    let file = event["files"].as_array()?.first()?;
     let name = file["name"]
         .as_str()
-        .map_or_else(|| "slack-picture".to_owned(), str::to_owned);
+        .map_or_else(|| "slack-file".to_owned(), str::to_owned);
+    let declared = file["mimetype"].as_str().unwrap_or_default();
     let bytes = if file["size"].as_u64().is_some_and(|n| n > api::MAX_PICTURE) {
         Err(format!(
             "it is bigger than {} MB",
@@ -350,7 +347,7 @@ fn picture_of(event: &Value, user: &str, fetch: &mut Fetch<'_>) -> Option<Pictur
             .as_str()
             .or_else(|| file["url_private"].as_str())
         {
-            Some(url) => fetch(user, url),
+            Some(url) => fetch(user, url, declared),
             None => Err("Slack gave no address for it".to_owned()),
         }
     };
@@ -471,12 +468,13 @@ mod tests {
             name: "Ada Lovelace".into(),
             first_name: "Ada".into(),
             handle: Some("ada".into()),
+            owner: false,
         }
     }
 
     fn hear(kind: &str, payload: &str) -> Option<Heard> {
         let v: Value = serde_json::from_str(payload).unwrap();
-        heard(kind, &v, "UBOT", &mut |id| ada(id), &mut |_, _| {
+        heard(kind, &v, "UBOT", &mut |id| ada(id), &mut |_, _, _| {
             Err("no fetching in this test".into())
         })
     }
@@ -621,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_picture_comes_with_its_message_and_only_its_first_picture_is_fetched() {
+    fn a_shared_file_comes_with_its_message_and_only_the_first_is_fetched() {
         let payload: Value = serde_json::from_str(
             r#"{"event":{"type":"message","subtype":"file_share","channel_type":"im","user":"U1","text":"what is this?",
             "ts":"2.0","channel":"D9","files":[
@@ -635,9 +633,9 @@ mod tests {
             &payload,
             "UBOT",
             &mut |id| ada(id),
-            &mut |user, url| {
-                asked.push((user.to_owned(), url.to_owned()));
-                Ok(b"PNG".to_vec())
+            &mut |user, url, declared| {
+                asked.push((user.to_owned(), url.to_owned(), declared.to_owned()));
+                Ok(b"notes".to_vec())
             },
         ) else {
             panic!("a message");
@@ -646,13 +644,17 @@ mod tests {
         assert_eq!(
             picture,
             Some(Picture {
-                name: "chart.png".into(),
-                bytes: Ok(b"PNG".to_vec()),
+                name: "notes.txt".into(),
+                bytes: Ok(b"notes".to_vec()),
             })
         );
         assert_eq!(
             asked,
-            [("U1".to_owned(), "https://files.slack.com/c".to_owned())]
+            [(
+                "U1".to_owned(),
+                "https://files.slack.com/n".to_owned(),
+                "text/plain".to_owned()
+            )]
         );
     }
 
@@ -669,7 +671,7 @@ mod tests {
             &payload,
             "UBOT",
             &mut |id| ada(id),
-            &mut |_, _| panic!("not fetched"),
+            &mut |_, _, _| panic!("not fetched"),
         ) else {
             panic!("a message");
         };
@@ -678,7 +680,7 @@ mod tests {
                 .unwrap()
                 .bytes
                 .unwrap_err()
-                .contains("bigger than 10 MB")
+                .contains("bigger than 20 MB")
         );
     }
 }

@@ -21,7 +21,7 @@ const LABEL: usize = 75;
 /// The reaction that marks a message as being worked on.
 const WORKING: &str = "eyes";
 /// The biggest picture fetched from someone, in bytes.
-pub const MAX_PICTURE: u64 = 10 * 1024 * 1024;
+pub const MAX_PICTURE: u64 = 20 * 1024 * 1024;
 /// The biggest file an agent sends, in bytes.
 pub const MAX_FILE: u64 = 50 * 1024 * 1024;
 /// Where Slack keeps files people share. The bot token goes nowhere else with a download.
@@ -241,13 +241,19 @@ pub(super) fn person(agent: &ureq::Agent, base: &str, bot: &Secret, id: &str) ->
             .unwrap_or_else(|| name.split_whitespace().next().unwrap_or(&name).to_owned()),
         handle: pick(&[&user["name"]]),
         name,
+        owner: false,
     }
 }
 
 /// Fetches a file someone shared, from Slack's file host only, refusing one over
-/// [`MAX_PICTURE`] or one that is not a picture (what Slack hands back when the app cannot read
-/// files is a web page).
-pub(super) fn download(agent: &ureq::Agent, bot: &Secret, url: &str) -> Result<Vec<u8>, String> {
+/// [`MAX_PICTURE`]. What Slack hands back when the app cannot read files is a web page, so a web
+/// page is refused unless the file shared (`declared`, its type as Slack gave it) is one.
+pub(super) fn download(
+    agent: &ureq::Agent,
+    bot: &Secret,
+    url: &str,
+    declared: &str,
+) -> Result<Vec<u8>, String> {
     if !url.starts_with(FILES) {
         return Err("it is not on Slack's file host".into());
     }
@@ -264,7 +270,7 @@ pub(super) fn download(agent: &ureq::Agent, bot: &Secret, url: &str) -> Result<V
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_owned();
-    if status != 200 || !kind.starts_with("image/") {
+    if status != 200 || (kind.starts_with("text/html") && !declared.starts_with("text/html")) {
         return Err("Slack did not hand it over (the app may need the newest manifest from the Channels screen, then reinstalling)".into());
     }
     let bytes = resp
@@ -399,6 +405,11 @@ fn send_once(agent: &ureq::Agent, base: &str, bot: &Secret, out: &Out) -> Result
         // Buttons come off as soon as one is pressed (see `listen`), with the message's words. An
         // app keeps no session to sign out of.
         Out::Unbutton { .. } | Out::Unlink => Ok(()),
+        // Files go up on their own (`send_file`), not through the listener.
+        Out::File { reply, .. } => {
+            reply.answer(Err("Slack sends files on their own".into()));
+            Ok(())
+        }
         Out::Working { to, message, on } => {
             let method = if *on {
                 "reactions.add"
@@ -614,6 +625,7 @@ mod tests {
             &agent(Duration::from_secs(5)),
             &t.bot,
             "http://127.0.0.1:1/x.png",
+            "image/png",
         )
         .unwrap_err();
         assert!(err.contains("not on Slack's file host"), "{err}");

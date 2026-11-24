@@ -5,10 +5,12 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Sender};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::{Creds, Kind, Place, slack, telegram};
+use super::{Creds, Kind, Out, Place, Reply, slack, telegram, whatsapp};
 use crate::app::App;
 use crate::command::Finish;
 use crate::completion::ToolSpec;
@@ -109,6 +111,7 @@ impl App {
             path,
             name,
             caption: v.get("caption").and_then(Value::as_str).map(str::to_owned),
+            outbox: c.link.as_ref().map(super::Link::outbox),
         })
     }
 }
@@ -118,8 +121,7 @@ fn max_file(kind: Kind) -> u64 {
     match kind {
         Kind::Telegram => telegram::MAX_FILE,
         Kind::Slack => slack::MAX_FILE,
-        // Not yet: a file would go through the running client, not a stateless call.
-        Kind::WhatsApp => 0,
+        Kind::WhatsApp => whatsapp::MAX_FILE,
     }
 }
 
@@ -138,22 +140,36 @@ struct Upload {
     path: PathBuf,
     name: String,
     caption: Option<String>,
+    /// The running client's outbox, where files go through it (WhatsApp).
+    outbox: Option<Sender<Out>>,
 }
+
+/// How long a file sent through the running client may take to go.
+const CLIENT_SEND_WAIT: Duration = Duration::from_secs(300);
 
 impl Upload {
     /// Sends it; blocks. Says how it went, for the model.
     fn send(&self) -> String {
-        let bytes = match std::fs::read(&self.path) {
-            Ok(b) => b,
-            Err(e) => return format!("Error: {} could not be read: {e}.", self.name),
-        };
         let sent = match &self.creds {
+            // The client reads the file itself.
+            Creds::WhatsApp(_) => self.through_client(),
+            Creds::Telegram(_) | Creds::Slack(_) => match std::fs::read(&self.path) {
+                Ok(bytes) => self.upload(&bytes),
+                Err(e) => return format!("Error: {} could not be read: {e}.", self.name),
+            },
+        };
+        self.said(sent)
+    }
+
+    /// Sends it in one call, where the channel has one.
+    fn upload(&self, bytes: &[u8]) -> Result<(), String> {
+        match &self.creds {
             Creds::Telegram(token) => telegram::upload(
                 self.api.as_deref().unwrap_or(telegram::API),
                 token,
                 &self.to,
                 &self.name,
-                &bytes,
+                bytes,
                 self.caption.as_deref(),
             )
             .map_err(|e| e.to_string()),
@@ -162,15 +178,84 @@ impl Upload {
                 &tokens.bot,
                 &self.to,
                 &self.name,
-                &bytes,
+                bytes,
                 self.caption.as_deref(),
             )
             .map_err(|e| e.to_string()),
-            Creds::WhatsApp(_) => Err("WhatsApp takes no files from agents yet".to_owned()),
-        };
+            Creds::WhatsApp(_) => self.through_client(),
+        }
+    }
+
+    /// Hands the file to the running client and waits for it to go.
+    fn through_client(&self) -> Result<(), String> {
+        let outbox = self.outbox.as_ref().ok_or("the link is not running now")?;
+        let (tx, rx) = mpsc::channel();
+        outbox
+            .send(Out::File {
+                to: self.to.clone(),
+                path: self.path.clone(),
+                name: self.name.clone(),
+                caption: self.caption.clone(),
+                reply: Reply::new(tx),
+            })
+            .map_err(|_| "the link is not running now".to_owned())?;
+        rx.recv_timeout(CLIENT_SEND_WAIT)
+            .map_err(|_| "it did not go in time, or the link stopped".to_owned())?
+    }
+
+    fn said(&self, sent: Result<(), String>) -> String {
         match sent {
             Ok(()) => format!("Sent {} to them on {}.", self.name, self.kind.title()),
             Err(e) => format!("Error: {} was not sent: {e}.", self.name),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn on_whatsapp(outbox: Option<Sender<Out>>) -> Upload {
+        Upload {
+            kind: Kind::WhatsApp,
+            creds: Creds::WhatsApp(whatsapp::Key::parse(&"a".repeat(64)).unwrap()),
+            api: None,
+            to: Place::private("1@lid"),
+            path: PathBuf::from("launch.mp4"),
+            name: "launch.mp4".into(),
+            caption: Some("Here".into()),
+            outbox,
+        }
+    }
+
+    #[test]
+    fn on_whatsapp_a_file_goes_through_the_running_client_and_it_says_how_it_went() {
+        let (tx, rx) = mpsc::channel();
+        let client = std::thread::spawn(move || match rx.recv().unwrap() {
+            Out::File {
+                to,
+                name,
+                caption,
+                reply,
+                ..
+            } => {
+                assert_eq!((to.chat.as_str(), name.as_str()), ("1@lid", "launch.mp4"));
+                assert_eq!(caption.as_deref(), Some("Here"));
+                reply.answer(Ok(()));
+            }
+            other => panic!("{other:?}"),
+        });
+        assert_eq!(
+            on_whatsapp(Some(tx)).send(),
+            "Sent launch.mp4 to them on WhatsApp."
+        );
+        client.join().unwrap();
+
+        let said = on_whatsapp(None).send();
+        assert!(
+            said.starts_with("Error:") && said.contains("not running"),
+            "{said}"
+        );
     }
 }
