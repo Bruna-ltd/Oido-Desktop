@@ -118,11 +118,27 @@ const HELPER_BRIEF: &str = "You are a helper working for another agent. You are 
 /// only the tool's description, because a model that is not told to hand work on does it itself.
 const LEAD_RULE: &str = "Do not read many items into your own context one call at a time: everything you read stays there and is re-sent on every later call. When a task lists or searches for items and then reads, filters or judges each (emails, files, pages, search results), make one `script` call instead: a tool step to list, a for_each over the items with a tool step to read and a yes_no `generate` step to judge, and a final `code` step that returns only the short result. For open-ended work that needs several steps and judgment, hand it to the `delegate` tool's `helper`. One call whose whole result you need is fine to make yourself.";
 
-/// `brief`, an agent's own instructions, with what it is told about delegating.
-pub(crate) fn lead_brief(brief: &str) -> String {
+/// What a lead with a team is told instead: the team does the work, the lead only hands it on.
+const TEAM_RULE: &str = "You lead a team, and the team does the work. Do not do any task yourself: do not search, fetch, read, write, run commands or use connected services such as mail or calendar, even when you see such calls earlier in this chat. For every task, call `delegate` with the team member whose role fits, and give it everything it needs, since it sees nothing but the task. Hand separate parts to the members that fit, several calls in one turn. Only when no member fits, hand it to `helper`. Your own tools are only for asking the person something, sending them a file, or running a saved workflow that fits. When the answers come back, reply to the person from them.";
+
+/// `brief`, an agent's own instructions, with what it is told about delegating: to its `team` when
+/// it has one, else when to use a script or its helper.
+pub(crate) fn lead_brief(brief: &str, team: &[Agent]) -> String {
+    let rule = if team.is_empty() {
+        LEAD_RULE.to_owned()
+    } else {
+        let roster: Vec<String> = team
+            .iter()
+            .map(|m| match m.description.trim() {
+                "" => format!("- {}", m.name),
+                d => format!("- {}: {d}", m.name),
+            })
+            .collect();
+        format!("{TEAM_RULE}\n\nYour team:\n{}", roster.join("\n"))
+    };
     match brief.trim() {
-        "" => LEAD_RULE.to_owned(),
-        own => format!("{own}\n\n{LEAD_RULE}"),
+        "" => rule,
+        own => format!("{own}\n\n{rule}"),
     }
 }
 
@@ -388,14 +404,6 @@ struct Outcome {
     /// What all its model calls used together.
     tokens: Tokens,
     ms: u32,
-}
-
-/// Tools that work without a person there: commands, files, web pages and its skills.
-fn unattended(name: &str) -> bool {
-    name == tools::SHELL
-        || name == crate::web::NAME
-        || name == tools::SKILL
-        || crate::files::is_file_tool(name)
 }
 
 fn run_tool(job: &Job, call: &Call) -> String {
@@ -876,20 +884,21 @@ impl App {
             self.tainted.get(sid).cloned(),
         )?;
         if std::ptr::eq(member, &ephemeral) {
-            (job.tools, job.routes) = self.helper_tools(lead);
+            (job.tools, job.routes) = self.worker_tools(lead);
         }
         Ok((run, job, member.name.clone()))
     }
 
-    /// The tools a helper of `lead` has: the ones of `lead`'s that do work (see [`helps`]), and for
-    /// each that is not run by the worker itself how to reach it. A tool whose connection or sign-in
-    /// is missing is left out, so the helper is never offered what would only fail.
-    fn helper_tools(
+    /// The tools a worker with `agent`'s tools has: the ones that do work (see [`helps`]), and for
+    /// each that is not run by the worker itself how to reach it. A team member has its own; a
+    /// helper has its lead's. A tool whose connection or sign-in is missing is left out, so the
+    /// worker is never offered what would only fail.
+    fn worker_tools(
         &self,
-        lead: &Agent,
+        agent: &Agent,
     ) -> (Vec<ToolSpec>, std::collections::HashMap<String, Route>) {
         let offered = tools::offered(
-            &lead.tools,
+            &agent.tools,
             self.typesafe_connected(),
             &crate::mcp::specs(&self.mcp.servers),
         );
@@ -971,10 +980,7 @@ impl App {
         run.parent = parent;
         run.title = crate::runs::title_of(&task);
         let (brief, skills) = self.brief_of(member);
-        let mut tools: Vec<ToolSpec> = tools::offered(&member.tools, false, &[])
-            .into_iter()
-            .filter(|t| unattended(&t.name))
-            .collect();
+        let (mut tools, routes) = self.worker_tools(member);
         if !skills.is_empty() {
             tools.push(crate::skills::spec(&skills));
         }
@@ -994,7 +1000,7 @@ impl App {
             task,
             outside,
             trust_folder: member.trust_workdir,
-            routes: Default::default(),
+            routes,
             cancel: Arc::new(AtomicBool::new(false)),
         };
         Ok((run, job))
