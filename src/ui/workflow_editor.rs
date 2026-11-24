@@ -180,7 +180,7 @@ fn tail(s: &App, ed: &Editor, k: &Kit) -> El {
         out = out.child(col().key("wfe-problems").w_full().gap(4.0).children(
             ed.problems.iter().map(|p| {
                 text(p.clone())
-                    .font(k.ty.small)
+                    .font(k.ty.caption())
                     .color(k.c.warning.icon)
                     .wrap()
                     .selectable(true)
@@ -261,7 +261,7 @@ fn inspector(s: &App, ed: &Editor, k: &Kit, layer: &mut Vec<El>) -> El {
                         )
                         .child(
                             text("Name, who runs it, what it takes, and when it counts as done. Double-press a step to open it.")
-                                .font(k.ty.small)
+                                .font(k.ty.caption())
                                 .color(c.text_muted)
                                 .wrap(),
                         ),
@@ -331,7 +331,7 @@ pub(super) fn step_actions(
     if let Some(why) = &t.notice {
         out = out.child(
             text(why.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.warning.icon)
                 .wrap(),
         );
@@ -397,7 +397,7 @@ fn discover(s: &App, _ed: &Editor, at: &Loc, node: &Node, k: &Kit, layer: &mut V
             .collect();
         out = out.child(
             text(format!("Found: {}", list.join(", ")))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_faint)
                 .wrap(),
         );
@@ -405,7 +405,7 @@ fn discover(s: &App, _ed: &Editor, at: &Loc, node: &Node, k: &Kit, layer: &mut V
     if let Some(why) = &m.notice {
         out = out.child(
             text(why.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
         );
@@ -443,7 +443,7 @@ fn trigger_form(ed: &Editor, k: &Kit) -> El {
             } else {
                 "Starts when you or an agent run the published workflow."
             })
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(c.text_muted)
             .wrap(),
         );
@@ -499,7 +499,7 @@ fn test_run(s: &App, ed: &Editor, k: &Kit) -> El {
         .child(text("Test run").font(k.ty.ui_medium).color(c.text_base))
         .child(
             text("A test runs the steps for real: commands run, files change, messages go out. Nothing is saved.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
         );
@@ -540,7 +540,7 @@ fn test_run(s: &App, ed: &Editor, k: &Kit) -> El {
     if let Some(why) = &t.notice {
         out = out.child(
             text(why.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.warning.icon)
                 .wrap(),
         );
@@ -635,10 +635,7 @@ fn field_with(
     f: impl for<'a> Fn(&'a mut App) -> &'a mut TextEdit + 'static,
 ) -> El {
     let c = &k.c;
-    let style = rune::TextStyle {
-        line_height: 22.0,
-        ..k.ty.body
-    };
+    let style = crate::theme::ty::field(k);
     let mut head = row()
         .w_full()
         .center_y()
@@ -1391,7 +1388,7 @@ fn reply_fields(at: &Loc, n: &Node, key: &str, s: &App, k: &Kit, layer: &mut Vec
 fn help_line(help: &str, k: &Kit) -> Option<El> {
     (!help.is_empty()).then(|| {
         text(help.to_owned())
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(k.c.text_faint)
             .wrap()
     })

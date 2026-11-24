@@ -24,6 +24,14 @@ pub fn dir() -> Option<PathBuf> {
     }
 }
 
+/// Every folder a model may read skill files from, beside its working folder: the skills folder
+/// and Claude's (`~/.claude/skills`), so a skill that points at its own scripts and references
+/// can be followed. Reading only; nothing there can be changed.
+pub fn read_roots() -> Vec<PathBuf> {
+    let claude = dirs::home_dir().map(|h| h.join(".claude").join("skills"));
+    dir().into_iter().chain(claude).collect()
+}
+
 /// Every skill in `dir` (a folder holding a `SKILL.md`), by name. A missing folder has none.
 pub fn discover(dir: &Path) -> Vec<Skill> {
     let Ok(entries) = std::fs::read_dir(dir) else {

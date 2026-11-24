@@ -18,7 +18,7 @@ pub fn trip(s: &App, sid: &str, t: &ToolCall, j: usize, k: &Kit) -> Option<El> {
     let c = &k.c;
     // A command's card above already shows the command.
     let what = (t.name != crate::tools::SHELL).then(|| mono(shown(s, &t.name, &t.summary), k));
-    let line = |words: String, ink| text(words).font(k.ty.small).color(ink).wrap();
+    let line = |words: String, ink| text(words).font(k.ty.caption()).color(ink).wrap();
     let (accent, heading, body) = match trip.state {
         TripState::Asking => {
             let (sid, call) = (sid.to_owned(), t.id.clone());
@@ -130,7 +130,7 @@ pub fn waiting(s: &App, at: &crate::guard::ask::Where, k: &Kit) -> Vec<El> {
                         w.from,
                         s.guard.wait()
                     ))
-                    .font(k.ty.small)
+                    .font(k.ty.caption())
                     .color(c.text_faint)
                     .wrap(),
                 );
@@ -212,7 +212,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(16.0)
                 .child(
                     text("Checks made on this computer, before anything reaches a model and before an agent's action runs. They apply to every agent, in every chat, schedule, workflow and channel.")
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(k.c.text_muted)
                         .wrap(),
                 )
@@ -341,7 +341,7 @@ fn words_row(s: &App, k: &Kit) -> El {
         .gap(10.0)
         .child(
             text("Names of clients or competitors, internal code names, words you do not want used: never sent to a model, and never shown to someone on a channel who did not write them. The agent sees a placeholder; your chat shows the word.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
         )
@@ -389,7 +389,7 @@ fn places_row(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .gap(10.0)
         .child(
             text("Folders and files no agent may read, change or send, whatever it is working on: its file tools, its commands (any word that names the place) and tools from MCP servers. Split by commas; add (reading) to stop only reading and sending, (changing) to stop only changing. A command can still reach a place by a name it cannot read, such as a variable or a pattern.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
         )

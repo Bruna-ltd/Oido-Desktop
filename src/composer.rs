@@ -790,12 +790,7 @@ impl App {
             return;
         }
         if self.busy() || settling {
-            match self.queued.get_mut(&sid) {
-                Some(waiting) => waiting.append(prompt),
-                None => {
-                    self.queued.insert(sid, prompt);
-                }
-            }
+            self.queued.entry(sid).or_default().push(prompt);
             return;
         }
         self.post(&sid, prompt);
@@ -812,24 +807,54 @@ impl App {
                 ModelStatus::Ready(_)
             )
         });
-        if let (true, Some(prompt)) = (ready, self.queued.remove(sid)) {
+        if !ready {
+            return;
+        }
+        // Everything that waited goes as one message.
+        let mut waiting = self.queued.remove(sid).unwrap_or_default().into_iter();
+        if let Some(mut prompt) = waiting.next() {
+            for next in waiting {
+                prompt.append(next);
+            }
             self.post(sid, prompt);
         }
     }
 
-    /// Takes the waiting message of the open chat back into the box, to change or drop it.
+    /// Takes every waiting message of the open chat back into the box, to change or drop them.
     pub fn unqueue(&mut self) {
+        self.take_back(None);
+    }
+
+    /// Takes the open chat's waiting message number `at` back into the box.
+    pub fn unqueue_one(&mut self, at: usize) {
+        self.take_back(Some(at));
+    }
+
+    fn take_back(&mut self, only: Option<usize>) {
         let Some(sid) = self.current().map(|a| a.chat().id.clone()) else {
             return;
         };
-        let Some(waiting) = self.queued.remove(&sid) else {
+        let Some(list) = self.queued.get_mut(&sid) else {
             return;
         };
+        let taken: Vec<Prompt> = match only {
+            None => std::mem::take(list),
+            Some(at) if at < list.len() => vec![list.remove(at)],
+            Some(_) => return,
+        };
+        if list.is_empty() {
+            self.queued.remove(&sid);
+        }
         let typed = std::mem::take(&mut self.composer.edit.text);
-        let mut back = Prompt::from(waiting.text);
+        let mut back = Prompt::from(String::new());
+        let mut files = Vec::new();
+        for p in taken {
+            back.append(Prompt::from(p.text));
+            files.extend(p.attachments);
+        }
         back.append(Prompt::from(typed));
         self.composer.show(&back.text);
-        for a in waiting.attachments {
+        for a in files {
             prompt::add(&mut self.composer.attachments, a);
         }
     }
@@ -887,9 +912,11 @@ impl App {
         }
     }
 
-    /// The open chat's waiting message, if one waits.
-    pub fn queued_here(&self) -> Option<&Prompt> {
-        self.current().and_then(|a| self.queued.get(&a.chat().id))
+    /// The open chat's waiting messages, oldest first.
+    pub fn queued_here(&self) -> &[Prompt] {
+        self.current()
+            .and_then(|a| self.queued.get(&a.chat().id))
+            .map_or(&[], Vec::as_slice)
     }
 }
 

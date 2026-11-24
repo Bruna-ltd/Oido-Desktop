@@ -304,7 +304,7 @@ fn detail(k: &Kit, key: &str, about: String) -> El {
         .padding(12.0)
         .child(
             text(about)
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .wrap()
                 .a11y_hidden(),

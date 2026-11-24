@@ -249,6 +249,24 @@ impl App {
             .sum()
     }
 
+    /// The commands agent `a` has running in the background, in all its chats.
+    pub fn background_commands(&self, a: &crate::agents::Agent) -> Vec<String> {
+        a.sessions
+            .iter()
+            .flat_map(|s| self.processes.running_commands(&s.id))
+            .collect()
+    }
+
+    /// Ends every background process agent `a` has, in all its chats.
+    pub fn stop_background(&mut self, agent: &str) {
+        let Some(a) = self.roster.list.iter().find(|a| a.id == agent) else {
+            return;
+        };
+        for s in &a.sessions {
+            self.processes.stop_chat(&s.id);
+        }
+    }
+
     /// Seconds the open chat's reply has been in progress.
     pub fn writing_secs(&self) -> Option<u64> {
         let id = &self.current()?.chat().id;
@@ -2636,9 +2654,12 @@ mod tests {
         app.composer.edit = TextEdit::new("and more");
         app.send();
         assert_eq!(
-            app.queued_here().map(|p| p.text.as_str()),
-            Some("another\n\nand more"),
-            "a second message joins the one waiting"
+            app.queued_here()
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            ["another", "and more"],
+            "a second message waits beside the first"
         );
 
         app.settle(&sid, "r", Ok(()));
@@ -2748,7 +2769,7 @@ data: [DONE]
         app.composer.edit = TextEdit::new("anything");
         app.send();
         assert_eq!(
-            app.queued_here().map(|p| p.text.as_str()),
+            app.queued_here().first().map(|p| p.text.as_str()),
             Some("anything"),
             "a message written meanwhile waits, and is not sent before the question is answered"
         );
@@ -3093,7 +3114,11 @@ data: [DONE]
         let (mut app, seen) = app_with_server(
             &db,
             vec![
-                (200, "text/event-stream", call_stream("ls -la /tmp", serde_json::json!({}))),
+                (
+                    200,
+                    "text/event-stream",
+                    call_stream("ls -la /tmp", serde_json::json!({})),
+                ),
                 (200, "text/event-stream", STREAM),
             ],
         );
@@ -3102,7 +3127,10 @@ data: [DONE]
         app.send();
         let _ = seen.recv().unwrap();
         let second = seen.recv().unwrap();
-        assert!(second.contains("there is no tool called ls -la /tmp"), "{second}");
+        assert!(
+            second.contains("there is no tool called ls -la /tmp"),
+            "{second}"
+        );
         assert!(matches!(last(&app), Message::Assistant { text, .. } if text == "Hello!"));
     }
 

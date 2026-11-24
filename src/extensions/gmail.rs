@@ -15,6 +15,8 @@ const SEND: &str = "https://www.googleapis.com/auth/gmail.send";
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 const DEFAULT_RESULTS: u64 = 10;
 const MAX_RESULTS: u64 = 25;
+/// An attachment's text is cut off after this many bytes, so one big file cannot fill the context.
+const ATTACHMENT_TEXT_LIMIT: usize = 64 * 1024;
 
 pub struct Gmail;
 
@@ -52,12 +54,25 @@ impl Extension for Gmail {
             },
             ToolDef {
                 name: "read_message",
-                description: "Read one email: its headers, its text and the names of its attachments.",
+                description: "Read one email: its headers, its text and the names of its attachments. Read an attachment with read_attachment.",
                 access: Access::Reads,
                 schema: json!({
                     "type": "object",
                     "properties": {"id": {"type": "string", "description": "The message id from search."}},
                     "required": ["id"]
+                }),
+            },
+            ToolDef {
+                name: "read_attachment",
+                description: "Read the text of one attachment of an email: plain text, CSV, JSON, HTML, XML and PDF files. Pictures, scanned PDFs and other files cannot be read as text.",
+                access: Access::Reads,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "The message id from search."},
+                        "filename": {"type": "string", "description": "The attachment's name, as read_message lists it."}
+                    },
+                    "required": ["id", "filename"]
                 }),
             },
             ToolDef {
@@ -162,6 +177,7 @@ impl Extension for Gmail {
                 )?;
                 Ok(render_message(&msg))
             }
+            "read_attachment" => read_attachment(args, api),
             "read_thread" => {
                 let thread = api.get(
                     &format!("{BASE}/threads/{}", id_arg(args)?),
@@ -638,10 +654,96 @@ fn collect(part: &Value, text: &mut Vec<String>, html: &mut Vec<String>, files: 
 
 /// Gmail's URL-safe base64, with or without padding.
 fn decode(data: &str) -> String {
+    String::from_utf8_lossy(&decode_bytes(data)).into_owned()
+}
+
+fn decode_bytes(data: &str) -> Vec<u8> {
     URL_SAFE_NO_PAD
         .decode(data.trim_end_matches('='))
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
+}
+
+/// The part of a message that is the attachment called `name`.
+fn find_attachment<'a>(part: &'a Value, name: &str) -> Option<&'a Value> {
+    if part["filename"].as_str() == Some(name) {
+        return Some(part);
+    }
+    part["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|child| find_attachment(child, name))
+}
+
+fn read_attachment(args: &Value, api: &Api) -> Result<String, Failure> {
+    let id = id_arg(args)?;
+    let name = args["filename"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| Failure::other("`filename` is required"))?;
+    let msg = api.get(&format!("{BASE}/messages/{id}"), &[("format", "full")])?;
+    let part = find_attachment(&msg["payload"], name).ok_or_else(|| {
+        Failure::other(format!(
+            "message {id} has no attachment called {name}; read_message lists them"
+        ))
+    })?;
+    let mime = part["mimeType"].as_str().unwrap_or("");
+    // Small attachments come inside the message; the rest are fetched by their id.
+    let data = match (
+        part["body"]["data"].as_str(),
+        part["body"]["attachmentId"].as_str(),
+    ) {
+        (Some(data), _) => data.to_owned(),
+        (None, Some(attachment)) => {
+            let got = api.get(
+                &format!(
+                    "{BASE}/messages/{id}/attachments/{}",
+                    super::google::segment(attachment)
+                ),
+                &[],
+            )?;
+            got["data"].as_str().unwrap_or("").to_owned()
+        }
+        (None, None) => return Err(Failure::other(format!("{name} has no content"))),
+    };
+    let text = attachment_text(name, mime, &decode_bytes(&data)).map_err(Failure::other)?;
+    Ok(format!("Attachment: {name} ({mime})\n\n{text}"))
+}
+
+/// An attachment's bytes as text for the model, cut to [`ATTACHMENT_TEXT_LIMIT`].
+fn attachment_text(name: &str, mime: &str, bytes: &[u8]) -> Result<String, String> {
+    let is_pdf = mime == "application/pdf" || name.to_ascii_lowercase().ends_with(".pdf");
+    let mut text = if is_pdf {
+        crate::prompt::pdf_text(name, bytes)?
+    } else if mime.starts_with("text/")
+        || matches!(
+            mime,
+            "application/json" | "application/xml" | "application/x-yaml" | "application/csv"
+        )
+    {
+        let raw = String::from_utf8_lossy(bytes).into_owned();
+        if mime == "text/html" {
+            crate::web::to_text(&raw)
+        } else {
+            raw
+        }
+    } else {
+        return Err(format!(
+            "{name} is a {mime} file, which cannot be read as text"
+        ));
+    };
+    if text.len() > ATTACHMENT_TEXT_LIMIT {
+        let mut end = ATTACHMENT_TEXT_LIMIT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let total = text.len();
+        text.truncate(end);
+        text.push_str(&format!(
+            "\n\n[Cut off: the first {end} of {total} bytes of text.]"
+        ));
+    }
+    Ok(text)
 }
 
 /// The few entities Gmail leaves in a snippet.
@@ -708,6 +810,40 @@ mod tests {
         assert!(out.contains("Attachments: menu.pdf (application/pdf, 2048 bytes)"));
         assert!(out.ends_with("Noon at the usual place."));
         assert!(!out.contains("html"));
+    }
+
+    #[test]
+    fn an_attachment_is_found_by_name_however_deep_it_sits() {
+        let payload = json!({"parts": [
+            {"mimeType": "multipart/alternative", "parts": [
+                {"mimeType": "text/plain", "body": {"data": b64("hi")}}
+            ]},
+            {"mimeType": "multipart/mixed", "parts": [
+                {"mimeType": "text/csv", "filename": "sums.csv", "body": {"attachmentId": "a1"}}
+            ]}
+        ]});
+        assert_eq!(
+            find_attachment(&payload, "sums.csv").unwrap()["body"]["attachmentId"],
+            "a1"
+        );
+        assert!(find_attachment(&payload, "nope.pdf").is_none());
+    }
+
+    #[test]
+    fn attachments_are_read_as_text_pdf_or_refused_and_long_ones_cut() {
+        assert_eq!(attachment_text("a.csv", "text/csv", b"x,y").unwrap(), "x,y");
+        assert_eq!(
+            attachment_text("a.html", "text/html", b"<p>Hi <b>you</b></p>").unwrap(),
+            "Hi you"
+        );
+        let pdf = crate::prompt::test_pdf();
+        let pdf_text = attachment_text("doc.pdf", "application/octet-stream", pdf.as_bytes());
+        assert!(pdf_text.is_ok(), "{pdf_text:?}");
+        assert!(attachment_text("p.png", "image/png", b"\x89PNG").is_err());
+        let long = "é".repeat(ATTACHMENT_TEXT_LIMIT);
+        let cut = attachment_text("l.txt", "text/plain", long.as_bytes()).unwrap();
+        assert!(cut.contains("[Cut off: the first"));
+        assert!(cut.len() < long.len());
     }
 
     #[test]
@@ -855,7 +991,7 @@ mod tests {
         );
         assert_eq!(
             tools.iter().filter(|t| t.access == Access::Reads).count(),
-            4
+            5
         );
     }
 

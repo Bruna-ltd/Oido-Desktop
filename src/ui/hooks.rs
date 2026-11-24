@@ -61,7 +61,7 @@ pub fn screen(s: &App, k: &Kit) -> El {
 
 fn note(words: &str, k: &Kit) -> El {
     text(words.to_owned())
-        .font(k.ty.small)
+        .font(k.ty.caption())
         .color(k.c.text_muted)
         .wrap()
         .padding(16.0)
@@ -101,7 +101,7 @@ fn row(h: &Hook, k: &Kit) -> El {
                         .font(k.ty.ui_medium)
                         .color(c.text_base),
                 )
-                .child(text(detail).font(k.ty.small).color(c.text_muted).wrap())
+                .child(text(detail).font(k.ty.caption()).color(c.text_muted).wrap())
                 .child(
                     text(h.command.clone())
                         .font(k.ty.mono)
@@ -303,13 +303,13 @@ fn help(k: &Kit) -> El {
         .gap(8.0)
         .child(
             text("The command reads the event from its input: {\"event\": \"before_tool\", \"tool\": \"shell\", \"args\": {…}, \"agent\": …, \"cwd\": …}; after a tool it also has \"result\".")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
         )
         .child(
             text("Print nothing, or exit 0, to let things go on. Exit 2 refuses (what it wrote to stderr is the reason). Or print {\"action\": \"block\" | \"ask\" | \"allow\", \"reason\": …}, or {\"action\": \"replace\", \"args\": {…}} before a tool, {\"action\": \"replace\", \"result\": \"…\"} after one. \"ask\" holds the call for your go-ahead.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
         )

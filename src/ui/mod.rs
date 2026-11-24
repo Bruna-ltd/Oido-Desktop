@@ -115,8 +115,10 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     // Only Runs has a details pane; Chat is the conversation alone, as in Studio.
     let runs = s.route == Route::Runs;
     let mut toolbar = Toolbar::new();
-    if s.route != Route::Chat {
-        toolbar = toolbar.title(title);
+    match (s.route, s.current()) {
+        (Route::Chat, Some(agent)) => toolbar = chat_header::toolbar(s, agent, &k, toolbar),
+        (Route::Chat, None) => {}
+        _ => toolbar = toolbar.title(title),
     }
     if s.route == Route::AgentForm {
         toolbar = agent_form::toolbar(s, &k, toolbar);

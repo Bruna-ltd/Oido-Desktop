@@ -173,7 +173,8 @@ pub struct App {
     pub parked: std::collections::HashMap<String, crate::composer::Composer>,
     /// Messages sent while their chat's agent was still answering, by session id. Each goes when
     /// its chat's reply ends.
-    pub queued: std::collections::HashMap<String, crate::prompt::Prompt>,
+    /// Messages waiting for a reply to end, per chat, oldest first.
+    pub queued: std::collections::HashMap<String, Vec<crate::prompt::Prompt>>,
     /// The message just copied with its Copy button (chat id and place), and when: its icon shows a
     /// check for a moment.
     /// The menu a right-click on chat text or the composer opened.
@@ -498,22 +499,23 @@ impl App {
     }
 
     /// Runs a change of which chat is open, parking the composer's text with the chat it was typed
-    /// in and bringing back the new chat's own.
+    /// in and bringing back the new chat's own. The caret lands in the box either way, so the
+    /// person can type straight after picking an agent or a chat.
     fn switching_chat(&mut self, change: impl FnOnce(&mut Self)) {
         let open = |s: &Self| s.roster.current().map(|a| a.chat().id.clone());
         let before = open(self);
         change(self);
         let after = open(self);
-        if before == after {
-            return;
+        if before != after {
+            let draft = std::mem::take(&mut self.composer).parked();
+            if let Some(id) = before.filter(|_| !draft.is_blank()) {
+                self.parked.insert(id, draft);
+            }
+            if let Some(back) = after.and_then(|id| self.parked.remove(&id)) {
+                self.composer = back;
+            }
         }
-        let draft = std::mem::take(&mut self.composer).parked();
-        if let Some(id) = before.filter(|_| !draft.is_blank()) {
-            self.parked.insert(id, draft);
-        }
-        if let Some(back) = after.and_then(|id| self.parked.remove(&id)) {
-            self.composer = back;
-        }
+        self.composer.edit.focused = true;
     }
 
     /// Opens chat `sid`, whichever agent or team member holds it.
@@ -683,7 +685,6 @@ impl App {
 
     pub fn new_tab(&mut self) {
         self.switching_chat(Self::open_new_tab);
-        self.composer.edit.focused = true;
     }
 
     fn open_new_tab(&mut self) {
@@ -851,6 +852,10 @@ mod tests {
         assert!(
             app.composer.edit.text.is_empty(),
             "another agent's chat is its own"
+        );
+        assert!(
+            app.composer.edit.focused,
+            "picking an agent puts the caret in the box"
         );
         app.select_agent(Target::agent("atlas"));
         assert_eq!(

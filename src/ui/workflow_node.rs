@@ -84,7 +84,7 @@ fn pane(title: &str, extra: Option<El>, body: El, k: &Kit) -> El {
 
 fn faint(words: &str, k: &Kit) -> El {
     text(words.to_owned())
-        .font(k.ty.small)
+        .font(k.ty.caption())
         .color(k.c.text_faint)
         .wrap()
 }
@@ -111,7 +111,7 @@ fn input_pane(s: &App, ed: &Editor, at: &Loc, k: &Kit) -> El {
     }
     body = body.child(
         text("Press a name to put it in the box you are typing in.")
-            .font(k.ty.small)
+            .font(k.ty.caption())
             .color(c.text_faint)
             .wrap(),
     );
@@ -283,7 +283,7 @@ fn output_pane(s: &App, at: &Loc, k: &Kit) -> El {
             if let Some(why) = &m.error {
                 body = body.child(
                     text(why.clone())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.warning.icon)
                         .wrap()
                         .selectable(true),

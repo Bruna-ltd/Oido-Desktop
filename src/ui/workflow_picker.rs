@@ -154,7 +154,7 @@ fn item(kind: &'static Kind, k: &Kit) -> El {
                 )
                 .child(
                     text(kind.hint.to_owned())
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.text_muted)
                         .wrap(),
                 ),

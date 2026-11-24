@@ -289,14 +289,14 @@ fn detail(ed: &Editor, line: &StepLog, st: Status, k: &Kit) -> El {
         )
         .child(
             text(place(ed, line))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap()
                 .selectable(true),
         )
         .child(
             text(how.join(" · "))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(if st == Status::Failed {
                     c.warning.icon
                 } else {

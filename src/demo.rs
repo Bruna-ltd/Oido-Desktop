@@ -792,6 +792,8 @@ pub static SCENES: &[Scene] = &[
         use crate::schedule::{Proposal, Schedule, Target as Does, Timing};
         load_samples(s);
         s.roster.select(Target::agent("scout"));
+        // An empty database would open on onboarding; the draft lives in the chat.
+        s.route = Route::Chat;
         let timing = Timing::every(app::now(), 30 * 60);
         let draft = timing.and_then(|t| {
             Schedule::new(
@@ -1942,7 +1944,7 @@ pub static SCENES: &[Scene] = &[
         s.scrolled_up = true;
         if let Some(sid) = sid {
             s.queued
-                .insert(sid.clone(), "Then draft the announcement.".into());
+                .insert(sid.clone(), vec!["Then draft the announcement.".into()]);
             s.live.insert(sid, crate::run::Live::demo());
         }
     }),

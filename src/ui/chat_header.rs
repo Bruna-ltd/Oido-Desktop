@@ -1,9 +1,10 @@
-//! Above the transcript, as in Studio's ChatBox top bar: who this conversation is with, "Start
-//! fresh", and the agent's open chats as pills.
+//! Above the transcript, as in Studio's ChatBox top bar: who this conversation is with and "Start
+//! fresh" in the window's toolbar, and the agent's open chats as pills under it.
 
 use rune::{Color, El, col, el, icon, row, text};
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, glyphs,
+    Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Toolbar,
+    glyphs,
 };
 
 use super::{icons, sidebar, usage};
@@ -12,16 +13,32 @@ use crate::app::App;
 use crate::model::AgentStatus;
 use crate::providers::ModelStatus;
 
+/// Fills the window's toolbar on the chat screen: who the conversation is with on the left, what
+/// it has used and what you can do with it on the right. The band would otherwise sit empty above
+/// a header of its own.
+pub fn toolbar(s: &App, a: &Agent, k: &Kit, bar: Toolbar) -> Toolbar {
+    // The figures read as one group, set apart from the buttons after them.
+    let figures: Vec<El> = fill(s, a, k).into_iter().chain(spend(s, a, k)).collect();
+    let mut bar = bar.leading(identity(s, a, k));
+    if !figures.is_empty() {
+        bar = bar.trailing(row().gap(12.0).pr(8.0).center_y().children(figures));
+    }
+    stop_background(s, a, k)
+        .into_iter()
+        .chain(actions(s, k))
+        .fold(bar, Toolbar::trailing)
+}
+
+/// Under the toolbar: the agent's open chats as pills.
 pub fn build(s: &App, a: &Agent, k: &Kit) -> El {
     col()
         .key("chat-header")
         .w_full()
-        .child(title(s, a, k))
         .child(tabs(s, a, k))
         .child(Divider::horizontal().build(k))
 }
 
-fn title(s: &App, a: &Agent, k: &Kit) -> El {
+fn identity(s: &App, a: &Agent, k: &Kit) -> El {
     let background = s.background_running(a);
     let (subtitle, ink) = match a.status {
         AgentStatus::Running => ("Working…".to_owned(), k.c.success.icon),
@@ -42,41 +59,66 @@ fn title(s: &App, a: &Agent, k: &Kit) -> El {
         },
     };
     row()
-        .w_full()
-        .px(20.0)
-        .pt(12.0)
-        .pb(4.0)
-        .gap(12.0)
+        .key("chat-identity")
+        .shrink()
+        .min_w(0.0)
+        .gap(10.0)
         .center_y()
         .child(sidebar::avatar(a, k, 28.0))
         .child(
             col()
-                .grow(1.0)
+                .shrink()
                 .min_w(0.0)
-                .child(text(a.name.clone()).font(k.ty.body_medium).color(k.c.text_base))
-                .child(text(subtitle).font(k.ty.small).color(ink)),
+                .child(
+                    text(a.name.clone())
+                        .font(k.ty.body_medium)
+                        .color(k.c.text_base)
+                        .truncate(),
+                )
+                .child(text(subtitle).font(k.ty.small).color(ink).truncate()),
         )
-        .children(fill(s, a, k))
-        .children(spend(s, a, k))
-        .child(
-            Button::new("Save as workflow")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .disabled(!s.can_teach())
-                .help("Turn what the agent did in this chat into steps it can run again. You see a draft first.")
-                .on_press(|s: &mut App| s.teach_open())
-                .build(k)
-                .key("teach"),
-        )
-        .child(
-            Button::new("Start fresh")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .help("The agent forgets everything said so far in this chat and begins with a clean slate. What you have already read stays on screen.")
-                .on_press(|s: &mut App| s.start_fresh())
-                .build(k)
-                .key("start-fresh"),
-        )
+}
+
+fn actions(s: &App, k: &Kit) -> [El; 2] {
+    [
+        Button::new("Save as workflow")
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .disabled(!s.can_teach())
+            .help("Turn what the agent did in this chat into steps it can run again. You see a draft first.")
+            .on_press(|s: &mut App| s.teach_open())
+            .build(k)
+            .key("teach"),
+        Button::new("Start fresh")
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .help("The agent forgets everything said so far in this chat and begins with a clean slate. What you have already read stays on screen.")
+            .on_press(|s: &mut App| s.start_fresh())
+            .build(k)
+            .key("start-fresh"),
+    ]
+}
+
+/// A way to end what the agent left running in the background, which is not "busy" and so has no
+/// Stop of its own. The tooltip lists the commands.
+fn stop_background(s: &App, a: &Agent, k: &Kit) -> Option<El> {
+    let running = s.background_commands(a);
+    if running.is_empty() {
+        return None;
+    }
+    let id = a.id.clone();
+    Some(
+        Button::new("Stop background")
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .help(format!(
+                "Ends these and everything they started:\n{}",
+                running.join("\n")
+            ))
+            .on_press(move |s: &mut App| s.stop_background(&id))
+            .build(k)
+            .key("stop-background"),
+    )
 }
 
 /// How full the chat is against the model's context limit; amber when nearly full. Nothing before

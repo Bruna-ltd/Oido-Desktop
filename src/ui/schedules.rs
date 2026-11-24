@@ -3,7 +3,7 @@
 //! approves).
 
 use chrono::{Datelike, Local, TimeZone};
-use rune::{Color, El, ScrollSpec, TextEdit, TextStyle, col, el, icon, row, text, text_input};
+use rune::{Color, El, ScrollSpec, TextEdit, col, el, icon, row, text, text_input};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Divider, Kit, SegmentedControl, Select, SelectAppearance,
     glyphs,
@@ -59,7 +59,7 @@ fn empty(k: &Kit) -> El {
                 .border(1.0, k.c.border_muted)
                 .child(icon(&icons::SCHEDULED, 26.0).color(k.c.text_muted)),
         )
-        .child(text("Nothing scheduled yet").font(heading_font(k)).color(k.c.text_base))
+        .child(text("Nothing scheduled yet").font(crate::theme::ty::heading(k)).color(k.c.text_base))
         .child(
             text("A schedule gives an agent a job at set times: send it a prompt, or run one of its workflows. Oido has to be open for it to run. You can make one here, or ask an agent to set it up.")
                 .font(k.ty.body)
@@ -70,14 +70,6 @@ fn empty(k: &Kit) -> El {
         )
         .child(el().h(4.0))
         .child(new_button(k))
-}
-
-fn heading_font(k: &Kit) -> TextStyle {
-    TextStyle {
-        size: 20.0,
-        line_height: 26.0,
-        ..k.ty.body_medium
-    }
 }
 
 fn list(s: &App, k: &Kit) -> El {
@@ -254,7 +246,7 @@ fn notice(why: &str, k: &Kit) -> El {
         .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.warning.icon))
         .child(
             text(why.to_owned())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.warning.fg)
                 .wrap()
                 .grow(1.0),
@@ -270,7 +262,7 @@ fn fact(label: &str, value: El, k: &Kit) -> El {
         .py(12.0)
         .child(
             text(label.to_owned())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .pt(3.0)
                 .w(88.0),
@@ -303,7 +295,7 @@ fn detail(s: &App, k: &Kit) -> El {
         .gap(6.0)
         .child(
             text(x.name.clone())
-                .font(heading_font(k))
+                .font(crate::theme::ty::heading(k))
                 .color(c.text_base)
                 .wrap(),
         )
@@ -315,7 +307,7 @@ fn detail(s: &App, k: &Kit) -> El {
             ),
         );
 
-    let mut actions = row().gap(8.0).center_y().wrap();
+    let mut actions = row().w_full().gap(8.0).center_y().wrap();
     actions = actions.child(
         small_button("Run now", ButtonVariant::Submit)
             .disabled(s.firing.contains_key(&x.id))
@@ -342,6 +334,7 @@ fn detail(s: &App, k: &Kit) -> El {
         actions
     } else if page.confirm {
         actions
+            .child(el().grow(1.0))
             .child(
                 small_button("Yes, delete it", ButtonVariant::Outline)
                     .on_press(|s: &mut App| s.delete_open_schedule())
@@ -355,7 +348,7 @@ fn detail(s: &App, k: &Kit) -> El {
                     .key("schedule-delete-cancel"),
             )
     } else {
-        actions.child(
+        actions.child(el().grow(1.0)).child(
             small_button("Delete", ButtonVariant::Ghost)
                 .on_press(|s: &mut App| s.delete_open_schedule())
                 .build(k)
@@ -372,14 +365,7 @@ fn detail(s: &App, k: &Kit) -> El {
             if long && !open {
                 body = body.max_lines(PROMPT_LINES);
             }
-            let mut quote = col()
-                .w_full()
-                .px(12.0)
-                .py(10.0)
-                .gap(6.0)
-                .radius(k.radius.md)
-                .fill(c.layer_02)
-                .child(body);
+            let mut quote = col().w_full().gap(6.0).child(body);
             if long {
                 quote = quote.child(
                     small_button(
@@ -447,7 +433,7 @@ fn detail(s: &App, k: &Kit) -> El {
     if x.from_trigger {
         out = out.child(
             text("This schedule belongs to a workflow's schedule trigger. To change it, edit the workflow and publish it again.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(c.text_muted)
                 .wrap(),
         );
@@ -464,7 +450,7 @@ fn history(fires: &[Fire], k: &Kit) -> El {
     if fires.is_empty() {
         return col().w_full().gap(10.0).child(head).child(
             text("It hasn't run yet. Use Run now to try it.")
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .wrap(),
         );
@@ -519,7 +505,7 @@ fn fire_row(f: &Fire, k: &Kit) -> El {
     if !f.note.is_empty() {
         body = body.child(
             text(f.note.clone())
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(if f.status == FireStatus::Failed {
                     c.danger.fg
                 } else {
@@ -548,6 +534,9 @@ fn fire_row(f: &Fire, k: &Kit) -> El {
 
 // ---- the form
 
+/// How wide the form's column grows.
+const FORM_WIDTH: f32 = 640.0;
+
 /// A labelled one-line text field.
 pub(super) fn input(
     label: &str,
@@ -558,10 +547,7 @@ pub(super) fn input(
     f: impl for<'a> Fn(&'a mut App) -> &'a mut TextEdit + 'static,
 ) -> El {
     let c = &k.c;
-    let style = rune::TextStyle {
-        line_height: 22.0,
-        ..k.ty.body
-    };
+    let style = crate::theme::ty::field(k);
     col()
         .w_full()
         .gap(4.0)
@@ -631,8 +617,12 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
     let head = col()
         .w_full()
         .gap(4.0)
-        .child(text(title).font(heading_font(k)).color(c.text_base))
-        .child(text(about).font(k.ty.small).color(c.text_muted).wrap());
+        .child(
+            text(title)
+                .font(crate::theme::ty::heading(k))
+                .color(c.text_base),
+        )
+        .child(text(about).font(k.ty.caption()).color(c.text_muted).wrap());
     let mut out = col().w_full().gap(14.0).child(input(
         "Name",
         &f.name,
@@ -790,17 +780,14 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
                 |t| format!("next run {}", soon(t)),
             );
             row()
-                .w_full()
+                .grow(1.0)
+                .min_w(0.0)
                 .gap(10.0)
                 .center_y()
-                .px(14.0)
-                .py(10.0)
-                .radius(k.radius.md)
-                .fill(c.layer_02)
                 .child(icon(&icons::SCHEDULED, 16.0).color(c.text_muted))
                 .child(
                     text(format!("Runs {}, {next}", timing.describe(&Local)))
-                        .font(k.ty.small)
+                        .font(k.ty.caption())
                         .color(c.text_base)
                         .wrap()
                         .grow(1.0),
@@ -828,10 +815,9 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
                 .build(k)
                 .key("schedule-cancel"),
         );
-    col()
-        .key("schedule-form")
+    let fields = col()
+        .w_full()
         .grow(1.0)
-        .h_full()
         .min_h(0.0)
         .padding(28.0)
         .scroll(ScrollSpec {
@@ -840,15 +826,36 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(
             col()
                 .w_full()
-                .max_w(640.0)
+                .max_w(FORM_WIDTH)
                 .gap(20.0)
                 .child(head)
                 .child(section("Task", what, k))
-                .child(section("When it runs", when_card, k))
-                .children(preview)
-                .children(f.notice.as_ref().map(|why| notice(why, k)))
-                .child(buttons),
-        )
+                .child(section("When it runs", when_card, k)),
+        );
+    // What it would do and the buttons that start it stay in sight however long the form is.
+    let footer = col().w_full().px(28.0).py(14.0).child(
+        col()
+            .w_full()
+            .max_w(FORM_WIDTH)
+            .gap(12.0)
+            .children(f.notice.as_ref().map(|why| notice(why, k)))
+            .child(
+                row()
+                    .w_full()
+                    .gap(16.0)
+                    .center_y()
+                    .child(preview.unwrap_or_else(|| el().grow(1.0)))
+                    .child(buttons),
+            ),
+    );
+    col()
+        .key("schedule-form")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .child(fields)
+        .child(Divider::horizontal().build(k))
+        .child(footer)
 }
 
 fn section(title: &str, body: El, k: &Kit) -> El {
@@ -863,13 +870,20 @@ fn section(title: &str, body: El, k: &Kit) -> El {
         .child(body)
 }
 
-/// A line of help under a field.
-fn hint(t: &str, k: &Kit) -> El {
-    text(t.to_owned())
-        .font(k.ty.small)
-        .color(k.c.text_faint)
-        .wrap()
+/// A field with its line of help just under it, so the two read as one.
+fn hinted(field: El, t: &str, k: &Kit) -> El {
+    col().w_full().gap(6.0).child(field).child(
+        text(t.to_owned())
+            .font(k.ty.caption())
+            .color(k.c.text_faint)
+            .wrap(),
+    )
 }
+
+/// How wide a box for a time or a number is: its value is a few characters.
+const SHORT_FIELD: f32 = 160.0;
+/// How wide a box for a date and time, or a cron line, is.
+const MEDIUM_FIELD: f32 = 280.0;
 
 /// What a timing is made of, as boxes: how often, then what that takes. `form` finds the
 /// [`TimingForm`] being edited; `prefix` keeps the boxes' keys apart from another form's.
@@ -898,52 +912,54 @@ pub(super) fn timing_fields(
     ));
     match f.when {
         When::Days => out
-            .child(input(
-                "At",
-                &f.at,
-                &key("at"),
-                "09:00",
+            .child(hinted(
+                input("At", &f.at, &key("at"), "09:00", k, move |s: &mut App| {
+                    &mut form(s).at
+                })
+                .max_w(SHORT_FIELD),
+                "Uses this computer's time.",
                 k,
-                move |s: &mut App| &mut form(s).at,
             ))
-            .child(labelled("On", days(f.days, prefix, k, form), k))
-            .child(hint("Uses this computer's time.", k)),
-        When::Every => out
-            .child(input(
+            .child(labelled("On", days(f.days, prefix, k, form), k)),
+        When::Every => out.child(hinted(
+            input(
                 "Repeat every (minutes)",
                 &f.every,
                 &key("every"),
                 "60",
                 k,
                 move |s: &mut App| &mut form(s).every,
-            ))
-            .child(hint("60 is every hour, 1440 is every day.", k)),
-        When::Once => out
-            .child(input(
+            )
+            .max_w(SHORT_FIELD),
+            "60 is every hour, 1440 is every day.",
+            k,
+        )),
+        When::Once => out.child(hinted(
+            input(
                 "On",
                 &f.once,
                 &key("once"),
                 "2026-11-12 09:00",
                 k,
                 move |s: &mut App| &mut form(s).once,
-            ))
-            .child(hint(
-                "Year-month-day, then hour:minute (24-hour), in this computer's time.",
-                k,
-            )),
-        When::Cron => out
-            .child(input(
+            )
+            .max_w(MEDIUM_FIELD),
+            "Year-month-day, then hour:minute (24-hour), in this computer's time.",
+            k,
+        )),
+        When::Cron => out.child(hinted(
+            input(
                 "Cron expression",
                 &f.cron,
                 &key("cron"),
                 "0 9 * * 1-5",
                 k,
                 move |s: &mut App| &mut form(s).cron,
-            ))
-            .child(hint(
-                "Five parts: minute hour day month weekday. 0 9 * * 1-5 is 09:00 on weekdays.",
-                k,
-            )),
+            )
+            .max_w(MEDIUM_FIELD),
+            "Five parts: minute hour day month weekday. 0 9 * * 1-5 is 09:00 on weekdays.",
+            k,
+        )),
     }
 }
 

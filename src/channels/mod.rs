@@ -1333,12 +1333,7 @@ impl App {
             } else {
                 format!("{name} waits for your answer first. This goes after it.")
             };
-            match self.queued.get_mut(&sid) {
-                Some(waiting) => waiting.append(prompt),
-                None => {
-                    self.queued.insert(sid, prompt);
-                }
-            }
+            self.queued.entry(sid).or_default().push(prompt);
             self.channels
                 .get_mut(kind)
                 .say_with(place, &waits, Vec::new());
@@ -1911,7 +1906,10 @@ mod tests {
         app.track(&sid, "running");
         write(&mut app, "second");
         assert_eq!(
-            app.queued.get(&sid).map(|p| p.text.as_str()),
+            app.queued
+                .get(&sid)
+                .and_then(|l| l.first())
+                .map(|p| p.text.as_str()),
             Some("second")
         );
         assert!(said(&mut app)[0].contains("still working"));
@@ -2326,7 +2324,13 @@ mod tests {
         said(&mut app);
         picture(&mut app, Ok(png()), "");
         let sid = bound(&app);
-        assert_eq!(app.queued.get(&sid).map(|p| p.images().count()), Some(1));
+        assert_eq!(
+            app.queued
+                .get(&sid)
+                .and_then(|l| l.first())
+                .map(|p| p.images().count()),
+            Some(1)
+        );
         assert!(said(&mut app)[0].contains("waits for your answer first"));
         assert!(app.pending_call_in(&sid, crate::tools::ASK).is_some());
     }
