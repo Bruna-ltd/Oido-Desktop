@@ -478,6 +478,8 @@ impl App {
             self.typesafe_connected(),
             &crate::mcp::specs(&self.mcp.servers),
         );
+        let missing = crate::tools::missing(&agent.tools, &tools, &self.mcp.servers);
+        let brief = crate::tools::within(&brief, &missing);
         // A list-and-judge task reads through a script, not a call at a time; a lead with a team
         // hands it on instead.
         let brief = if self.bulk.contains(&sid) && agent.subagents.is_empty() {

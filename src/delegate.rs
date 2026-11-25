@@ -364,6 +364,15 @@ pub fn summary(args: &str) -> String {
     format!("{agent}: {}", task.lines().next().unwrap_or_default())
 }
 
+/// What a worker is given to work with.
+struct Kit {
+    tools: Vec<ToolSpec>,
+    /// How it reaches the tools it has that are not run by the worker itself, by tool name.
+    routes: std::collections::HashMap<String, Route>,
+    /// The tools its agent was given that it cannot use now, each with why.
+    missing: Vec<(String, String)>,
+}
+
 /// Everything a team member's worker needs, worked out before leaving the UI thread.
 #[derive(Clone)]
 struct Job {
@@ -875,95 +884,117 @@ impl App {
         if task.is_empty() {
             return Err(format!("no task was given for {}.", member.name));
         }
-        let (run, mut job) = self.member_job(
+        // A helper works with its lead's tools; a member with its own.
+        let equipped = if std::ptr::eq(member, &ephemeral) {
+            lead
+        } else {
+            member
+        };
+        let (run, job) = self.member_job(
             member,
+            equipped,
             sid,
             Where::Chat(sid.to_owned()),
             task,
             parent,
             self.tainted.get(sid).cloned(),
         )?;
-        if std::ptr::eq(member, &ephemeral) {
-            (job.tools, job.routes) = self.worker_tools(lead);
-        }
         Ok((run, job, member.name.clone()))
     }
 
     /// The tools a worker with `agent`'s tools has: the ones that do work (see [`helps`]), and for
     /// each that is not run by the worker itself how to reach it. A team member has its own; a
-    /// helper has its lead's. A tool whose connection or sign-in is missing is left out, so the
-    /// worker is never offered what would only fail.
-    fn worker_tools(
-        &self,
-        agent: &Agent,
-    ) -> (Vec<ToolSpec>, std::collections::HashMap<String, Route>) {
+    /// helper has its lead's. A tool whose connection or sign-in is missing is not offered, so the
+    /// worker never calls what would only fail; it is listed in [`Kit::missing`] with why, so the
+    /// worker can say so instead of looking for another way in.
+    fn worker_tools(&self, agent: &Agent) -> Kit {
         let offered = tools::offered(
             &agent.tools,
             self.typesafe_connected(),
             &crate::mcp::specs(&self.mcp.servers),
         );
-        let key = || {
-            let db = self.store.as_ref()?;
-            db.provider_key(crate::providers::TYPESAFE).ok().flatten()
-        };
+        let mut missing = tools::missing(&agent.tools, &offered, &self.mcp.servers);
         let mut routes = std::collections::HashMap::new();
         let mut kept = Vec::new();
         for spec in offered.into_iter().filter(|t| helps(&t.name)) {
             let route = if spec.name == crate::connector::NAME {
-                Some(Route::Browser(self.connector.clone()))
+                Ok(Route::Browser(self.connector.clone()))
             } else if crate::typesafe::is_tool(&spec.name) {
-                key().map(|key| Route::TypeSafe { key })
+                self.typesafe_key().map(|key| Route::TypeSafe { key })
             } else if crate::mcp::is_tool(&spec.name) {
-                let Some((server, tool)) = crate::mcp::resolve(&self.mcp.servers, &spec.name)
-                else {
-                    continue;
-                };
-                if !server.enabled {
-                    continue;
-                }
-                if server.is_extension() {
-                    let ext = crate::extensions::find(&server.id);
-                    let account = self
-                        .store
-                        .as_ref()
-                        .and_then(|db| {
-                            db.extension_account(crate::extensions::google::PROVIDER)
-                                .ok()
-                        })
-                        .flatten();
-                    ext.zip(account).map(|(ext, account)| Route::Google {
-                        ext,
-                        tool: tool.name.clone(),
-                        account,
-                    })
-                } else {
-                    self.mcp_target_for(&server.id)
-                        .ok()
-                        .map(|target| Route::Mcp {
-                            server: server.id.clone(),
-                            target,
-                            tool: tool.name.clone(),
-                        })
-                }
+                self.mcp_route(&spec.name)
             } else {
                 // Run by the worker itself: commands, files, the web and skills.
                 kept.push(spec);
                 continue;
             };
-            if let Some(route) = route {
-                routes.insert(spec.name.clone(), route);
-                kept.push(spec);
+            match route {
+                Ok(route) => {
+                    routes.insert(spec.name.clone(), route);
+                    kept.push(spec);
+                }
+                Err(why) => missing.push((spec.name, why)),
             }
         }
-        (kept, routes)
+        Kit {
+            tools: kept,
+            routes,
+            missing,
+        }
     }
 
-    /// What `member` needs to take `task`, and its run as it begins. `session` is what the run is
-    /// filed under, `at` where a card it raises goes, and `outside` the outside text whoever hands
-    /// it over had in view.
+    fn typesafe_key(&self) -> Result<zeroize::Zeroizing<String>, String> {
+        let db = self
+            .store
+            .as_ref()
+            .ok_or("there is no database to read the TypeSafe key from")?;
+        match db.provider_key(crate::providers::TYPESAFE) {
+            Ok(Some(key)) => Ok(key),
+            Ok(None) => Err("TypeSafe has no key saved".to_owned()),
+            Err(e) => Err(format!("the TypeSafe key could not be read: {e}")),
+        }
+    }
+
+    /// How a worker reaches MCP tool `name`, or why it cannot.
+    fn mcp_route(&self, name: &str) -> Result<Route, String> {
+        let (server, tool) = crate::mcp::resolve(&self.mcp.servers, name)
+            .filter(|(s, _)| s.enabled)
+            .ok_or_else(|| crate::mcp::why_unavailable(&self.mcp.servers, name))?;
+        if !server.is_extension() {
+            return self.mcp_target_for(&server.id).map(|target| Route::Mcp {
+                server: server.id.clone(),
+                target,
+                tool: tool.name.clone(),
+            });
+        }
+        let ext = crate::extensions::find(&server.id)
+            .ok_or_else(|| format!("{} is not built into this version", server.name))?;
+        let db = self
+            .store
+            .as_ref()
+            .ok_or("there is no database to read the Google account from")?;
+        let account = db
+            .extension_account(crate::extensions::google::PROVIDER)
+            .map_err(|e| format!("the Google account could not be read: {e}"))?
+            .ok_or("no Google account is set up: add it in Extensions")?;
+        Ok(Route::Google {
+            ext,
+            tool: tool.name.clone(),
+            account,
+        })
+    }
+
+    /// What `member` needs to take `task`, with `equipped`'s tools, and its run as it begins.
+    /// `session` is what the run is filed under, `at` where a card it raises goes, and `outside`
+    /// the outside text whoever hands it over had in view.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a separate fact about the hand-over"
+    )]
     fn member_job(
         &self,
         member: &Agent,
+        equipped: &Agent,
         session: &str,
         at: Where,
         task: String,
@@ -980,7 +1011,12 @@ impl App {
         run.parent = parent;
         run.title = crate::runs::title_of(&task);
         let (brief, skills) = self.brief_of(member);
-        let (mut tools, routes) = self.worker_tools(member);
+        let Kit {
+            mut tools,
+            routes,
+            missing,
+        } = self.worker_tools(equipped);
+        let brief = tools::within(&brief, &missing);
         if !skills.is_empty() {
             tools.push(crate::skills::spec(&skills));
         }
@@ -1038,6 +1074,7 @@ impl App {
                         format!("This workflow hands work to {name:?}, and no agent has that name.")
                     })?;
                 let (_, job) = self.member_job(
+                    member,
                     member,
                     workflow,
                     Where::Workflow(workflow.to_owned()),
@@ -1399,5 +1436,86 @@ mod tests {
         app.halt_delegations("s1");
         assert!(flagged(&app, "b") && !flagged(&app, "c"));
         assert!(app.delegating["s1"].halted);
+    }
+
+    /// An app whose Gmail and Google Calendar extensions are on, with a Google client saved when
+    /// `account` is set, and a member given one tool of each.
+    fn google_member(db: &crate::testing::TempDb, account: bool) -> (App, Agent) {
+        let mut app = db.open();
+        let store = app.store.as_ref().unwrap();
+        for id in ["gmail", "google_calendar"] {
+            let on = crate::store::Setting {
+                enabled: true,
+                ..Default::default()
+            };
+            store.save_extension(id, &on).unwrap();
+        }
+        if account {
+            let account = crate::extensions::google::Account {
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                ..Default::default()
+            };
+            store
+                .save_extension_account(crate::extensions::google::PROVIDER, &account)
+                .unwrap();
+        }
+        app.load_extensions();
+        let mut member = Agent::blank("m".into());
+        member.tools = vec![
+            "mcp__google_calendar__list_events".into(),
+            "mcp__gmail__search".into(),
+        ];
+        (app, member)
+    }
+
+    #[test]
+    fn a_member_is_given_the_connected_services_it_was_given_and_nothing_is_missing() {
+        let db = crate::testing::TempDb::new();
+        let (app, member) = google_member(&db, true);
+        let kit = app.worker_tools(&member);
+        let names: Vec<&str> = kit.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"mcp__google_calendar__list_events"),
+            "{names:?}"
+        );
+        assert!(kit.routes.contains_key("mcp__gmail__search"));
+        assert!(kit.missing.is_empty(), "{:?}", kit.missing);
+    }
+
+    #[test]
+    fn a_member_whose_services_cannot_be_reached_is_told_which_and_why() {
+        let db = crate::testing::TempDb::new();
+        let (app, member) = google_member(&db, false);
+        let kit = app.worker_tools(&member);
+        assert!(kit.tools.iter().all(|t| !crate::mcp::is_tool(&t.name)));
+        let mut missing: Vec<&str> = kit.missing.iter().map(|(n, _)| n.as_str()).collect();
+        missing.sort_unstable();
+        assert_eq!(
+            missing,
+            ["mcp__gmail__search", "mcp__google_calendar__list_events"]
+        );
+        assert!(
+            kit.missing
+                .iter()
+                .all(|(_, why)| why.contains("no Google account")),
+            "{:?}",
+            kit.missing
+        );
+        let brief = tools::within("Handle my calendar.", &kit.missing);
+        assert!(brief.starts_with("Handle my calendar.") && brief.contains(tools::STAY_WITHIN));
+        assert!(brief.contains("- mcp__gmail__search: no Google account is set up"));
+    }
+
+    #[test]
+    fn a_member_whose_extension_is_off_is_told_so() {
+        let db = crate::testing::TempDb::new();
+        let (mut app, member) = google_member(&db, true);
+        app.mcp.servers.retain(|s| s.name != "Gmail");
+        let kit = app.worker_tools(&member);
+        assert_eq!(kit.missing.len(), 1, "{:?}", kit.missing);
+        assert_eq!(kit.missing[0].0, "mcp__gmail__search");
+        assert!(kit.missing[0].1.contains("turned off"));
+        assert!(kit.routes.contains_key("mcp__google_calendar__list_events"));
     }
 }
