@@ -470,9 +470,9 @@ impl App {
         let (wf_id, inputs) = match (&f.workflow, current) {
             (Some(name), _) => {
                 let wf = self
-                    .workflows
-                    .iter()
-                    .find(|w| w.agent_id == agent_id && w.name.eq_ignore_ascii_case(name))
+                    .workflows_for(agent_id)
+                    .into_iter()
+                    .find(|w| w.name.eq_ignore_ascii_case(name))
                     .ok_or_else(|| format!("you have no saved workflow named {name:?}"))?;
                 (wf.id.clone(), f.inputs.clone().unwrap_or_default())
             }
@@ -730,35 +730,40 @@ impl App {
             return;
         };
         let now = now();
-        let saved =
-            form.read(&self.workflows, now, &Local)
-                .and_then(|(agent, name, target, timing)| {
-                    let mut s = match &form.source {
-                        Source::New => {
-                            return Schedule::new(&agent, &name, target, timing, now, &Local);
-                        }
-                        Source::Edit(id) => self.schedules.iter().find(|s| &s.id == id).cloned(),
-                        Source::Draft(call) => {
-                            let p = self.proposals.iter().find(|p| &p.call_id == call);
-                            let updates = p.is_some_and(|p| p.updates);
-                            p.map(|p| p.schedule.clone()).map(|mut s| {
-                                // A draft that changes a schedule keeps it paused if it is.
-                                if updates
-                                    && let Some(old) = self.schedules.iter().find(|o| o.id == s.id)
-                                {
-                                    s.enabled = old.enabled;
-                                }
-                                s
-                            })
-                        }
+        let may_run = form
+            .agent_id
+            .as_deref()
+            .map(|a| self.workflows_for(a))
+            .unwrap_or_default();
+        let saved = form
+            .read(&may_run, now, &Local)
+            .and_then(|(agent, name, target, timing)| {
+                let mut s = match &form.source {
+                    Source::New => {
+                        return Schedule::new(&agent, &name, target, timing, now, &Local);
                     }
-                    .ok_or("It is gone.")?;
-                    s.agent_id = agent;
-                    s.target = target;
-                    s.timing = timing;
-                    s.change(&name, now, &Local)?;
-                    Ok(s)
-                });
+                    Source::Edit(id) => self.schedules.iter().find(|s| &s.id == id).cloned(),
+                    Source::Draft(call) => {
+                        let p = self.proposals.iter().find(|p| &p.call_id == call);
+                        let updates = p.is_some_and(|p| p.updates);
+                        p.map(|p| p.schedule.clone()).map(|mut s| {
+                            // A draft that changes a schedule keeps it paused if it is.
+                            if updates
+                                && let Some(old) = self.schedules.iter().find(|o| o.id == s.id)
+                            {
+                                s.enabled = old.enabled;
+                            }
+                            s
+                        })
+                    }
+                }
+                .ok_or("It is gone.")?;
+                s.agent_id = agent;
+                s.target = target;
+                s.timing = timing;
+                s.change(&name, now, &Local)?;
+                Ok(s)
+            });
         let s = match saved {
             Ok(s) => s,
             Err(why) => {

@@ -291,7 +291,7 @@ impl Error {
             }
             Self::RateLimited(m) => format!("{who} is limiting requests: {m}"),
             Self::TooLong => {
-                "This chat is too long for the model, even with older parts trimmed and summarized. Shorten your last message, or press Start fresh."
+                "This chat is too long for the model, even with older parts trimmed and summarized. Shorten your last message, or type /clear to start fresh."
                     .to_owned()
             }
             Self::Provider(status, m) if m.is_empty() => {

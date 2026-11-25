@@ -771,7 +771,12 @@ impl App {
             .agent_ref(agent_id)
             .ok_or("That agent is gone.")?;
         let mut prep = self.prepare_model(agent_id)?;
-        prep.flows = self.flow_closure(agent_id, own, def)?;
+        // A workflow may be run by an agent it was added to; the flows it calls are still looked
+        // up among its owner's.
+        let home = own
+            .and_then(|id| self.workflows.iter().find(|w| w.id == id))
+            .map_or(agent_id, |w| w.agent_id.as_str());
+        prep.flows = self.flow_closure(home, own, def)?;
         let mut used = crate::workflow::definition::tools_used(def);
         for w in &prep.flows {
             for t in crate::workflow::definition::tools_used(&w.definition) {
@@ -1527,13 +1532,36 @@ impl App {
         });
     }
 
+    /// The workflows `agent_id` may run: its own, then those of other agents its settings add.
+    /// One of its own wins a name clash, so a name always finds one workflow.
+    pub(crate) fn workflows_for(&self, agent_id: &str) -> Vec<&Saved> {
+        let added = self
+            .roster
+            .agent_ref(agent_id)
+            .map_or(&[][..], |a| a.workflows.as_slice());
+        let mut out: Vec<&Saved> = self
+            .workflows
+            .iter()
+            .filter(|w| w.agent_id == agent_id)
+            .collect();
+        for w in self
+            .workflows
+            .iter()
+            .filter(|w| w.agent_id != agent_id && added.contains(&w.id))
+        {
+            if !out.iter().any(|o| o.name.eq_ignore_ascii_case(&w.name)) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
     /// What an agent is told about its saved workflows: each by name, what it is for and what it
     /// takes, and to run the one that fits before trying anything else. None while it has none.
     pub(crate) fn workflows_brief(&self, agent_id: &str) -> Option<String> {
         let lines: Vec<String> = self
-            .workflows
-            .iter()
-            .filter(|w| w.agent_id == agent_id)
+            .workflows_for(agent_id)
+            .into_iter()
             .map(|w| {
                 let what = match w.goal.trim() {
                     "" => {
@@ -1580,43 +1608,13 @@ impl App {
         let Some(agent_id) = self.roster.owner_of(sid).map(|a| a.id.clone()) else {
             return;
         };
-        let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
-        let name = v
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_owned();
-        let given = v
-            .get("inputs")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let found = self
-            .workflows
-            .iter()
-            .find(|w| w.agent_id == agent_id && w.name.eq_ignore_ascii_case(&name))
-            .cloned();
-        let Some(wf) = found else {
-            let yours: Vec<&str> = self
-                .workflows
-                .iter()
-                .filter(|w| w.agent_id == agent_id)
-                .map(|w| w.name.as_str())
-                .collect();
-            let list = if yours.is_empty() {
-                "You have none saved.".to_owned()
-            } else {
-                format!("Yours are: {}.", yours.join(", "))
-            };
-            self.resolve(
-                sid,
-                call_id,
-                format!("Error: you have no workflow called {name:?}. {list}"),
-                true,
-            );
-            self.start_next_command(sid);
-            return;
+        let (wf, given) = match self.workflow_called(&agent_id, args) {
+            Ok(found) => found,
+            Err(why) => {
+                self.resolve(sid, call_id, why, true);
+                self.start_next_command(sid);
+                return;
+            }
         };
         let cancel = self.track(sid, call_id);
         let (s, c) = (sid.to_owned(), call_id.to_owned());
@@ -1636,6 +1634,75 @@ impl App {
             self.resolve(sid, call_id, format!("Error: {why}"), true);
             self.start_next_command(sid);
         }
+    }
+
+    /// A `run_workflow` call by a team member working on a task its lead handed over: starts the
+    /// workflow as `agent_id`, asking at `chat`, and `reply` hears what the call answers. Stopping
+    /// the task (`cancel`) stops the run.
+    pub(crate) fn start_worker_workflow(
+        &mut self,
+        agent_id: &str,
+        chat: &str,
+        args: &str,
+        cancel: Arc<AtomicBool>,
+        reply: std::sync::mpsc::Sender<String>,
+    ) {
+        let (wf, given) = match self.workflow_called(agent_id, args) {
+            Ok(found) => found,
+            Err(why) => {
+                let _ = reply.send(why);
+                return;
+            }
+        };
+        let back = reply.clone();
+        let started = self.launch_flow(
+            &wf,
+            agent_id,
+            &given,
+            "agent",
+            Some(chat),
+            cancel,
+            move |_, _, (Finish::Done(text) | Finish::Stopped(text))| {
+                let _ = back.send(text);
+            },
+        );
+        if let Err(why) = started {
+            let _ = reply.send(format!("Error: {why}"));
+        }
+    }
+
+    /// The workflow a `run_workflow` call by `agent_id` names, and the inputs it gives; else what
+    /// to answer, listing the ones it has.
+    fn workflow_called(
+        &self,
+        agent_id: &str,
+        args: &str,
+    ) -> Result<(Saved, Map<String, Value>), String> {
+        let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+        let name = v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let given = v
+            .get("inputs")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let yours = self.workflows_for(agent_id);
+        if let Some(wf) = yours.iter().find(|w| w.name.eq_ignore_ascii_case(&name)) {
+            return Ok(((*wf).clone(), given));
+        }
+        let names: Vec<&str> = yours.iter().map(|w| w.name.as_str()).collect();
+        let list = if names.is_empty() {
+            "You have none saved.".to_owned()
+        } else {
+            format!("Yours are: {}.", names.join(", "))
+        };
+        Err(format!(
+            "Error: you have no workflow called {name:?}. {list}"
+        ))
     }
 
     // ---- the Workflows page
@@ -1822,6 +1889,30 @@ mod tests {
             "{told}"
         );
         assert!(!told.contains("Not mine"));
+
+        app.workflows.push(saved(
+            "someone-else",
+            "Shared",
+            "Shared work",
+            json!({"steps": []}),
+        ));
+        app.workflows.push(saved(
+            "someone-else",
+            "tidy",
+            "Their tidy",
+            json!({"steps": []}),
+        ));
+        app.roster.agent_mut(&me).unwrap().workflows = vec!["Shared".into(), "tidy".into()];
+        let told = app.workflows_brief(&me).unwrap();
+        assert!(
+            told.contains("\"Shared\": Shared work"),
+            "added in its settings\n{told}"
+        );
+        assert!(!told.contains("Not mine"), "only the added ones\n{told}");
+        assert!(
+            !told.contains("Their tidy"),
+            "its own Tidy wins the name\n{told}"
+        );
     }
 
     fn tool_step(id: &str, command: &str, bind: &str) -> Step {
@@ -2665,6 +2756,66 @@ mod tests {
             .list_workflow_runs(&w.id, 10)
             .unwrap();
         assert_eq!((runs.len(), runs[0].started_by.as_str()), (1, "agent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_runs_another_agents_workflow_once_its_settings_add_it() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    EVENTS,
+                    call_stream("run_workflow", json!({"name": "say it"})),
+                ),
+                (200, EVENTS, text_stream("Done.")),
+            ],
+        );
+        let me = app.current().unwrap().id.clone();
+        let other = app
+            .roster
+            .list
+            .iter()
+            .find(|a| a.id != me)
+            .unwrap()
+            .id
+            .clone();
+        let w = save_workflow(
+            &mut app,
+            vec![tool_step("s", "echo ok-shared", "r")],
+            json!({}),
+        );
+        let w = Saved {
+            agent_id: other.clone(),
+            ..w
+        };
+        app.workflows.retain(|x| x.id != w.id);
+        app.workflows.push(w.clone());
+        let agent = app.roster.current_mut().unwrap();
+        agent.tools = vec![
+            crate::tools::RUN_WORKFLOW.into(),
+            crate::tools::SHELL.into(),
+        ];
+        agent.workflows = vec![w.id.clone()];
+        app.composer.edit = TextEdit::new("do the thing");
+        app.send();
+        assert!(seen.recv().unwrap().contains("say it"), "told about it");
+        let second = seen.recv().unwrap();
+        assert!(
+            second.contains("succeeded") && second.contains("ok-shared"),
+            "{second}"
+        );
+        assert_eq!(
+            app.workflows
+                .iter()
+                .find(|x| x.id == w.id)
+                .unwrap()
+                .agent_id,
+            other,
+            "it still belongs to its owner"
+        );
     }
 
     #[cfg(unix)]

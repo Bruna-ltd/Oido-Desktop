@@ -255,6 +255,22 @@ fn object_schema(schema: &Value) -> Value {
 }
 
 /// The server and tool a call's name stands for, if the name is one of theirs.
+/// Why MCP tool `name` is not offered now, in words the model can pass on to the person.
+pub fn why_unavailable(servers: &[Server], name: &str) -> String {
+    let server = servers
+        .iter()
+        .find(|s| name.starts_with(&format!("{PREFIX}{}__", s.slug())));
+    match server {
+        None => "its server or extension is turned off or was removed".to_owned(),
+        Some(s) if !s.enabled => format!("{} is turned off", s.name),
+        Some(s) if s.status == Status::Pending => format!("{} has not been reached yet", s.name),
+        Some(s) if s.status == Status::Unreachable => {
+            format!("{} cannot be reached: {}", s.name, s.detail)
+        }
+        Some(s) => format!("{} no longer offers it", s.name),
+    }
+}
+
 pub fn resolve<'a>(servers: &'a [Server], name: &str) -> Option<(&'a Server, &'a Tool)> {
     servers.iter().find_map(|s| {
         s.tools

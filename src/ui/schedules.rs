@@ -695,10 +695,12 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
             |s: &mut App| &mut s.schedule_page.form_mut().prompt,
         )),
         Kind::Workflow => {
-            let theirs: Vec<(String, String)> = s
-                .workflows
-                .iter()
-                .filter(|w| f.agent_id.as_ref() == Some(&w.agent_id))
+            let theirs: Vec<(String, String)> = f
+                .agent_id
+                .as_deref()
+                .map(|a| s.workflows_for(a))
+                .unwrap_or_default()
+                .into_iter()
                 .map(|w| (w.name.clone(), w.id.clone()))
                 .collect();
             let names: Vec<&str> = theirs.iter().map(|(n, _)| n.as_str()).collect();
@@ -724,10 +726,12 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
                 .on_close(|s: &mut App| s.schedule_page.form_mut().workflow_open = false)
                 .on_choose(|s: &mut App, name: &str, _| {
                     let agent = s.schedule_page.form_mut().agent_id.clone();
-                    let id = s
-                        .workflows
-                        .iter()
-                        .find(|w| w.name == name && Some(&w.agent_id) == agent.as_ref())
+                    let id = agent
+                        .as_deref()
+                        .map(|a| s.workflows_for(a))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|w| w.name == name)
                         .map(|w| w.id.clone());
                     let workflows = s.workflows.clone();
                     let f = s.schedule_page.form_mut();
@@ -771,8 +775,13 @@ fn form(s: &App, f: &Form, k: &Kit, layer: &mut Vec<El>) -> El {
     ));
 
     // What it would do, as read so far.
+    let may_run = f
+        .agent_id
+        .as_deref()
+        .map(|a| s.workflows_for(a))
+        .unwrap_or_default();
     let preview = f
-        .read(&s.workflows, now(), &Local)
+        .read(&may_run, now(), &Local)
         .ok()
         .map(|(_, _, _, timing)| {
             let next = timing.next_after(now(), &Local).map_or_else(

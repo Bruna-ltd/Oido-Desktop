@@ -297,7 +297,7 @@ impl Command {
             Command::New => "/new".to_owned(),
             Command::Clear => "/clear".to_owned(),
             Command::Retry => "/retry".to_owned(),
-            Command::Teach => "/teach".to_owned(),
+            Command::Teach => "/save-workflow".to_owned(),
             Command::Model => "/model".to_owned(),
             Command::Think(e) => format!("/think {}", e.name()),
             Command::Run(name) => format!("/run {name}"),
@@ -309,7 +309,7 @@ impl Command {
             Command::New => "Start a new chat in a new tab",
             Command::Clear => "The agent forgets the chat; it stays on screen",
             Command::Retry => "Ask again for the reply that failed or was stopped",
-            Command::Teach => "Learn a workflow from what this chat did",
+            Command::Teach => "Save what this chat did as a workflow to run again",
             Command::Model => "Choose the agent's model",
             Command::Think(Effort::Off) => "Answer without thinking first",
             Command::Think(_) => "Think this hard before answering",
@@ -427,9 +427,8 @@ fn commands(app: &App) -> Vec<Command> {
             .map(Command::Think),
     );
     out.extend(
-        app.workflows
-            .iter()
-            .filter(|w| w.agent_id == agent.id)
+        app.workflows_for(&agent.id)
+            .into_iter()
             .map(|w| Command::Run(w.name.clone())),
     );
     out

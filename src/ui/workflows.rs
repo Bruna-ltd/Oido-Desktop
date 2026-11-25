@@ -1,5 +1,5 @@
 //! The Workflows page: what has been saved, what a workflow does, and a way to run it and see how
-//! the runs went. A workflow is made in a chat (Save as workflow) and shown there as a draft first.
+//! the runs went. A workflow is made in a chat (`/save-workflow`) and shown there as a draft first.
 
 use rune::{El, ScrollSpec, col, el, row, text, text_input};
 use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, SegmentedControl};
@@ -57,7 +57,7 @@ fn empty(s: &App, k: &Kit) -> El {
         .gap(6.0)
         .child(text("No workflows yet").font(k.ty.body_medium).color(k.c.text_base))
         .child(
-            text("Have an agent do something with its tools, then press Save as workflow above the chat. It becomes steps you can run again. Or add a few examples to try the builder on.")
+            text("Have an agent do something with its tools, then type /save-workflow in the chat. It becomes steps you can run again. Or add a few examples to try the builder on.")
                 .font(k.ty.caption())
                 .color(k.c.text_muted)
                 .max_w(460.0)

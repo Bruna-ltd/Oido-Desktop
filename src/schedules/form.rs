@@ -225,10 +225,11 @@ impl Form {
     }
 
     /// The schedule's parts as typed: its agent, name, target and timing. Errs, in words, on
-    /// anything missing or unreadable. `now` starts a new "every" schedule.
+    /// anything missing or unreadable. `now` starts a new "every" schedule. `workflows` are the
+    /// ones its agent may run (see `App::workflows_for`).
     pub fn read<Tz: TimeZone>(
         &self,
-        workflows: &[Saved],
+        workflows: &[&Saved],
         now: i64,
         tz: &Tz,
     ) -> Result<(String, String, Target, Timing), String> {
@@ -243,7 +244,7 @@ impl Form {
                 let id = self.workflow_id.clone().ok_or("Choose a workflow.")?;
                 let wf = workflows
                     .iter()
-                    .find(|w| w.id == id && w.agent_id == agent)
+                    .find(|w| w.id == id)
                     .ok_or("Choose one of this agent's workflows.")?;
                 let inputs: Map<String, Value> = self
                     .inputs
@@ -290,7 +291,7 @@ mod tests {
     fn round_trip(s: &Schedule) -> Schedule {
         let wfs = [workflow()];
         let f = Form::of(s, Source::Edit(s.id.clone()), &wfs, &Utc);
-        let (agent, name, target, timing) = f.read(&wfs, 0, &Utc).unwrap();
+        let (agent, name, target, timing) = f.read(&[&wfs[0]], 0, &Utc).unwrap();
         Schedule::new(&agent, &name, target, timing, 0, &Utc).unwrap()
     }
 
@@ -329,7 +330,8 @@ mod tests {
 
     #[test]
     fn a_new_form_starts_every_day_at_nine_and_says_what_is_missing() {
-        let wfs = [workflow()];
+        let w = workflow();
+        let wfs = [&w];
         let mut f = Form::new(None);
         assert_eq!(f.read(&wfs, 0, &Utc).unwrap_err(), "Choose an agent.");
         f.agent_id = Some("a1".into());
@@ -353,14 +355,8 @@ mod tests {
             (f.inputs[0].0.as_str(), f.inputs[0].1.text.as_str()),
             ("folder", "notes")
         );
-        let mut other = workflow();
-        other.agent_id = "a2".into();
         f.name = TextEdit::new("n");
         f.kind = Kind::Workflow;
-        assert!(
-            f.read(&[other], 0, &Utc)
-                .unwrap_err()
-                .contains("this agent")
-        );
+        assert!(f.read(&[], 0, &Utc).unwrap_err().contains("this agent"));
     }
 }

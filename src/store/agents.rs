@@ -75,6 +75,7 @@ impl Store {
                     trust_workdir: r.get::<_, i64>(13)? != 0,
                     channel_topics: Vec::new(),
                     blocked: Vec::new(),
+                    workflows: Vec::new(),
                     description: r.get(12)?,
                     avatar: Avatar::from_columns(r.get(15)?, r.get(16)?),
                     active: 0,
@@ -88,14 +89,16 @@ impl Store {
                     r.get::<_, i64>(9)?,
                     r.get::<_, String>(14)?,
                     r.get::<_, String>(17)?,
+                    r.get::<_, String>(18)?,
                 ))
             })?;
             for row in rows {
-                let (parent, mut agent, skills, tools, active, topics, blocked) = row?;
+                let (parent, mut agent, skills, tools, active, topics, blocked, workflows) = row?;
                 agent.skills = serde_json::from_str(&skills)?;
                 agent.tools = serde_json::from_str(&tools)?;
                 agent.channel_topics = serde_json::from_str(&topics)?;
                 agent.blocked = serde_json::from_str(&blocked)?;
+                agent.workflows = serde_json::from_str(&workflows)?;
                 let mut chats = sessions.remove(&agent.id).unwrap_or_default();
                 if chats.is_empty() {
                     let first = chat("New chat", Vec::new());
@@ -146,6 +149,7 @@ impl Store {
                 avatar_preset,
                 avatar_image,
                 serde_json::to_string(&a.blocked)?,
+                serde_json::to_string(&a.workflows)?,
             ])?;
         Ok(())
     }

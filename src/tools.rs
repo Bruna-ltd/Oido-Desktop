@@ -200,6 +200,49 @@ pub fn offered(chosen: &[String], typesafe: bool, mcp: &[ToolSpec]) -> Vec<ToolS
     all
 }
 
+/// The rule every agent works under: its tools are the whole of its reach. Without it a model
+/// whose tools do not fit goes looking through the computer for another way in.
+pub const STAY_WITHIN: &str = "Do the task only with the tools you were given. When none of them can do it, say so in one line, naming what is missing, and stop. Do not look around the computer for another way in: no searching for other programs, config files, keys or tokens, and no guessing.";
+
+/// The tools in `chosen` that are not in `offered`, each with why, so the agent can say what is
+/// missing instead of working around it. `servers` explains the MCP ones.
+pub fn missing(
+    chosen: &[String],
+    offered: &[ToolSpec],
+    servers: &[crate::mcp::Server],
+) -> Vec<(String, String)> {
+    chosen
+        .iter()
+        .filter(|name| !is_builtin(name) && !offered.iter().any(|t| &t.name == *name))
+        .map(|name| {
+            let why = if crate::mcp::is_tool(name) {
+                crate::mcp::why_unavailable(servers, name)
+            } else if needs_typesafe(name) {
+                "TypeSafe is not connected".to_owned()
+            } else {
+                "it is not available here".to_owned()
+            };
+            (name.clone(), why)
+        })
+        .collect()
+}
+
+/// `brief` with [`STAY_WITHIN`] and the tools the agent was given that it cannot use now.
+pub fn within(brief: &str, missing: &[(String, String)]) -> String {
+    let mut out = if brief.trim().is_empty() {
+        STAY_WITHIN.to_owned()
+    } else {
+        format!("{brief}\n\n{STAY_WITHIN}")
+    };
+    if !missing.is_empty() {
+        out.push_str(" These tools you were given cannot be used right now; if the task needs one, tell the person why:");
+        for (name, why) in missing {
+            out.push_str(&format!("\n- {name}: {why}."));
+        }
+    }
+    out
+}
+
 /// A tool that runs in the background and ends later: a command, a workflow, a page fetched from
 /// the web or used in the browser, a question put to TypeSafe, a call to an MCP server, or a file
 /// sent on Telegram.

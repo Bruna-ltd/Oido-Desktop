@@ -108,7 +108,7 @@ impl From<std::io::Error> for Error {
 }
 
 /// Schema steps, in order. The file's `user_version` says how many have run.
-const MIGRATIONS: [&str; 29] = [
+const MIGRATIONS: [&str; 30] = [
     include_str!("../../db/migrations/001_init.sql"),
     include_str!("../../db/migrations/002_provider_keys.sql"),
     include_str!("../../db/migrations/003_models.sql"),
@@ -138,6 +138,7 @@ const MIGRATIONS: [&str; 29] = [
     include_str!("../../db/migrations/027_manage_tools_name.sql"),
     include_str!("../../db/migrations/028_workflow_publish.sql"),
     include_str!("../../db/migrations/029_blocked_places.sql"),
+    include_str!("../../db/migrations/030_agent_workflows.sql"),
 ];
 
 const QUERY_FILES: [&str; 11] = [
@@ -388,7 +389,8 @@ mod tests {
     #[test]
     fn the_whole_roster_round_trips_with_teams_chats_and_messages() {
         let s = mem();
-        let before: Vec<Agent> = sample_agents().into_iter().map(idle).collect();
+        let mut before: Vec<Agent> = sample_agents().into_iter().map(idle).collect();
+        before[0].workflows = vec!["w1".into(), "w2".into()];
         s.save_roster(&before).unwrap();
         let after = s.load_agents().unwrap();
         assert_eq!(after, before);

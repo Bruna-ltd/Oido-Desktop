@@ -39,6 +39,8 @@ pub struct Agent {
     /// Folders and files no tool of this agent may reach, beside the ones blocked for every agent
     /// (see `guard::blocked`). Only you can change it, never an agent.
     pub blocked: Vec<crate::guard::Blocked>,
+    /// Other agents' workflows it may run too, by id, beside its own. Its own win a name clash.
+    pub workflows: Vec<String>,
     /// For a team member: when its lead should hand it a task. The lead reads this to choose.
     pub description: String,
     pub active: usize,
@@ -63,6 +65,7 @@ impl Agent {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            workflows: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", Vec::new())],
@@ -206,6 +209,8 @@ pub struct Form {
     pub avatar_error: Option<String>,
     pub skills: Vec<String>,
     pub tools: Vec<String>,
+    /// Other agents' workflows it may run, by id.
+    pub workflows: Vec<String>,
     pub workdir: Option<String>,
     pub trust_workdir: bool,
     /// Its channel topics, as typed: split on commas when saved.
@@ -222,6 +227,7 @@ pub struct Form {
     pub model_picker: PickerState,
     pub skill_picker: crate::picker::MultiPicker,
     pub tool_picker: crate::picker::MultiPicker,
+    pub workflow_picker: crate::picker::MultiPicker,
 }
 
 impl Form {
@@ -235,6 +241,7 @@ impl Form {
             avatar_error: None,
             skills: Vec::new(),
             tools: Vec::new(),
+            workflows: Vec::new(),
             workdir: None,
             trust_workdir: true,
             topics: TextEdit::new(""),
@@ -248,6 +255,7 @@ impl Form {
             model_picker: PickerState::default(),
             skill_picker: crate::picker::MultiPicker::default(),
             tool_picker: crate::picker::MultiPicker::default(),
+            workflow_picker: crate::picker::MultiPicker::default(),
         }
     }
 
@@ -502,6 +510,7 @@ impl Roster {
         form.avatar = a.avatar.clone();
         form.skills = a.skills.clone();
         form.tools = a.tools.clone();
+        form.workflows = a.workflows.clone();
         form.workdir = a.workdir.clone();
         form.trust_workdir = a.trust_workdir;
         form.topics = TextEdit::new(a.channel_topics.join(", "));
@@ -509,6 +518,7 @@ impl Roster {
         form.description = TextEdit::new(a.description.clone());
         form.advanced = !(a.skills.is_empty()
             && a.tools.is_empty()
+            && a.workflows.is_empty()
             && a.workdir.is_none()
             && a.trust_workdir
             && a.channel_topics.is_empty()
@@ -523,6 +533,7 @@ impl Roster {
         self.menu = None;
         self.form.skill_picker.close();
         self.form.tool_picker.close();
+        self.form.workflow_picker.close();
         self.form.folders.close();
     }
 
@@ -559,6 +570,10 @@ impl Roster {
         toggle(&mut self.form.tools, name);
     }
 
+    pub fn toggle_workflow(&mut self, id: &str) {
+        toggle(&mut self.form.workflows, id);
+    }
+
     /// Creates or saves, selects the result, and closes the form.
     pub fn submit(&mut self) -> Option<Target> {
         if !self.can_submit() {
@@ -576,6 +591,7 @@ impl Roster {
             a.avatar = f.avatar.clone();
             a.skills = f.skills.clone();
             a.tools = f.tools.clone();
+            a.workflows = f.workflows.clone();
             a.workdir = f.workdir.clone();
             a.trust_workdir = f.trust_workdir;
             a.channel_topics = crate::guard::topics(&f.topics.text);

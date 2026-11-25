@@ -81,7 +81,7 @@ Status: agreed and built 2026-11-10.
   make room: …".
 - If there is nothing left to summarize (fewer than four turns since the last summary) and the
   call still cannot fit, it fails before anything is sent, with the sizes: "…it would be sent
-  about 150.2k tokens and takes 128.0k. Shorten your last message, or press Start fresh."
+  about 150.2k tokens and takes 128.0k. Shorten your last message, or type /clear to start fresh."
 - Team members are trimmed but not summarized. Their work is one task, and a task too big even
   trimmed fails as before.
 
