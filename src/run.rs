@@ -550,7 +550,7 @@ impl App {
         let refuse = (summary.is_none() && fitted.too_big(limit)).then(|| {
             let tokens = |n: u32| crate::ui::usage::tokens(u64::from(n));
             format!(
-                "This chat is too long for {}, even with older parts trimmed and summarized: it would be sent about {} tokens and takes {}. Shorten your last message, or press Start fresh.",
+                "This chat is too long for {}, even with older parts trimmed and summarized: it would be sent about {} tokens and takes {}. Shorten your last message, or type /clear to start fresh.",
                 self.providers.model_name(&model),
                 tokens(fitted.size),
                 tokens(limit.unwrap_or(0)),

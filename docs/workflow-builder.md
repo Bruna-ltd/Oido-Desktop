@@ -611,3 +611,21 @@ Add step list.
   not stop a background agent, and its run is filed when it ends (an app that closes first loses it).
 - **Stored as** the existing `delegate` tool step, so the engine, the guard and saved workflows are
   unchanged; "AI Agent" is how the editor names it.
+
+## Workflows on more than one agent (ADR-11)
+
+A workflow still belongs to one agent, but an agent's settings (More options → **Workflows**) can
+add workflows of other agents, so several agents know and run the same flow.
+
+- **Stored as** a list of workflow ids on the agent (`agents.workflows`, migration 030). Its own
+  workflows are never listed there; a deleted workflow drops out of the list where it is read.
+- **Seen as its own**: an added workflow is in the agent's workflow brief, `run_workflow`, `/run`,
+  the schedule tool and the schedule form. One of its own wins a name clash.
+- **Team members too**: a member its lead hands a task to is told its workflows and given
+  `run_workflow`; the run starts on the UI thread, asks in the lead's chat, and the member waits
+  for its result. Stopping the task stops the run.
+- **Runs as the caller**: with the calling agent's model, tools, folder and guard, and is filed
+  under the workflow as usual. The `flow` steps inside it are looked up among its owner's
+  workflows, since that is where it was built.
+- **Left out**: the editor's `flow` step still offers only the owner's workflows; moving a
+  workflow to another owner.

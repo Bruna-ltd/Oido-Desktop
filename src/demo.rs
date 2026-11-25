@@ -39,6 +39,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            workflows: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![
@@ -116,6 +117,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            workflows: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat(
@@ -164,6 +166,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            workflows: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],
@@ -184,6 +187,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            workflows: Vec::new(),
             description: String::new(),
             active: 0,
             sessions: vec![chat("New chat", vec![])],

@@ -1,5 +1,6 @@
-//! Above the transcript, as in Studio's ChatBox top bar: who this conversation is with and "Start
-//! fresh" in the window's toolbar, and the agent's open chats as pills under it.
+//! Above the transcript, as in Studio's ChatBox top bar: who this conversation is with in the
+//! window's toolbar, and the agent's open chats as pills under it. Start fresh and Save as
+//! workflow are `/clear` and `/save-workflow` in the composer.
 
 use rune::{Color, El, col, el, icon, row, text};
 use rune_kit::{
@@ -14,7 +15,7 @@ use crate::model::AgentStatus;
 use crate::providers::ModelStatus;
 
 /// Fills the window's toolbar on the chat screen: who the conversation is with on the left, what
-/// it has used and what you can do with it on the right. The band would otherwise sit empty above
+/// it has used on the right. The band would otherwise sit empty above
 /// a header of its own.
 pub fn toolbar(s: &App, a: &Agent, k: &Kit, bar: Toolbar) -> Toolbar {
     // The figures read as one group, set apart from the buttons after them.
@@ -25,7 +26,6 @@ pub fn toolbar(s: &App, a: &Agent, k: &Kit, bar: Toolbar) -> Toolbar {
     }
     stop_background(s, a, k)
         .into_iter()
-        .chain(actions(s, k))
         .fold(bar, Toolbar::trailing)
 }
 
@@ -77,26 +77,6 @@ fn identity(s: &App, a: &Agent, k: &Kit) -> El {
                 )
                 .child(text(subtitle).font(k.ty.small).color(ink).truncate()),
         )
-}
-
-fn actions(s: &App, k: &Kit) -> [El; 2] {
-    [
-        Button::new("Save as workflow")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Small)
-            .disabled(!s.can_teach())
-            .help("Turn what the agent did in this chat into steps it can run again. You see a draft first.")
-            .on_press(|s: &mut App| s.teach_open())
-            .build(k)
-            .key("teach"),
-        Button::new("Start fresh")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Small)
-            .help("The agent forgets everything said so far in this chat and begins with a clean slate. What you have already read stays on screen.")
-            .on_press(|s: &mut App| s.start_fresh())
-            .build(k)
-            .key("start-fresh"),
-    ]
 }
 
 /// A way to end what the agent left running in the background, which is not "busy" and so has no

@@ -395,6 +395,8 @@ struct Job {
     limit: Option<u32>,
     /// How it reaches the tools it has that are not run by the worker itself, by tool name.
     routes: std::collections::HashMap<String, Route>,
+    /// Whether it has saved workflows to run (`run_workflow`).
+    flows: bool,
     /// Stops this task.
     cancel: Arc<AtomicBool>,
 }
@@ -446,7 +448,28 @@ fn run_tool(job: &Job, call: &Call) -> String {
     if let Some(route) = job.routes.get(&call.name) {
         return run_route(job, route, call);
     }
+    if call.name == tools::RUN_WORKFLOW && job.flows {
+        return run_workflow(job, call);
+    }
     format!("Error: there is no tool called {} for you.", call.name)
+}
+
+/// Runs one of the member's workflows: the run is started on the UI thread, where the workflows
+/// and their connections are, and this waits for its result. Stopping the task stops the run.
+fn run_workflow(job: &Job, call: &Call) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (agent, chat, args) = (
+        job.run.agent_id.clone(),
+        job.run.session_id.clone(),
+        call.args.clone(),
+    );
+    let cancel = Arc::clone(&job.cancel);
+    crate::app::on_ui_thread(move |app| {
+        app.start_worker_workflow(&agent, &chat, &args, cancel, tx);
+    });
+    // The sender goes with the run, so no answer means the app went before it ended.
+    rx.recv()
+        .unwrap_or_else(|_| "Error: the workflow could not be run: the app is closing.".to_owned())
 }
 
 /// Works on the task until the model answers without asking for a tool. Blocks.
@@ -1020,6 +1043,19 @@ impl App {
         if !skills.is_empty() {
             tools.push(crate::skills::spec(&skills));
         }
+        // Its saved workflows come last, as in a chat, so running one that fits comes first.
+        let flows = self.workflows_brief(&member.id);
+        let brief = match &flows {
+            Some(f) => {
+                tools.extend(
+                    tools::registered()
+                        .into_iter()
+                        .filter(|t| t.name == tools::RUN_WORKFLOW),
+                );
+                format!("{brief}\n\n{f}")
+            }
+            None => brief,
+        };
         let job = Job {
             run: run.clone(),
             brief,
@@ -1037,6 +1073,7 @@ impl App {
             outside,
             trust_folder: member.trust_workdir,
             routes,
+            flows: flows.is_some(),
             cancel: Arc::new(AtomicBool::new(false)),
         };
         Ok((run, job))
@@ -1505,6 +1542,65 @@ mod tests {
         let brief = tools::within("Handle my calendar.", &kit.missing);
         assert!(brief.starts_with("Handle my calendar.") && brief.contains(tools::STAY_WITHIN));
         assert!(brief.contains("- mcp__gmail__search: no Google account is set up"));
+    }
+
+    #[test]
+    fn a_member_is_told_its_workflows_and_given_run_workflow_only_when_it_has_some() {
+        let db = crate::testing::TempDb::new();
+        let (mut app, _seen) = crate::testing::app_with_server(&db, vec![]);
+        let member = app.current().unwrap().clone();
+        let job = |app: &App| {
+            app.member_job(
+                &member,
+                &member,
+                "s1",
+                Where::Chat("s1".into()),
+                "sum up my mail".into(),
+                None,
+                None,
+            )
+            .unwrap()
+            .1
+        };
+        app.workflows.clear();
+        let bare = job(&app);
+        assert!(!bare.flows);
+        assert!(bare.tools.iter().all(|t| t.name != tools::RUN_WORKFLOW));
+
+        app.workflows.push(crate::workflow::Saved {
+            id: "w1".into(),
+            agent_id: "someone-else".into(),
+            name: "Email Summery".into(),
+            goal: "Sum up the latest emails".into(),
+            definition: Default::default(),
+            created_at: 0,
+            published: None,
+        });
+        let unadded = job(&app);
+        assert!(!unadded.flows, "another agent's workflow is not its own");
+        app.roster.current_mut().unwrap().workflows = vec!["w1".into()];
+        let member = app.current().unwrap().clone();
+        let given = app
+            .member_job(
+                &member,
+                &member,
+                "s1",
+                Where::Chat("s1".into()),
+                "sum up my mail".into(),
+                None,
+                None,
+            )
+            .unwrap()
+            .1;
+        assert!(given.flows);
+        assert!(given.tools.iter().any(|t| t.name == tools::RUN_WORKFLOW));
+        assert!(
+            given
+                .brief
+                .contains("\"Email Summery\": Sum up the latest emails"),
+            "{}",
+            given.brief
+        );
     }
 
     #[test]

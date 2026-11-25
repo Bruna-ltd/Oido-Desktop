@@ -612,6 +612,7 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         let fields = [
             skills_field(s, k, layer),
             tools_field(s, k, layer),
+            workflows_field(s, k, layer),
             workdir_field(s, k, layer),
             topics_field(s, k),
             blocked_field(s, k, layer),
@@ -828,6 +829,62 @@ fn tools_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 on_open: None,
             },
         ))
+}
+
+/// The workflows block: other agents' workflows this one may run too. Its own are always its,
+/// so they are not listed.
+fn workflows_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    let own = match &s.roster.editing {
+        Some(crate::agents::FormKind::Edit(t)) => Some(t.id.as_str()),
+        _ => None,
+    };
+    let items: Vec<Item> = s
+        .workflows
+        .iter()
+        .filter(|w| Some(w.agent_id.as_str()) != own)
+        .map(|w| Item {
+            name: w.id.clone(),
+            label: w.name.clone(),
+            description: w.goal.clone(),
+            group: s
+                .roster
+                .agent_ref(&w.agent_id)
+                .map_or_else(String::new, |a| a.name.clone()),
+        })
+        .collect();
+    // A workflow deleted since it was added is no longer offered, nor shown as chosen.
+    let chosen: Vec<String> = s
+        .roster
+        .form
+        .workflows
+        .iter()
+        .filter(|id| items.iter().any(|i| &i.name == *id))
+        .cloned()
+        .collect();
+    field(
+        "Workflows",
+        "Its own workflows are always its. Add other agents' workflows here, so it knows them and can run them, with its own model, tools and folder.",
+        k,
+    )
+    .child(super::multi_picker::build(
+        s,
+        k,
+        layer,
+        super::multi_picker::Spec {
+            key: "workflows",
+            title: "Workflows",
+            placeholder: "Add workflows",
+            noun: ("workflow", "workflows"),
+            none: "No other agent has a workflow yet.",
+            items,
+            chosen,
+            get: |s| &s.roster.form.workflow_picker,
+            edit: |s| &mut s.roster.form.workflow_picker,
+            toggle: |s, id| s.roster.toggle_workflow(id),
+            single: false,
+            on_open: None,
+        },
+    ))
 }
 
 pub fn confirm_delete(s: &App, k: &Kit, layer: &mut Vec<El>) {
