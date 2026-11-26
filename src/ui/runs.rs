@@ -3,7 +3,7 @@
 //! every tool, each with a bar showing when it ran and for how long within the run.
 
 use rune::{Color, El, ScrollSpec, col, el, row, text};
-use rune_kit::{Badge, BadgeVariant, Kit};
+use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, TextArea, TextInput};
 
 use super::usage::money;
 use crate::app::{App, now};
@@ -183,6 +183,9 @@ fn ledger(s: &App, k: &Kit) -> El {
             stick_bottom: false,
         })
         .child(header(s, run, k));
+    if let Some(f) = s.skill_draft.as_ref().filter(|f| f.run_id == run.id) {
+        out = out.child(draft_form(s, f, k));
+    }
     if !setup.is_empty() {
         out = out.child(section("Setup", "sent with every model call", k));
         out = out.children(setup.into_iter().map(|(i, st)| step_row(s, run, i, st, k)));
@@ -248,7 +251,29 @@ fn header(s: &App, run: &Run, k: &Kit) -> El {
         .pt(4.0)
         .pb(8.0)
         .gap(6.0)
-        .child(text(title).font(k.ty.body_medium).color(c.text_base).wrap())
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .child(
+                    text(title)
+                        .font(k.ty.body_medium)
+                        .color(c.text_base)
+                        .wrap()
+                        .grow(1.0)
+                        .min_w(0.0),
+                )
+                .children(
+                    (run.status != Status::Running && s.skill_draft.is_none()).then(|| {
+                        Button::new("Make skill")
+                            .variant(ButtonVariant::Outline)
+                            .control_size(ControlSize::Small)
+                            .on_press(App::make_skill)
+                            .build(k)
+                            .key("make-skill")
+                    }),
+                ),
+        )
         .child(
             text(format!(
                 "{} · {} · {}",
@@ -276,6 +301,153 @@ fn header(s: &App, run: &Run, k: &Kit) -> El {
         );
     }
     out
+}
+
+/// The skill being drafted from this run: its fields, what stops saving, and the buttons.
+fn draft_form(s: &App, f: &crate::skill_draft::Form, k: &Kit) -> El {
+    use crate::skill_draft::Phase;
+    let c = &k.c;
+    let small = |words: String, color: Color| text(words).font(k.ty.caption()).color(color).wrap();
+    let mut out = col()
+        .key("skill-draft")
+        .w_full()
+        .padding(12.0)
+        .gap(10.0)
+        .radius(k.radius.md)
+        .border(1.0, c.border_muted)
+        .child(
+            text("Make a skill from this run".to_owned())
+                .font(k.ty.ui_medium)
+                .color(c.text_base),
+        );
+    if f.phase == Phase::Drafting {
+        return out
+            .child(small(
+                format!(
+                    "{}'s model is drafting it from the run's steps…",
+                    f.agent_name
+                ),
+                c.text_muted,
+            ))
+            .child(close_button(k));
+    }
+    if let Phase::Saved(name) = &f.phase {
+        let at = s
+            .skills_dir
+            .as_deref()
+            .map(|d| crate::skill_draft::path(d, name).display().to_string())
+            .unwrap_or_default();
+        return out
+            .child(small(format!("Saved as {name}, in {at}."), c.text_muted))
+            .child(
+                row()
+                    .gap(8.0)
+                    .children(s.can_give_skill_draft().then(|| {
+                        Button::new(format!("Give it to {}", f.agent_name))
+                            .variant(ButtonVariant::Contrast)
+                            .control_size(ControlSize::Small)
+                            .on_press(App::give_skill_draft)
+                            .build(k)
+                            .key("skill-draft-give")
+                    }))
+                    .child(close_button(k)),
+            );
+    }
+    out = out
+        .child(small(
+            "Read it before saving: it is sent to the model of every agent you give it to."
+                .to_owned(),
+            c.text_faint,
+        ))
+        .child(small("Title".to_owned(), c.text_muted))
+        .child(
+            TextInput::new(&f.title)
+                .placeholder("What it does, e.g. Retry a flaky cargo test with a fixed seed")
+                .label("Title")
+                .width(None)
+                .on_edit(|s: &mut App| &mut s.skill_draft_mut().title)
+                .build(k)
+                .key("skill-draft-title"),
+        )
+        .child(small("Use when".to_owned(), c.text_muted))
+        .child(
+            TextInput::new(&f.use_when)
+                .placeholder(
+                    "When to use it, e.g. when a cargo test fails once and passes on rerun",
+                )
+                .label("Use when")
+                .width(None)
+                .on_edit(|s: &mut App| &mut s.skill_draft_mut().use_when)
+                .build(k)
+                .key("skill-draft-when"),
+        )
+        .child(small("Instructions".to_owned(), c.text_muted))
+        .child(
+            TextArea::new(&f.body)
+                .placeholder("The instructions, in Markdown")
+                .label("Instructions")
+                .rows(10)
+                .max_height(420.0)
+                .width(None)
+                .on_edit(|s: &mut App| &mut s.skill_draft_mut().body)
+                .build(k)
+                .key("skill-draft-body"),
+        );
+    let name = f.name();
+    if !name.is_empty() {
+        out = out.child(small(format!("Will be saved as {name}"), c.text_faint));
+    }
+    if let Some(note) = &f.note {
+        out = out.child(small(note.clone(), c.warning.icon).selectable(true));
+    }
+    let replacing = f.existing.as_ref().filter(|(n, _)| *n == name);
+    if let Some((_, old)) = replacing {
+        out = out
+            .child(small(
+                format!("A skill called {name} is already there. Saving replaces it:"),
+                c.warning.icon,
+            ))
+            .child(
+                el().w_full()
+                    .padding(8.0)
+                    .radius(k.radius.sm)
+                    .fill(c.layer_02)
+                    .child(
+                        text(crate::runs::clip(old, 2_000).0)
+                            .font(k.ty.mono)
+                            .color(c.text_muted)
+                            .wrap()
+                            .selectable(true),
+                    ),
+            );
+    }
+    out.child(
+        row()
+            .gap(8.0)
+            .child(
+                Button::new(if replacing.is_some() {
+                    "Replace"
+                } else {
+                    "Save skill"
+                })
+                .variant(ButtonVariant::Contrast)
+                .control_size(ControlSize::Small)
+                .disabled(!f.ready())
+                .on_press(App::save_skill_draft)
+                .build(k)
+                .key("skill-draft-save"),
+            )
+            .child(close_button(k)),
+    )
+}
+
+fn close_button(k: &Kit) -> El {
+    Button::new("Close")
+        .variant(ButtonVariant::Outline)
+        .control_size(ControlSize::Small)
+        .on_press(App::close_skill_draft)
+        .build(k)
+        .key("skill-draft-close")
 }
 
 fn section(name: &str, note: &str, k: &Kit) -> El {

@@ -893,6 +893,20 @@ pub static SCENES: &[Scene] = &[
         demo_runs(s);
         s.route = Route::Runs;
     }),
+    ("runs-skill", |s| {
+        demo_runs(s);
+        s.route = Route::Runs;
+        if let Some(run) = s.runs.get(s.run) {
+            let mut f = crate::skill_draft::Form::new(run);
+            f.phase = crate::skill_draft::Phase::Editing;
+            f.fill(&crate::skill_draft::Draft {
+                title: "Check the release notes before upgrading".into(),
+                use_when: "when asked what changed in a new version of a dependency".into(),
+                body: "1. Open the project's CHANGELOG or GitHub releases page.\n2. List breaking changes first, then new features.\n3. Quote config moves exactly, with the old and new path.".into(),
+            });
+            s.skill_draft = Some(f);
+        }
+    }),
     ("context", |s| {
         load_samples(s);
         s.roster.select(Target::agent("scout"));

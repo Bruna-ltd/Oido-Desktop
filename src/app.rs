@@ -109,6 +109,8 @@ pub struct App {
         std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Chats that carry on in the same run once their summary is written.
     pub resuming: std::collections::HashSet<String>,
+    /// The skill being drafted from a run, on the Runs screen.
+    pub skill_draft: Option<crate::skill_draft::Form>,
     /// Whether TypeSafe sorts each message first (Settings), the chats it is sorting now, and the
     /// chats whose run is a list-and-judge task, where tools that read are left to scripts.
     pub route_bulk: bool,
@@ -367,6 +369,7 @@ impl App {
             delegating: std::collections::HashMap::new(),
             summarizing: std::collections::HashMap::new(),
             resuming: std::collections::HashSet::new(),
+            skill_draft: None,
             route_bulk: persist::route_bulk(store.as_ref()),
             routing: std::collections::HashSet::new(),
             bulk: std::collections::HashSet::new(),
