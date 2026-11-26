@@ -280,6 +280,45 @@ under another name.
 run read them. A lesson that overlaps a skill outside that set can still become a new skill, and
 you see the draft before it is saved.
 
+### ADR-10: A failed task can teach a warning; answers are kept
+
+**Context.** The first live run failed its task (an X post about 650 characters long, against a
+280 limit, after 26 browser calls) yet held the clearest lesson of the day. The task-success check
+(ADR-6) threw it out, and only yes or no was saved, so there was no way to see why.
+
+**Decision.**
+- **Verdicts.** TypeSafe's answers give one of three verdicts (`skill_offers::verdict`):
+  - *Method:* task success ≥ 0.50, then a mean of the first three ≥ 0.60.
+  - *Warning:* task success below 0.50, but "reusable" and "evidence" both ≥ 0.75.
+  - *Nothing:* otherwise, or whenever "covered" is ≥ 0.50.
+- **Warning drafts.** A warning's card and badge say so ("a lesson"). Its draft call is told the
+  task did not finish and to write only the mistake, how to spot it early and what to do instead,
+  never the run's approach as a way to do the task. The form says the same.
+- **Kept answers.** All answers are kept with the run (`runs.scores`, migration 033). The run
+  header shows them: "TypeSafe: not offered (task 0.31 · reusable 0.82 · …)".
+
+**Alternatives.** Drop the task check for every run: brings back #649, where a failed run's
+approach is taught as the way to do the task. Keep failed runs out entirely: loses the gotchas,
+which are often what is most worth writing down.
+
+**Consequences.** The 0.75 floors are a first guess; the kept answers are there to tune them.
+
+### ADR-11: A run is judged and drafted with what came before it in the chat
+
+**Context.** Every message you send starts a run, so an answer such as "x" (which platform) is a
+run of its own. Judged alone, its whole request was "x". The same live session was one task split
+over four runs, each judged blind.
+
+**Decision.** TypeSafe and the draft call are both shown, before the run, its chat's earlier runs
+from the last two hours: at most four (skill drafts and team members' runs left out), each as its
+request and the agent's last words, cut to 600 bytes. They are marked as context only.
+
+**Alternatives.** Judge a whole chat at once: there is no clear moment when a chat is "done".
+Merge the runs into one: runs are what the Runs screen and the costs are built on.
+
+**Consequences.** A judgment or draft is a few KB larger. A chat that changes topic within two
+hours shows some unrelated context, marked as such.
+
 ## Failure modes
 
 | Failure | What happens |
@@ -318,7 +357,8 @@ you see the draft before it is saved.
    badge).
 3. **P3. Offer, agent override, one skill per lesson (built).** ADR-7 to ADR-9: the chat card,
    the per-agent choice, the covered question, update drafts, and `SKILL.md.prev`.
-4. **Later, if wanted.** A cheaper drafting model setting. A desktop notification for offers.
+4. **P4. Lessons from failures, kept answers, chat context (built).** ADR-10 and ADR-11.
+5. **Later, if wanted.** A cheaper drafting model setting. A desktop notification for offers.
    Undo from `SKILL.md.prev` in the UI.
 
 ## Risks

@@ -23,8 +23,9 @@ const HALF: usize = 40;
 /// The Agent Skills limits on a skill's name and description.
 const MAX_NAME: usize = 64;
 const MAX_DESCRIPTION: usize = 1_024;
-/// What the draft's run step is called.
+/// What the draft's run step is called, and how the draft's run title starts.
 pub const STEP_NAME: &str = "skill draft";
+const DRAFT_TITLE: &str = "Skill draft: ";
 
 const PROMPT: &str = r#"You turn one finished agent run into a reusable skill: instructions a future agent reads before doing the same kind of task.
 
@@ -44,6 +45,51 @@ const KNOWN_PROMPT: &str = r#"Skills that already exist are given in <skills>. N
 - If the run's lesson is already covered by one, answer {"none": "covered by <name>"}.
 - If the run corrects or extends one (for example it read that skill and still went wrong, or found a better way), answer {"update": "<name>", "title": "...", "use_when": "...", "body": "..."}, where body is the complete new instructions for that skill: keep what still holds, fix what the run showed was wrong, add what it taught.
 - Otherwise write a new skill as above."#;
+
+/// Added to the prompt when the run did not finish its task but showed a mistake worth avoiding
+/// (see `skill_offers::Verdict::Warning`).
+const WARNING_PROMPT: &str = r#"This run did NOT complete its task. Do not present its approach as the way to do the task. Write only a warning: the mistake or obstacle it hit, how to notice it early, and what to do instead (for example a limit to check before acting). Title it as a warning, such as "Check X before Y". If an existing skill covers the task, prefer updating it with this warning."#;
+
+/// How far back, and how many of a chat's earlier runs, a run is shown with: an answer such as
+/// "x" or "5" is a run of its own, and means nothing without the request it answers.
+const EARLIER_SECS: i64 = 2 * 60 * 60;
+const EARLIER_RUNS: usize = 4;
+const EARLIER_BYTES: usize = 600;
+
+/// What earlier runs of the same chat said, oldest first: each one's request and the agent's last
+/// words, cut short. Empty when there are none.
+pub fn earlier_block(earlier: &[Vec<Step>]) -> String {
+    let cut = |t: &str| {
+        let (text, was) = clip(t.trim(), EARLIER_BYTES);
+        if was { format!("{text}…") } else { text }
+    };
+    let each: Vec<String> = earlier
+        .iter()
+        .filter_map(|steps| {
+            let asked = steps.iter().find(|s| s.kind == StepKind::User)?;
+            let mut out = format!(
+                "[person] {}",
+                cut(asked.output.as_deref().unwrap_or_default())
+            );
+            if let Some(said) = steps
+                .iter()
+                .rev()
+                .find(|s| s.kind == StepKind::Llm)
+                .and_then(|s| s.output.as_deref())
+            {
+                out.push_str(&format!("\n[agent] {}", cut(said)));
+            }
+            Some(out)
+        })
+        .collect();
+    if each.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<earlier>\nWhat came before this run in the same chat, for context only:\n\n{}\n</earlier>\n\n",
+        each.join("\n\n")
+    )
+}
 
 /// How many existing skills a draft or a verdict is shown, and how much of each one's
 /// instructions.
@@ -198,22 +244,30 @@ fn line(s: &Step) -> Option<String> {
 }
 
 /// The one-off call that drafts a skill from `steps`, on `model`, with no tools. `known` are the
-/// skills it must not repeat, and may update instead.
-pub fn request(model: &str, steps: &[Step], known: &[Known]) -> Request {
-    let (system, skills) = if known.is_empty() {
-        (PROMPT.to_owned(), String::new())
-    } else {
-        (
-            format!("{PROMPT}\n\n{KNOWN_PROMPT}"),
-            format!("{}\n\n", known_block(known, true)),
-        )
-    };
+/// skills it must not repeat, and may update instead; `earlier` is what came before in the chat
+/// (see [`earlier_block`]); `warning` asks for a warning only, from a run that did not finish.
+pub fn request(
+    model: &str,
+    steps: &[Step],
+    known: &[Known],
+    earlier: &str,
+    warning: bool,
+) -> Request {
+    let mut system = PROMPT.to_owned();
+    let mut skills = String::new();
+    if !known.is_empty() {
+        system = format!("{system}\n\n{KNOWN_PROMPT}");
+        skills = format!("{}\n\n", known_block(known, true));
+    }
+    if warning {
+        system = format!("{system}\n\n{WARNING_PROMPT}");
+    }
     Request {
         model: model.to_owned(),
         system: Some(system),
         context: None,
         turns: vec![Turn::user(format!(
-            "{skills}<run>\n{}\n</run>",
+            "{skills}{earlier}<run>\n{}\n</run>",
             transcript(steps)
         ))],
         think: None,
@@ -414,6 +468,8 @@ pub struct Form {
     pub existing: Option<(String, String)>,
     /// The existing skill the draft rewrites; it is saved under that name, whatever its title.
     pub updates: Option<String>,
+    /// The run did not finish its task: the draft is a warning only.
+    pub warning: bool,
     cancel: Arc<AtomicBool>,
 }
 
@@ -440,6 +496,7 @@ impl Form {
             body: TextEdit::new(""),
             existing: None,
             updates: None,
+            warning: false,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -484,6 +541,8 @@ impl App {
             f.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         let mut form = Form::new(&run);
+        form.warning =
+            crate::skill_offers::verdict(&run.scores) == crate::skill_offers::Verdict::Warning;
         let target = self.target_for(&run.model.provider);
         let (endpoint, credential) = match target {
             Ok(t) => t,
@@ -495,7 +554,8 @@ impl App {
             }
         };
         let known = self.known_skills(&run.agent_id, &self.steps);
-        let ask = request(&run.model.id, &self.steps, &known);
+        let earlier = self.earlier_text(&run);
+        let ask = request(&run.model.id, &self.steps, &known, &earlier, form.warning);
         // Runs record secrets as placeholders already; the guard hides anything else and takes
         // out invisible characters. The answer is never revealed: a placeholder left in it
         // blocks saving.
@@ -511,6 +571,31 @@ impl App {
             move || completion::complete(&endpoint, credential.as_ref(), &ask, &cancel),
             move |app, got| app.skill_drafted(&run, &known, &sent, began, &who, got),
         );
+    }
+
+    /// What came before `run` in its chat (see [`earlier_block`]): its earlier runs from the last
+    /// two hours, not counting skill drafts.
+    pub(crate) fn earlier_text(&self, run: &Run) -> String {
+        let Some(db) = &self.store else {
+            return String::new();
+        };
+        let found = db
+            .earlier_runs(
+                &run.session_id,
+                &run.id,
+                run.started_at - EARLIER_SECS,
+                run.started_at,
+                EARLIER_RUNS + 2,
+            )
+            .unwrap_or_default();
+        let mut earlier: Vec<Vec<Step>> = found
+            .iter()
+            .filter(|(_, title)| !title.starts_with(DRAFT_TITLE))
+            .take(EARLIER_RUNS)
+            .filter_map(|(id, _)| db.list_steps(id).ok())
+            .collect();
+        earlier.reverse();
+        earlier_block(&earlier)
     }
 
     /// The skills a run of agent `agent_id` with `steps` is checked against (see [`known`]).
@@ -600,7 +685,7 @@ impl App {
             &from.session_id,
             from.model.clone(),
         );
-        run.title = format!("Skill draft: {}", from.title);
+        run.title = format!("{DRAFT_TITLE}{}", from.title);
         let mut trace = Trace::new(run);
         let mut steps = trace.reply(&Reply {
             sent,
@@ -1033,7 +1118,7 @@ mod tests {
         );
         assert_eq!(found[0].body, "Run make deploy.");
 
-        let req = request("m", &steps, &found);
+        let req = request("m", &steps, &found, "", false);
         assert!(
             req.system
                 .as_deref()
@@ -1046,7 +1131,7 @@ mod tests {
                 .starts_with("<skills>\n- deploy: Deploy the app.\nRun make deploy.")
         );
         assert!(
-            !request("m", &steps, &[])
+            !request("m", &steps, &[], "", false)
                 .system
                 .unwrap()
                 .contains("<skills>")
@@ -1143,5 +1228,85 @@ mod tests {
         assert!(dir.join("check-logs").join("SKILL.md.prev").exists());
         assert!(!app.offers_skill(&source), "saving answers the run's offer");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_that_answers_a_question_is_shown_with_what_came_before_it_in_the_chat() {
+        let first = vec![
+            step(
+                StepKind::User,
+                "",
+                "",
+                "draft a post on trending AI agent topics",
+            ),
+            step(StepKind::Llm, "", "", "Which platform: x or linkedin?"),
+        ];
+        let second = vec![step(StepKind::User, "", "", "x")];
+        let block = earlier_block(&[first, vec![], second]);
+        assert_eq!(
+            block,
+            "<earlier>\nWhat came before this run in the same chat, for context only:\n\n[person] draft a post on trending AI agent topics\n[agent] Which platform: x or linkedin?\n\n[person] x\n</earlier>\n\n"
+        );
+        assert_eq!(earlier_block(&[]), "");
+        let req = request(
+            "m",
+            &[step(StepKind::User, "", "", "post it")],
+            &[],
+            &block,
+            false,
+        );
+        assert!(
+            req.turns[0].text.starts_with("<earlier>\n"),
+            "{}",
+            req.turns[0].text
+        );
+        assert!(
+            req.turns[0]
+                .text
+                .ends_with("<run>\n[person] post it\n</run>")
+        );
+    }
+
+    #[test]
+    fn a_run_that_did_not_finish_is_drafted_as_a_warning_only() {
+        let req = request("m", &[], &[], "", true);
+        assert!(req.system.unwrap().contains("did NOT complete its task"));
+        assert!(
+            !request("m", &[], &[], "", false)
+                .system
+                .unwrap()
+                .contains("did NOT")
+        );
+    }
+
+    #[test]
+    fn earlier_runs_of_the_chat_are_found_newest_first_without_skill_drafts() {
+        let db = crate::testing::TempDb::new();
+        let mut app = db.open_with_samples();
+        let sid = app.roster.current().unwrap().chat().id.clone();
+        let model = crate::models::ModelRef::new("openai", "gpt-x");
+        let save = |id: &str, title: &str, at: i64, said: &str| {
+            let mut r = Run::new(id, "atlas", "Atlas", &sid, model.clone());
+            r.title = title.into();
+            r.started_at = at;
+            let mut u = Step::new(1, StepKind::User, at);
+            u.output = Some(said.into());
+            let store = app.store.as_ref().unwrap();
+            store.start_run(&r).unwrap();
+            store.save_run(&r, &[u]).unwrap();
+            r
+        };
+        let now = crate::app::now();
+        save("old", "old", now - 3 * 60 * 60, "too old");
+        save("a", "task", now - 60, "draft a post");
+        save("d", "Skill draft: task", now - 30, "a draft");
+        let last = save("b", "x", now, "x");
+        app.runs = vec![last.clone()];
+        let text = app.earlier_text(&last);
+        assert!(text.contains("[person] draft a post"), "{text}");
+        assert!(
+            !text.contains("too old") && !text.contains("a draft") && !text.contains("[person] x"),
+            "{text}"
+        );
     }
 }

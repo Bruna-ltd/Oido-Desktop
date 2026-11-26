@@ -697,6 +697,16 @@ fn skill_offer(s: &App, id: &str, i: usize, k: &Kit) -> Option<El> {
         return None;
     }
     let c = &k.c;
+    let (title, about) = match s.offer_kind(id) {
+        crate::skill_offers::Verdict::Warning => (
+            "This run hit a mistake worth remembering",
+            "It did not finish, but TypeSafe found a clear lesson in why. Review a draft warning before anything is saved.",
+        ),
+        _ => (
+            "This run looks worth a skill",
+            "TypeSafe found something here no skill has yet. Review a draft before anything is saved.",
+        ),
+    };
     let (review, dismiss) = (id.to_owned(), id.to_owned());
     Some(
         col()
@@ -708,12 +718,12 @@ fn skill_offer(s: &App, id: &str, i: usize, k: &Kit) -> Option<El> {
             .radius(k.radius.md)
             .border(1.0, c.border_muted)
             .child(
-                text("This run looks worth a skill".to_owned())
+                text(title.to_owned())
                     .font(k.ty.ui_medium)
                     .color(c.text_base),
             )
             .child(
-                text("TypeSafe found something here no skill has yet. Review a draft before anything is saved.".to_owned())
+                text(about.to_owned())
                     .font(k.ty.caption())
                     .color(c.text_muted)
                     .wrap(),

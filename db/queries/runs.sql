@@ -8,7 +8,12 @@ UPDATE runs SET status = ?2, error = ?3, input_tokens = ?4, output_tokens = ?5, 
 WHERE id = ?1;
 
 -- name: SetRunWorth :exec
-UPDATE runs SET worth = ?2 WHERE id = ?1;
+UPDATE runs SET worth = ?2, scores = ?3 WHERE id = ?1;
+
+-- name: ListEarlierRuns :many
+SELECT id, title FROM runs
+WHERE session_id = ?1 AND started_at <= ?2 AND started_at >= ?3 AND id <> ?4 AND parent_run_id IS NULL
+ORDER BY started_at DESC, rowid DESC LIMIT ?5;
 
 -- name: ListSkillOffers :many
 SELECT id FROM runs WHERE worth = 1 AND offer_closed = 0 ORDER BY started_at;
@@ -33,7 +38,7 @@ SELECT id, agent_id, agent_name, session_id, model_provider, model, status, erro
        (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'tool'),
        NULLIF(COALESCE(cache_read_tokens, 0) + COALESCE((SELECT SUM(c.cache_read_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
        NULLIF(COALESCE(cache_write_tokens, 0) + COALESCE((SELECT SUM(c.cache_write_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
-       worth
+       worth, scores
 FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?1;
 
 -- name: GetRun :one
@@ -45,7 +50,7 @@ SELECT id, agent_id, agent_name, session_id, model_provider, model, status, erro
        (SELECT COUNT(*) FROM run_steps s WHERE s.run_id = runs.id AND s.kind = 'tool'),
        NULLIF(COALESCE(cache_read_tokens, 0) + COALESCE((SELECT SUM(c.cache_read_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
        NULLIF(COALESCE(cache_write_tokens, 0) + COALESCE((SELECT SUM(c.cache_write_tokens) FROM runs c WHERE c.parent_run_id = runs.id), 0), 0),
-       worth
+       worth, scores
 FROM runs WHERE id = ?1;
 
 -- name: ListSteps :many

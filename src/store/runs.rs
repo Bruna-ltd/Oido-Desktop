@@ -6,7 +6,7 @@ use crate::models::ModelRef;
 use crate::runs::{Run, Status, Step, StepKind};
 use crate::usage::{Source, Totals};
 
-const COLUMNS: usize = 20;
+const COLUMNS: usize = 21;
 
 impl Store {
     /// A run begins: saved as running, so one that is cut off can be told from one that finished.
@@ -101,12 +101,31 @@ impl Store {
         Ok(())
     }
 
-    /// TypeSafe's verdict on whether run `id` is worth making a skill of.
-    pub fn set_run_worth(&self, id: &str, worth: bool) -> Result<()> {
+    /// TypeSafe's verdict on whether run `id` is worth making a skill of, and the answers it came
+    /// from.
+    pub fn set_run_worth(&self, id: &str, worth: bool, scores: &[f64]) -> Result<()> {
         self.conn
             .prepare_cached(self.sql("SetRunWorth")?)?
-            .execute((id, worth))?;
+            .execute((id, worth, serde_json::to_string(scores)?))?;
         Ok(())
+    }
+
+    /// The runs of chat `session_id` that started from `since` up to `until`, other than `id` and
+    /// team members' runs, newest first, at most `limit`: id and title.
+    pub fn earlier_runs(
+        &self,
+        session_id: &str,
+        id: &str,
+        since: i64,
+        until: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare_cached(self.sql("ListEarlierRuns")?)?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, until, since, id, limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// The runs judged worth a skill whose offer is still open, oldest first.
@@ -152,6 +171,10 @@ impl Store {
                 cache_read_tokens: r.get(17)?,
                 cache_write_tokens: r.get(18)?,
                 worth: r.get(19)?,
+                scores: r
+                    .get::<_, Option<String>>(20)?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

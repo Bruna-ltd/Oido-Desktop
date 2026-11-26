@@ -87,11 +87,16 @@ fn run_row(s: &App, i: usize, r: &Run, k: &Kit) -> El {
                         .truncate(),
                 )
                 .child(el().grow(1.0))
-                .children((r.worth == Some(true)).then(|| {
-                    Badge::new("worth a skill")
-                        .variant(BadgeVariant::Accent)
-                        .build(k)
-                }))
+                .children(
+                    match crate::skill_offers::verdict(&r.scores) {
+                        crate::skill_offers::Verdict::Method => Some("worth a skill"),
+                        crate::skill_offers::Verdict::Warning => Some("a lesson"),
+                        crate::skill_offers::Verdict::Nothing => (r.worth == Some(true)
+                            && r.scores.is_empty())
+                        .then_some("worth a skill"),
+                    }
+                    .map(|words| Badge::new(words).variant(BadgeVariant::Accent).build(k)),
+                )
                 .child(status_badge(r.status).build(k)),
         );
     if !r.title.is_empty() {
@@ -289,6 +294,22 @@ fn header(s: &App, run: &Run, k: &Kit) -> El {
             .truncate(),
         )
         .child(stats);
+    if !run.scores.is_empty() {
+        let verdict = match crate::skill_offers::verdict(&run.scores) {
+            crate::skill_offers::Verdict::Method => "worth a skill",
+            crate::skill_offers::Verdict::Warning => "a lesson to warn about",
+            crate::skill_offers::Verdict::Nothing => "not offered",
+        };
+        out = out.child(
+            text(format!(
+                "TypeSafe: {verdict} ({})",
+                crate::skill_offers::scores_line(&run.scores)
+            ))
+            .font(k.ty.small)
+            .color(c.text_faint)
+            .wrap(),
+        );
+    }
     if let Some(why) = &run.error {
         out = out.child(
             el().w_full()
@@ -399,6 +420,12 @@ fn draft_form(s: &App, f: &crate::skill_draft::Form, k: &Kit) -> El {
                 .key("skill-draft-body"),
         );
     let name = f.name();
+    if f.warning {
+        out = out.child(small(
+            "This run did not finish its task, so the draft is a warning: what went wrong and how to avoid it, not a way to do the task.".to_owned(),
+            c.warning.icon,
+        ));
+    }
     if f.updates.is_some() {
         out = out.child(small(
             format!("Updates the skill {name}, which this run corrects or adds to. The old version is kept beside it as SKILL.md.prev."),

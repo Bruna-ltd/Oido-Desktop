@@ -88,6 +88,8 @@ pub struct Run {
     pub tools: u32,
     /// Whether TypeSafe judged it worth making a skill of; `None` if it was not asked.
     pub worth: Option<bool>,
+    /// TypeSafe's answers, in the order asked (see `skill_offers::QUESTIONS`); empty if not judged.
+    pub scores: Vec<f64>,
 }
 
 impl Run {
@@ -119,6 +121,7 @@ impl Run {
             calls: 0,
             tools: 0,
             worth: None,
+            scores: Vec::new(),
         }
     }
 }

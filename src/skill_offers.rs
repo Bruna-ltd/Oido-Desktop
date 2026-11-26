@@ -38,23 +38,68 @@ const MEAN_FLOOR: f64 = 0.60;
 const COVERED_CEILING: f64 = 0.50;
 const SCORE_WAIT: Duration = Duration::from_secs(30);
 
-/// Whether answers to [`QUESTIONS`], in their order, mark a run as worth a skill: its task
-/// succeeded, the first three are high on average, and no existing skill covers it (when that was
-/// asked).
-pub fn worth(answers: &[f64]) -> bool {
-    let (Some(&task), Some(first)) = (answers.first(), answers.get(..3)) else {
-        return false;
-    };
-    let covered = answers.get(3).copied().unwrap_or(0.0);
-    task >= TASK_FLOOR && first.iter().sum::<f64>() / 3.0 >= MEAN_FLOOR && covered < COVERED_CEILING
+/// For a run whose task did not succeed, how high "reusable" and "evidence" must both be for its
+/// mistake to be worth a warning (ADR-10).
+const WARNING_FLOOR: f64 = 0.75;
+
+/// What TypeSafe's answers make of a run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    /// Nothing to offer: not judged, low answers, or covered by a skill already.
+    Nothing,
+    /// Its task succeeded and it holds a method worth keeping.
+    Method,
+    /// Its task did not succeed, but it clearly shows a mistake to avoid next time. Only a warning
+    /// may be made from it, never a way to do the task.
+    Warning,
 }
 
-/// What TypeSafe is shown of a run: the skills it could already be in, then its transcript, with
-/// every secret and personal detail found in either hidden.
-pub fn judged_text(steps: &[Step], known: &[Known]) -> String {
+/// What answers to [`QUESTIONS`], in their order, make of a run. A method needs task success
+/// first and then a high mean of the first three: a mean alone lets two high answers outvote a
+/// failed task. A failed task can still give a warning, when its lesson is both clearly reusable
+/// and clearly shown. Either way, nothing is offered when a skill covers it already (when that
+/// was asked).
+pub fn verdict(answers: &[f64]) -> Verdict {
+    let (Some(&task), Some(first)) = (answers.first(), answers.get(..3)) else {
+        return Verdict::Nothing;
+    };
+    if answers.get(3).is_some_and(|&c| c >= COVERED_CEILING) {
+        return Verdict::Nothing;
+    }
+    let (reusable, evidence) = (first[1], first[2]);
+    if task >= TASK_FLOOR {
+        if first.iter().sum::<f64>() / 3.0 >= MEAN_FLOOR {
+            return Verdict::Method;
+        }
+    } else if reusable >= WARNING_FLOOR && evidence >= WARNING_FLOOR {
+        return Verdict::Warning;
+    }
+    Verdict::Nothing
+}
+
+/// The answers in words, for the Runs screen: "task 0.31 · reusable 0.82 · …".
+pub fn scores_line(answers: &[f64]) -> String {
+    let names = ["task", "reusable", "evidence", "covered"];
+    answers
+        .iter()
+        .zip(names)
+        .map(|(p, n)| format!("{n} {p:.2}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// What TypeSafe is shown of a run: the skills it could already be in, what came before it in
+/// the chat (`earlier`, see `skill_draft::earlier_block`), then its transcript, with every secret
+/// and personal detail found in any of them hidden.
+pub fn judged_text(steps: &[Step], known: &[Known], earlier: &str) -> String {
     let mut text = transcript(steps);
-    if !known.is_empty() {
-        text = format!("{}\n\n<run>\n{text}\n</run>", known_block(known, false));
+    if !known.is_empty() || !earlier.is_empty() {
+        let skills = if known.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", known_block(known, false))
+        };
+        text = format!("{skills}{earlier}<run>\n{text}\n</run>");
     }
     let mut hidden = crate::guard::Hidden::default();
     hidden.learn(&text);
@@ -121,7 +166,8 @@ impl App {
         };
         let known = self.known_skills(&run.agent_id, &steps);
         let asked = if known.is_empty() { 3 } else { 4 };
-        let text = judged_text(&steps, &known);
+        let earlier = self.earlier_text(&run);
+        let text = judged_text(&steps, &known, &earlier);
         let id = run.id;
         self.spawn(
             move || {
@@ -134,19 +180,32 @@ impl App {
                 )
             },
             move |app, got| match got {
-                Ok(answers) => app.scored(&id, worth(&answers)),
+                Ok(answers) => app.scored(&id, &answers),
                 Err(why) => eprintln!("oido: TypeSafe could not judge the run: {why}"),
             },
         );
     }
 
-    fn scored(&mut self, id: &str, worth: bool) {
-        self.save("the run's verdict", |db| db.set_run_worth(id, worth));
+    fn scored(&mut self, id: &str, answers: &[f64]) {
+        let worth = verdict(answers) != Verdict::Nothing;
+        self.save("the run's verdict", |db| {
+            db.set_run_worth(id, worth, answers)
+        });
         if let Some(r) = self.runs.iter_mut().find(|r| r.id == id) {
             r.worth = Some(worth);
+            r.scores = answers.to_vec();
         }
         if worth && !self.skill_offers.iter().any(|o| o == id) {
             self.skill_offers.push(id.to_owned());
+        }
+    }
+
+    /// What kind of offer run `id` has, by its saved answers; [`Verdict::Method`] if they are not
+    /// at hand.
+    pub fn offer_kind(&self, id: &str) -> Verdict {
+        match self.runs.iter().find(|r| r.id == id) {
+            Some(r) if !r.scores.is_empty() => verdict(&r.scores),
+            _ => Verdict::Method,
         }
     }
 
@@ -180,19 +239,31 @@ mod tests {
     use crate::runs::StepKind;
 
     #[test]
-    fn a_run_is_worth_a_skill_only_when_its_task_succeeded_the_answers_are_high_and_nothing_covers_it()
-     {
-        assert!(worth(&[0.9, 0.8, 0.7]));
-        assert!(
-            !worth(&[0.27, 0.86, 0.69]),
-            "a failed task is not averaged in (beacon #649)"
+    fn a_method_needs_task_success_and_a_failed_task_can_only_give_a_clear_warning() {
+        use Verdict::*;
+        assert_eq!(verdict(&[0.9, 0.8, 0.7]), Method);
+        assert_eq!(
+            verdict(&[0.5, 0.65, 0.65]),
+            Method,
+            "both floors are inclusive"
         );
-        assert!(!worth(&[0.9, 0.3, 0.4]), "a mean of 0.53");
-        assert!(worth(&[0.5, 0.65, 0.65]), "both floors are inclusive");
-        assert!(worth(&[0.9, 0.8, 0.7, 0.2]), "no skill covers it");
-        assert!(!worth(&[0.9, 0.8, 0.7, 0.8]), "a skill covers it already");
-        assert!(!worth(&[0.9, 0.8]));
-        assert!(!worth(&[]));
+        assert_eq!(verdict(&[0.9, 0.3, 0.4]), Nothing, "a mean of 0.53");
+        assert_eq!(
+            verdict(&[0.27, 0.86, 0.69]),
+            Nothing,
+            "a failed task is not averaged into a method (beacon #649), nor clear enough to warn"
+        );
+        assert_eq!(verdict(&[0.27, 0.86, 0.79]), Warning);
+        assert_eq!(
+            verdict(&[0.27, 0.86, 0.79, 0.7]),
+            Nothing,
+            "covered already"
+        );
+        assert_eq!(verdict(&[0.9, 0.8, 0.7, 0.2]), Method);
+        assert_eq!(verdict(&[0.9, 0.8, 0.7, 0.8]), Nothing);
+        assert_eq!(verdict(&[0.9, 0.8]), Nothing);
+        assert_eq!(verdict(&[]), Nothing);
+        assert_eq!(scores_line(&[0.312, 0.8]), "task 0.31 · reusable 0.80");
     }
 
     #[test]
@@ -202,7 +273,7 @@ mod tests {
             "deploy with sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD and mail ops@example.com"
                 .into(),
         );
-        let text = judged_text(std::slice::from_ref(&s), &[]);
+        let text = judged_text(std::slice::from_ref(&s), &[], "");
         assert!(
             !text.contains("sk-ant-api03") && !text.contains("ops@example.com"),
             "{text}"
@@ -213,9 +284,11 @@ mod tests {
             description: "Deploy the app.".into(),
             body: "Run make deploy.".into(),
         }];
-        let text = judged_text(&[s], &known);
+        let text = judged_text(&[s], &known, "<earlier>\nx\n</earlier>\n\n");
         assert!(
-            text.starts_with("<skills>\n- deploy: Deploy the app.\n</skills>\n\n<run>\n[person]"),
+            text.starts_with(
+                "<skills>\n- deploy: Deploy the app.\n</skills>\n\n<earlier>\nx\n</earlier>\n\n<run>\n[person]"
+            ),
             "{text}"
         );
         assert!(
@@ -237,10 +310,11 @@ mod tests {
         app.set_score_for("scout", None);
         assert!(app.scores_for("scout"), "back to what Settings says");
 
-        app.scored("r1", true);
-        app.scored("r1", true);
-        app.scored("r2", false);
-        assert_eq!(app.skill_offers, ["r1"]);
+        app.scored("r1", &[0.9, 0.8, 0.7]);
+        app.scored("r1", &[0.9, 0.8, 0.7]);
+        app.scored("r2", &[0.2, 0.9, 0.9]);
+        app.scored("r3", &[0.2, 0.3, 0.3]);
+        assert_eq!(app.skill_offers, ["r1", "r2"], "a method, and a warning");
         app.close_skill_offer("r1");
         assert!(!app.offers_skill("r1"));
     }

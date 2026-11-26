@@ -898,6 +898,11 @@ pub static SCENES: &[Scene] = &[
         s.route = Route::Runs;
         if let Some(r) = s.runs.first_mut() {
             r.worth = Some(true);
+            r.scores = vec![0.92, 0.81, 0.74, 0.12];
+        }
+        if let Some(r) = s.runs.get_mut(1) {
+            r.worth = Some(true);
+            r.scores = vec![0.21, 0.88, 0.83, 0.05];
         }
         if let Some(run) = s.runs.get(s.run) {
             let mut f = crate::skill_draft::Form::new(run);
