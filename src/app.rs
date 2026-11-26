@@ -111,8 +111,11 @@ pub struct App {
     pub resuming: std::collections::HashSet<String>,
     /// The skill being drafted from a run, on the Runs screen.
     pub skill_draft: Option<crate::skill_draft::Form>,
-    /// Whether TypeSafe judges each finished run for a skill (Settings).
+    /// Whether TypeSafe judges each finished run for a skill (Settings), and agents' own choices.
     pub score_runs: bool,
+    pub score_overrides: std::collections::HashMap<String, bool>,
+    /// Runs whose chat offers to make a skill of them, until the offer is answered.
+    pub skill_offers: Vec<String>,
     /// Whether TypeSafe sorts each message first (Settings), the chats it is sorting now, and the
     /// chats whose run is a list-and-judge task, where tools that read are left to scripts.
     pub route_bulk: bool,
@@ -373,6 +376,8 @@ impl App {
             resuming: std::collections::HashSet::new(),
             skill_draft: None,
             score_runs: persist::score_runs(store.as_ref()),
+            score_overrides: persist::score_overrides(store.as_ref()),
+            skill_offers: persist::skill_offers(store.as_ref()),
             route_bulk: persist::route_bulk(store.as_ref()),
             routing: std::collections::HashSet::new(),
             bulk: std::collections::HashSet::new(),
@@ -573,6 +578,7 @@ impl App {
 
     pub fn edit_agent(&mut self, t: &Target) {
         self.roster.open_edit(t);
+        self.roster.form.score = self.score_overrides.get(&t.id).copied();
         self.load_agent_spend(&t.id);
         self.route = if self.roster.editing.is_some() {
             Route::AgentForm
@@ -589,7 +595,11 @@ impl App {
 
     pub fn submit_form(&mut self) {
         let editing = matches!(self.roster.editing, Some(FormKind::Edit(_)));
+        let score = self.roster.form.score;
         if let Some(t) = self.roster.submit() {
+            if score != self.score_overrides.get(&t.id).copied() {
+                self.set_score_for(&t.id, score);
+            }
             self.route = Route::Chat;
             // An edit changes the agent's row; a new agent is saved whole, with its first chat.
             if editing {

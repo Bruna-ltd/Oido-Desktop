@@ -906,6 +906,7 @@ pub static SCENES: &[Scene] = &[
                 title: "Check the release notes before upgrading".into(),
                 use_when: "when asked what changed in a new version of a dependency".into(),
                 body: "1. Open the project's CHANGELOG or GitHub releases page.\n2. List breaking changes first, then new features.\n3. Quote config moves exactly, with the old and new path.".into(),
+                updates: None,
             });
             s.skill_draft = Some(f);
         }
@@ -952,6 +953,13 @@ pub static SCENES: &[Scene] = &[
             ];
             s.summaries_open.insert((sid, 2));
         }
+    }),
+    ("chat-skill-offer", |s| {
+        if let Some((_, f)) = SCENES.iter().find(|(n, _)| *n == "context") {
+            f(s);
+        }
+        s.skill_offers.push("r1".into());
+        s.route = Route::Chat;
     }),
     ("reply-failed", |s| {
         load_samples(s);

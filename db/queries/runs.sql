@@ -10,6 +10,12 @@ WHERE id = ?1;
 -- name: SetRunWorth :exec
 UPDATE runs SET worth = ?2 WHERE id = ?1;
 
+-- name: ListSkillOffers :many
+SELECT id FROM runs WHERE worth = 1 AND offer_closed = 0 ORDER BY started_at;
+
+-- name: CloseSkillOffer :exec
+UPDATE runs SET offer_closed = 1 WHERE id = ?1;
+
 -- name: InsertStep :exec
 INSERT INTO run_steps (run_id, seq, kind, name, status, input, output, reasoning,
                        input_tokens, output_tokens, duration_ms, started_at, at_ms, first_ms, truncated,

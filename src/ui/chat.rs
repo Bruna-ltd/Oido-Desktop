@@ -676,7 +676,69 @@ fn assistant(s: &App, r: &Reply, i: usize, k: &Kit) -> El {
     if r.stats.is_some() || (finished && (r.run.is_some() || !r.body.is_empty())) {
         out = out.child(foot);
     }
+    if let (Some(id), true) = (r.run, finished) {
+        out = out.children(skill_offer(s, id, i, k));
+    }
     super::text_menu::message(out.hover_group(), i)
+}
+
+/// The offer to make a skill of run `id`, under the last reply of that run, while it is open.
+fn skill_offer(s: &App, id: &str, i: usize, k: &Kit) -> Option<El> {
+    if !s.offers_skill(id) {
+        return None;
+    }
+    let last = s.current().and_then(|a| {
+        a.chat()
+            .messages
+            .iter()
+            .rposition(|m| matches!(m, Message::Assistant { run: Some(r), .. } if r == id))
+    });
+    if last != Some(i) {
+        return None;
+    }
+    let c = &k.c;
+    let (review, dismiss) = (id.to_owned(), id.to_owned());
+    Some(
+        col()
+            .key(format!("skill-offer-{id}"))
+            .w_full()
+            .max_w(560.0)
+            .padding(12.0)
+            .gap(8.0)
+            .radius(k.radius.md)
+            .border(1.0, c.border_muted)
+            .child(
+                text("This run looks worth a skill".to_owned())
+                    .font(k.ty.ui_medium)
+                    .color(c.text_base),
+            )
+            .child(
+                text("TypeSafe found something here no skill has yet. Review a draft before anything is saved.".to_owned())
+                    .font(k.ty.caption())
+                    .color(c.text_muted)
+                    .wrap(),
+            )
+            .child(
+                row()
+                    .gap(8.0)
+                    .child(
+                        Button::new("Review")
+                            .variant(ButtonVariant::Contrast)
+                            .control_size(ControlSize::Small)
+                            .on_press(move |s: &mut App| s.review_skill_offer(&review))
+                            .build(k)
+                            .key(format!("skill-offer-review-{i}")),
+                    )
+                    .child(
+                        Button::new("Not now")
+                            .variant(ButtonVariant::Outline)
+                            .control_size(ControlSize::Small)
+                            .on_press(move |s: &mut App| s.close_skill_offer(&dismiss))
+                            .build(k)
+                            .key(format!("skill-offer-dismiss-{i}")),
+                    ),
+            ),
+    )
 }
 
 /// How a reply ended when it did not finish, with a way to ask again.

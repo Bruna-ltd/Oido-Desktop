@@ -287,6 +287,14 @@ mod tests {
         assert_eq!(db.list_runs(10).unwrap()[0].worth, Some(true));
         db.set_run_worth("judged", false).unwrap();
         assert_eq!(db.list_runs(10).unwrap()[0].worth, Some(false));
+        assert!(
+            db.skill_offers().unwrap().is_empty(),
+            "only a run worth it is offered"
+        );
+        db.set_run_worth("judged", true).unwrap();
+        assert_eq!(db.skill_offers().unwrap(), ["judged"]);
+        db.close_skill_offer("judged").unwrap();
+        assert!(db.skill_offers().unwrap().is_empty());
     }
 
     #[test]

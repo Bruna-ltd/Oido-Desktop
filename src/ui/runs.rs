@@ -399,7 +399,12 @@ fn draft_form(s: &App, f: &crate::skill_draft::Form, k: &Kit) -> El {
                 .key("skill-draft-body"),
         );
     let name = f.name();
-    if !name.is_empty() {
+    if f.updates.is_some() {
+        out = out.child(small(
+            format!("Updates the skill {name}, which this run corrects or adds to. The old version is kept beside it as SKILL.md.prev."),
+            c.text_muted,
+        ));
+    } else if !name.is_empty() {
         out = out.child(small(format!("Will be saved as {name}"), c.text_faint));
     }
     if let Some(note) = &f.note {
@@ -409,7 +414,7 @@ fn draft_form(s: &App, f: &crate::skill_draft::Form, k: &Kit) -> El {
     if let Some((_, old)) = replacing {
         out = out
             .child(small(
-                format!("A skill called {name} is already there. Saving replaces it:"),
+                format!("The skill {name} now reads as below. Saving replaces it:"),
                 c.warning.icon,
             ))
             .child(

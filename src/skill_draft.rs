@@ -39,44 +39,111 @@ Answer with JSON only, no other text:
 
 Leave any placeholder such as ⟨secret-1⟩ out of what you write. If the run holds nothing reusable (it failed with no lesson, or was small talk), answer {"none": "<why, in one sentence>"} instead."#;
 
-/// What TypeSafe is asked about a finished run (ADR-6), task success first.
-pub const QUESTIONS: [(&str, &str); 3] = [
-    (
-        "task_success",
-        "Did the agent complete the person's task successfully?",
-    ),
-    (
-        "reusable",
-        "Does this run contain an approach, fix or debugging pattern that a future agent doing a similar task should reuse?",
-    ),
-    (
-        "evidence",
-        "Is that reusable lesson backed by concrete steps in the run, such as commands, results or errors?",
-    ),
-];
-/// Task success below this rules a run out, whatever the other answers: a mean alone lets two high
-/// answers outvote a failed task (0.27, 0.86, 0.69 averages 0.61).
-const TASK_FLOOR: f64 = 0.50;
-/// The mean of the answers a run needs, once its task succeeded.
-const MEAN_FLOOR: f64 = 0.60;
-const SCORE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Added to the prompt when skills that may overlap are given (see [`Known`]).
+const KNOWN_PROMPT: &str = r#"Skills that already exist are given in <skills>. Never write a second skill for what one of them covers:
+- If the run's lesson is already covered by one, answer {"none": "covered by <name>"}.
+- If the run corrects or extends one (for example it read that skill and still went wrong, or found a better way), answer {"update": "<name>", "title": "...", "use_when": "...", "body": "..."}, where body is the complete new instructions for that skill: keep what still holds, fix what the run showed was wrong, add what it taught.
+- Otherwise write a new skill as above."#;
 
-/// Whether answers to [`QUESTIONS`], in their order, mark a run as worth a skill.
-pub fn worth(answers: &[f64]) -> bool {
-    let Some(&task) = answers.first() else {
-        return false;
-    };
-    task >= TASK_FLOOR && answers.iter().sum::<f64>() / answers.len() as f64 >= MEAN_FLOOR
+/// How many existing skills a draft or a verdict is shown, and how much of each one's
+/// instructions.
+const MAX_KNOWN: usize = 12;
+const KNOWN_BYTES: usize = 3_000;
+
+/// An existing skill a run's lesson may already be in: one the agent has, one the run read, or
+/// one made from an earlier run.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Known {
+    pub name: String,
+    pub description: String,
+    /// Its instructions, cut to [`KNOWN_BYTES`].
+    pub body: String,
 }
 
-/// What TypeSafe is shown of a run: its transcript with every secret and personal detail found in
-/// it hidden.
-pub fn judged_text(steps: &[Step]) -> String {
-    let text = transcript(steps);
-    let mut hidden = crate::guard::Hidden::default();
-    hidden.learn(&text);
-    hidden.learn_personal(&text);
-    hidden.hide(&text)
+/// `known` as the model or TypeSafe is shown it; with `bodies`, each one's instructions too.
+pub fn known_block(known: &[Known], bodies: bool) -> String {
+    let each: Vec<String> = known
+        .iter()
+        .map(|k| {
+            let head = format!("- {}: {}", k.name, k.description);
+            if bodies {
+                format!("{head}\n{}", k.body)
+            } else {
+                head
+            }
+        })
+        .collect();
+    format!("<skills>\n{}\n</skills>", each.join("\n\n"))
+}
+
+/// The skills a run that used `used`, by an agent that has `given`, is checked against: those it
+/// read first, then the agent's, then every skill made from a run (`made`), each once, at most
+/// [`MAX_KNOWN`]. Ones no longer in `dir` are left out.
+pub fn known(dir: &Path, used: &[String], given: &[String], made: &[String]) -> Vec<Known> {
+    let mut names: Vec<&String> = Vec::new();
+    for n in used.iter().chain(given).chain(made) {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let skill = crate::skills::chosen(Some(dir), std::slice::from_ref(name)).pop()?;
+            let (body, cut) = clip(&crate::skills::body(dir, name)?, KNOWN_BYTES);
+            Some(Known {
+                name: skill.name,
+                description: skill.description,
+                body: if cut { format!("{body}…") } else { body },
+            })
+        })
+        .take(MAX_KNOWN)
+        .collect()
+}
+
+/// The skills the run read with the `skill` tool, by name, in the order read.
+pub fn used(steps: &[Step]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in steps
+        .iter()
+        .filter(|s| s.kind == StepKind::Tool && s.name == crate::tools::SKILL)
+    {
+        let name = s
+            .input
+            .as_deref()
+            .and_then(|i| serde_json::from_str::<Value>(i).ok())
+            .and_then(|v| {
+                v.get("name")
+                    .and_then(Value::as_str)
+                    .map(|n| n.trim().to_owned())
+            });
+        if let Some(n) = name.filter(|n| !n.is_empty() && !out.contains(n)) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Whether a `SKILL.md` was made from a run (it names the runs it came from).
+pub fn made_from_runs(text: &str) -> bool {
+    meta(text, "oido_runs").is_some()
+}
+
+/// A `metadata` value of a `SKILL.md`, unquoted.
+pub fn meta(text: &str, key: &str) -> Option<String> {
+    let front = text.strip_prefix("---\n")?;
+    let front = &front[..front.find("\n---")?];
+    front.lines().find_map(|l| {
+        let v = l.trim_start().strip_prefix(key)?.strip_prefix(':')?.trim();
+        let v = v
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .map_or_else(
+                || v.to_owned(),
+                |v| v.replace("\\\"", "\"").replace("\\\\", "\\"),
+            );
+        (!v.is_empty()).then_some(v)
+    })
 }
 
 /// What the model drafted.
@@ -85,6 +152,8 @@ pub struct Draft {
     pub title: String,
     pub use_when: String,
     pub body: String,
+    /// The existing skill this rewrites, when the run corrects or extends one.
+    pub updates: Option<String>,
 }
 
 /// The model's answer: a draft, or why the run holds nothing to make one from.
@@ -128,13 +197,25 @@ fn line(s: &Step) -> Option<String> {
     }
 }
 
-/// The one-off call that drafts a skill from `steps`, on `model`, with no tools.
-pub fn request(model: &str, steps: &[Step]) -> Request {
+/// The one-off call that drafts a skill from `steps`, on `model`, with no tools. `known` are the
+/// skills it must not repeat, and may update instead.
+pub fn request(model: &str, steps: &[Step], known: &[Known]) -> Request {
+    let (system, skills) = if known.is_empty() {
+        (PROMPT.to_owned(), String::new())
+    } else {
+        (
+            format!("{PROMPT}\n\n{KNOWN_PROMPT}"),
+            format!("{}\n\n", known_block(known, true)),
+        )
+    };
     Request {
         model: model.to_owned(),
-        system: Some(PROMPT.to_owned()),
+        system: Some(system),
         context: None,
-        turns: vec![Turn::user(format!("<run>\n{}\n</run>", transcript(steps)))],
+        turns: vec![Turn::user(format!(
+            "{skills}<run>\n{}\n</run>",
+            transcript(steps)
+        ))],
         think: None,
         tools: Vec::new(),
         cache_key: None,
@@ -162,6 +243,7 @@ pub fn parse(reply: &str) -> Parsed {
             title: field(&v, "title"),
             use_when: field(&v, "use_when"),
             body: field(&v, "body"),
+            updates: Some(field(&v, "update")).filter(|u| !u.is_empty()),
         }),
         _ => Parsed::Draft(Draft {
             body: text.to_owned(),
@@ -214,7 +296,8 @@ pub fn description(title: &str, use_when: &str) -> String {
 
 /// Where a skill came from, kept under `metadata`.
 pub struct Provenance<'a> {
-    pub run: &'a str,
+    /// Every run it was made or updated from, oldest first.
+    pub runs: &'a [String],
     pub agent: &'a str,
     /// `YYYY-MM-DD`.
     pub made: &'a str,
@@ -224,9 +307,10 @@ pub struct Provenance<'a> {
 pub fn render(name: &str, draft: &Draft, from: &Provenance) -> String {
     let title = draft.title.trim();
     let mut out = format!(
-        "---\nname: {name}\ndescription: {}\nmetadata:\n  oido_run: {}\n  oido_agent: {}\n  oido_made: {}\n---\n\n# {title}\n\n",
+        "---\nname: {name}\ndescription: {}\nmetadata:\n  oido_runs: {}\n  oido_version: \"{}\"\n  oido_agent: {}\n  oido_made: {}\n---\n\n# {title}\n\n",
         quote(&description(title, &draft.use_when)),
-        quote(from.run),
+        quote(&from.runs.join(", ")),
+        from.runs.len().max(1),
         quote(from.agent),
         quote(from.made),
     );
@@ -290,6 +374,11 @@ pub fn install(dir: &Path, name: &str, text: &str, replace: bool) -> Result<Path
     let folder = dir.join(name);
     std::fs::create_dir_all(&folder)
         .map_err(|e| format!("Could not make {}: {e}", folder.display()))?;
+    // The version replaced is kept beside it, one step back.
+    if file.exists() {
+        std::fs::copy(&file, folder.join("SKILL.md.prev"))
+            .map_err(|e| format!("Could not keep the old {}: {e}", file.display()))?;
+    }
     let tmp = folder.join("SKILL.md.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("Could not write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &file).map_err(|e| {
@@ -323,6 +412,8 @@ pub struct Form {
     pub body: TextEdit,
     /// The skill already there under the name being saved, and its text: shown before Replace.
     pub existing: Option<(String, String)>,
+    /// The existing skill the draft rewrites; it is saved under that name, whatever its title.
+    pub updates: Option<String>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -348,6 +439,7 @@ impl Form {
             use_when: TextEdit::new(""),
             body: TextEdit::new(""),
             existing: None,
+            updates: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -356,6 +448,7 @@ impl Form {
         self.title = TextEdit::new(d.title.clone());
         self.use_when = TextEdit::new(d.use_when.clone());
         self.body = TextEdit::new(d.body.clone());
+        self.updates = d.updates.clone();
     }
 
     /// The draft as it stands in the fields.
@@ -364,12 +457,15 @@ impl Form {
             title: self.title.text.trim().to_owned(),
             use_when: self.use_when.text.trim().to_owned(),
             body: self.body.text.trim().to_owned(),
+            updates: self.updates.clone(),
         }
     }
 
-    /// The name it would be saved under.
+    /// The name it would be saved under: the skill it updates, else its title's.
     pub fn name(&self) -> String {
-        slug(&self.title.text)
+        self.updates
+            .clone()
+            .unwrap_or_else(|| slug(&self.title.text))
     }
 
     pub fn ready(&self) -> bool {
@@ -398,7 +494,8 @@ impl App {
                 return;
             }
         };
-        let ask = request(&run.model.id, &self.steps);
+        let known = self.known_skills(&run.agent_id, &self.steps);
+        let ask = request(&run.model.id, &self.steps, &known);
         // Runs record secrets as placeholders already; the guard hides anything else and takes
         // out invisible characters. The answer is never revealed: a placeholder left in it
         // blocks saving.
@@ -412,8 +509,29 @@ impl App {
         self.skill_draft = Some(form);
         self.spawn(
             move || completion::complete(&endpoint, credential.as_ref(), &ask, &cancel),
-            move |app, got| app.skill_drafted(&run, &sent, began, &who, got),
+            move |app, got| app.skill_drafted(&run, &known, &sent, began, &who, got),
         );
+    }
+
+    /// The skills a run of agent `agent_id` with `steps` is checked against (see [`known`]).
+    pub(crate) fn known_skills(&self, agent_id: &str, steps: &[Step]) -> Vec<Known> {
+        let Some(dir) = self.skills_dir.as_deref() else {
+            return Vec::new();
+        };
+        let given = self
+            .roster
+            .agent_ref(agent_id)
+            .map(|a| a.skills.clone())
+            .unwrap_or_default();
+        let made: Vec<String> = self
+            .skills
+            .iter()
+            .filter(|s| {
+                std::fs::read_to_string(path(dir, &s.name)).is_ok_and(|t| made_from_runs(&t))
+            })
+            .map(|s| s.name.clone())
+            .collect();
+        known(dir, &used(steps), &given, &made)
     }
 
     /// The model answered: the form is filled, and the call is kept as a run of its own, so its
@@ -421,6 +539,7 @@ impl App {
     fn skill_drafted(
         &mut self,
         from: &Run,
+        known: &[Known],
         sent: &str,
         began: Instant,
         who: &str,
@@ -453,7 +572,15 @@ impl App {
             (None, Parsed::Draft(d)) if d.body.is_empty() => {
                 form.note = Some(format!("{who} sent back an empty draft."));
             }
-            (None, Parsed::Draft(d)) => form.fill(&d),
+            (None, Parsed::Draft(mut d)) => {
+                // Only a skill it was shown can be updated; any other name is a new skill.
+                d.updates = d.updates.filter(|u| known.iter().any(|k| &k.name == u));
+                form.fill(&d);
+                if let (Some(name), Some(dir)) = (&d.updates, &self.skills_dir) {
+                    let old = std::fs::read_to_string(path(dir, name)).unwrap_or_default();
+                    form.existing = Some((name.clone(), old));
+                }
+            }
         }
     }
 
@@ -516,11 +643,19 @@ impl App {
         };
         let (name, draft) = (form.name(), form.draft());
         let made = chrono::Local::now().format("%Y-%m-%d").to_string();
+        // An update keeps the runs the skill came from, and adds this one.
+        let mut runs: Vec<String> = std::fs::read_to_string(path(&dir, &name))
+            .ok()
+            .and_then(|old| meta(&old, "oido_runs"))
+            .map(|r| r.split(',').map(|r| r.trim().to_owned()).collect())
+            .unwrap_or_default();
+        runs.retain(|r| !r.is_empty() && *r != form.run_id);
+        runs.push(form.run_id.clone());
         let text = render(
             &name,
             &draft,
             &Provenance {
-                run: &form.run_id,
+                runs: &runs,
                 agent: &form.agent_name,
                 made: &made,
             },
@@ -546,7 +681,9 @@ impl App {
                 form.phase = Phase::Saved(name);
                 form.note = None;
                 form.existing = None;
+                let run = form.run_id.clone();
                 self.reload_skills();
+                self.close_skill_offer(&run);
             }
             Err(why) => form.note = Some(why),
         }
@@ -583,65 +720,6 @@ impl App {
         self.roster
             .agent_ref(&f.agent_id)
             .is_some_and(|a| !a.skills.contains(name))
-    }
-
-    /// Settings: TypeSafe judges each finished run for a skill, or does not.
-    pub fn set_score_runs(&mut self, on: bool) {
-        self.score_runs = on;
-        self.save("the run scoring setting", |db| {
-            db.set_setting(crate::persist::SCORE_RUNS, &on)
-        });
-    }
-
-    /// Chat `sid`'s run finished well: with scoring on and TypeSafe connected, TypeSafe judges in
-    /// the background whether it is worth a skill, and the verdict is saved with the run. A team
-    /// member's run, or a skill draft's, is not judged.
-    pub fn score_run(&mut self, sid: &str) {
-        if !self.score_runs || !self.typesafe_connected() {
-            return;
-        }
-        let Some(run) = self.traces.get(sid).map(|t| t.run.clone()) else {
-            return;
-        };
-        if run.parent.is_some() || run.calls == 0 {
-            return;
-        }
-        let key = self
-            .store
-            .as_ref()
-            .and_then(|db| db.provider_key(crate::providers::TYPESAFE).ok().flatten());
-        let steps = self
-            .store
-            .as_ref()
-            .and_then(|db| db.list_steps(&run.id).ok())
-            .unwrap_or_default();
-        let (Some(key), false) = (key, steps.is_empty()) else {
-            return;
-        };
-        let text = judged_text(&steps);
-        let id = run.id;
-        self.spawn(
-            move || {
-                crate::typesafe::probabilities(
-                    crate::typesafe::BASE,
-                    &key,
-                    &text,
-                    &QUESTIONS,
-                    SCORE_WAIT,
-                )
-            },
-            move |app, got| match got {
-                Ok(answers) => app.scored(&id, worth(&answers)),
-                Err(why) => eprintln!("oido: TypeSafe could not judge the run: {why}"),
-            },
-        );
-    }
-
-    fn scored(&mut self, id: &str, worth: bool) {
-        self.save("the run's verdict", |db| db.set_run_worth(id, worth));
-        if let Some(r) = self.runs.iter_mut().find(|r| r.id == id) {
-            r.worth = Some(worth);
-        }
     }
 
     /// The open draft form, for its fields' editors.
@@ -724,34 +802,6 @@ mod tests {
     }
 
     #[test]
-    fn a_run_is_worth_a_skill_only_when_its_task_succeeded_and_the_answers_are_high() {
-        assert!(worth(&[0.9, 0.8, 0.7]));
-        assert!(
-            !worth(&[0.27, 0.86, 0.69]),
-            "a failed task is not averaged in (beacon #649)"
-        );
-        assert!(!worth(&[0.9, 0.3, 0.4]), "a mean of 0.53");
-        assert!(worth(&[0.5, 0.65, 0.65]), "both floors are inclusive");
-        assert!(!worth(&[]));
-    }
-
-    #[test]
-    fn what_typesafe_sees_has_its_secrets_and_personal_details_hidden() {
-        let steps = [step(
-            StepKind::User,
-            "",
-            "",
-            "deploy with sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD and mail ops@example.com",
-        )];
-        let text = judged_text(&steps);
-        assert!(
-            !text.contains("sk-ant-api03") && !text.contains("ops@example.com"),
-            "{text}"
-        );
-        assert!(text.starts_with("[person] deploy with "));
-    }
-
-    #[test]
     fn an_answer_is_read_as_a_draft_a_refusal_or_a_bare_body() {
         let d = parse(
             "```json\n{\"title\": \"Retry flaky tests\", \"use_when\": \"when a test fails once\", \"body\": \"Run it twice.\"}\n```",
@@ -762,6 +812,7 @@ mod tests {
                 title: "Retry flaky tests".into(),
                 use_when: "when a test fails once".into(),
                 body: "Run it twice.".into(),
+                updates: None,
             })
         );
         assert_eq!(
@@ -812,12 +863,13 @@ mod tests {
             title: "Say \"hi\" first".into(),
             use_when: "when greeting".into(),
             body: "# Steps\nSay hi.".into(),
+            updates: None,
         };
         let text = render(
             "say-hi-first",
             &draft,
             &Provenance {
-                run: "r1",
+                runs: &["r1".to_owned()],
                 agent: "Scout",
                 made: "2026-11-26",
             },
@@ -833,7 +885,9 @@ mod tests {
             body.starts_with("# Say \"hi\" first\n\nUse this skill when greeting.\n\n# Steps"),
             "{body}"
         );
-        assert!(text.contains("  oido_run: \"r1\"\n"));
+        assert!(text.contains("  oido_runs: \"r1\"\n  oido_version: \"1\"\n"));
+        assert_eq!(meta(&text, "oido_runs").as_deref(), Some("r1"));
+        assert!(made_from_runs(&text));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -946,6 +1000,148 @@ mod tests {
             app.skill_draft.as_ref().unwrap().phase,
             Phase::Saved(_)
         ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_draft_is_shown_the_skills_it_may_repeat_and_can_update_one_instead() {
+        let dir = std::env::temp_dir().join(format!("oido-draft-{}", uuid::Uuid::new_v4()));
+        for (name, text) in [
+            (
+                "deploy",
+                "---\nname: deploy\ndescription: Deploy the app.\n---\nRun make deploy.",
+            ),
+            (
+                "made",
+                "---\nname: made\ndescription: From a run.\nmetadata:\n  oido_runs: \"r0\"\n---\nDo it.",
+            ),
+        ] {
+            install(&dir, name, text, false).unwrap();
+        }
+        let mut read = Step::new(2, StepKind::Tool, 0);
+        read.name = crate::tools::SKILL.into();
+        read.input = Some(r#"{"name":"deploy"}"#.into());
+        let steps = [step(StepKind::User, "", "", "deploy it"), read];
+        assert_eq!(used(&steps), ["deploy"]);
+
+        let found = known(&dir, &used(&steps), &[], &["made".into(), "gone".into()]);
+        let names: Vec<_> = found.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["deploy", "made"],
+            "read first, then made from runs; gone left out"
+        );
+        assert_eq!(found[0].body, "Run make deploy.");
+
+        let req = request("m", &steps, &found);
+        assert!(
+            req.system
+                .as_deref()
+                .unwrap()
+                .contains("Never write a second skill")
+        );
+        assert!(
+            req.turns[0]
+                .text
+                .starts_with("<skills>\n- deploy: Deploy the app.\nRun make deploy.")
+        );
+        assert!(
+            !request("m", &steps, &[])
+                .system
+                .unwrap()
+                .contains("<skills>")
+        );
+
+        let d = parse(
+            r#"{"update": "deploy", "title": "Deploy", "use_when": "when deploying", "body": "Run make deploy, then check health."}"#,
+        );
+        let Parsed::Draft(d) = d else {
+            panic!("a draft")
+        };
+        assert_eq!(d.updates.as_deref(), Some("deploy"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replacing_a_skill_keeps_the_old_version_beside_it() {
+        let dir = std::env::temp_dir().join(format!("oido-draft-{}", uuid::Uuid::new_v4()));
+        install(&dir, "a", "one", false).unwrap();
+        assert!(!dir.join("a").join("SKILL.md.prev").exists());
+        install(&dir, "a", "two", true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a").join("SKILL.md.prev")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            crate::skills::discover(&dir).len(),
+            1,
+            "the old version is not a skill"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_update_from_a_run_is_saved_under_the_skill_s_name_and_adds_the_run() {
+        use crate::testing::{EVENTS, TempDb, app_with_server, text_stream};
+        let db = TempDb::new();
+        let dir = std::env::temp_dir().join(format!("oido-draft-{}", uuid::Uuid::new_v4()));
+        let old = render(
+            "check-logs",
+            &Draft {
+                title: "Check logs".into(),
+                use_when: "when a service is down".into(),
+                body: "Read the log.".into(),
+                updates: None,
+            },
+            &Provenance {
+                runs: &["r0".to_owned()],
+                agent: "Scout",
+                made: "2026-11-01",
+            },
+        );
+        install(&dir, "check-logs", &old, false).unwrap();
+        let update = r#"{"update": "check-logs", "title": "Check logs and disk", "use_when": "when a service is down", "body": "Read the log, then run df -h."}"#;
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (200, EVENTS, text_stream("The disk was full.")),
+                (200, EVENTS, text_stream(update)),
+            ],
+        );
+        app.skills_dir = Some(dir.clone());
+        app.reload_skills();
+        app.composer.edit = TextEdit::new("why is it down?");
+        app.send();
+        let _ = seen.recv().unwrap();
+        app.go(crate::app::Route::Runs);
+        app.reload_runs();
+        app.select_run(0);
+        let source = app.runs[0].id.clone();
+        app.skill_offers.push(source.clone());
+
+        app.make_skill();
+        let sent = seen.recv().unwrap();
+        assert!(
+            sent.contains("check-logs"),
+            "the draft is shown the skill made from a run"
+        );
+        let f = app.skill_draft.as_ref().unwrap();
+        assert_eq!(f.name(), "check-logs", "an update keeps the skill's name");
+        assert!(
+            f.existing
+                .as_ref()
+                .is_some_and(|(n, t)| n == "check-logs" && t.contains("Read the log."))
+        );
+
+        app.save_skill_draft();
+        let f = app.skill_draft.as_ref().unwrap();
+        assert_eq!(f.phase, Phase::Saved("check-logs".into()), "{:?}", f.note);
+        let saved = std::fs::read_to_string(path(&dir, "check-logs")).unwrap();
+        assert!(saved.contains("run df -h"));
+        assert_eq!(meta(&saved, "oido_runs").unwrap(), format!("r0, {source}"));
+        assert_eq!(meta(&saved, "oido_version").as_deref(), Some("2"));
+        assert!(dir.join("check-logs").join("SKILL.md.prev").exists());
+        assert!(!app.offers_skill(&source), "saving answers the run's offer");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

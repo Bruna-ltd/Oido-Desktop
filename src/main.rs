@@ -49,6 +49,7 @@ mod runs;
 mod schedule;
 mod schedules;
 mod skill_draft;
+mod skill_offers;
 mod skills;
 mod store;
 #[cfg(test)]

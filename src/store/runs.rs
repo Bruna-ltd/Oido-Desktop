@@ -109,6 +109,21 @@ impl Store {
         Ok(())
     }
 
+    /// The runs judged worth a skill whose offer is still open, oldest first.
+    pub fn skill_offers(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(self.sql("ListSkillOffers")?)?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Run `id`'s skill offer is answered.
+    pub fn close_skill_offer(&self, id: &str) -> Result<()> {
+        self.conn
+            .prepare_cached(self.sql("CloseSkillOffer")?)?
+            .execute([id])?;
+        Ok(())
+    }
+
     /// The newest runs, newest first.
     pub fn list_runs(&self, limit: usize) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare_cached(self.sql("ListRuns")?)?;

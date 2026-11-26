@@ -21,6 +21,8 @@ pub const RUN_SCHEDULES: &str = "schedules.run";
 pub const ROUTE_BULK: &str = "router.bulk";
 /// Whether TypeSafe judges each finished run for a skill (docs/skills-from-runs.md, ADR-6).
 pub const SCORE_RUNS: &str = "runs.score";
+/// Agents' own choices about that, by agent id (ADR-8).
+pub const SCORE_AGENTS: &str = "runs.score.agents";
 const PANES: &str = "panes";
 const SIDEBAR_FOLDS: &str = "sidebar.folds";
 const ONBOARDED: &str = "onboarding.done";
@@ -123,6 +125,31 @@ pub fn score_runs(store: Option<&Store>) -> bool {
             None
         })
         .unwrap_or(false)
+}
+
+/// Each agent's own choice about judging its runs; agents not in it follow Settings.
+pub fn score_overrides(store: Option<&Store>) -> std::collections::HashMap<String, bool> {
+    let Some(db) = store else {
+        return std::collections::HashMap::new();
+    };
+    db.setting(SCORE_AGENTS)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the agents' run scoring choices: {e}");
+            None
+        })
+        .unwrap_or_default()
+}
+
+/// The runs whose skill offer is still open.
+pub fn skill_offers(store: Option<&Store>) -> Vec<String> {
+    store
+        .map(|db| {
+            db.skill_offers().unwrap_or_else(|e| {
+                eprintln!("oido: could not read the skill offers: {e}");
+                Vec::new()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// Whether TypeSafe sorts each message first (Settings → Context). Off unless turned on.

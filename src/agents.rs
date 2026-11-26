@@ -218,6 +218,8 @@ pub struct Form {
     /// Its blocked places, as typed (see `guard::blocked::parse`).
     pub blocked: TextEdit,
     pub description: TextEdit,
+    /// Whether TypeSafe judges its runs for a skill: yes, no, or as Settings says (`None`).
+    pub score: Option<bool>,
     pub folders: crate::folders::Browser,
     /// The browser that adds a blocked place.
     pub places: crate::folders::Browser,
@@ -247,6 +249,7 @@ impl Form {
             topics: TextEdit::new(""),
             blocked: TextEdit::new(""),
             description: TextEdit::new(""),
+            score: None,
             folders: crate::folders::Browser::default(),
             places: crate::folders::Browser::for_places(),
             template: None,

@@ -611,6 +611,7 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     if f.advanced {
         let fields = [
             skills_field(s, k, layer),
+            learning_field(s, k),
             tools_field(s, k, layer),
             workflows_field(s, k, layer),
             workdir_field(s, k, layer),
@@ -661,6 +662,29 @@ fn skills_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             },
         ))
         .children(cost(s, k))
+}
+
+/// Whether TypeSafe judges this agent's runs for a skill: as Settings says, or its own choice.
+fn learning_field(s: &App, k: &Kit) -> El {
+    let global = if s.score_runs { "on" } else { "off" };
+    field(
+        "Spot runs worth a skill",
+        &format!(
+            "When one of its runs ends well, TypeSafe checks whether it taught something no skill has yet, and the chat offers to make one. Settings has this {global} for every agent; choose here to differ."
+        ),
+        k,
+    )
+    .child(super::guard::choices(
+        "agent-score",
+        [
+            (None, format!("As Settings ({global})")),
+            (Some(true), "On".to_owned()),
+            (Some(false), "Off".to_owned()),
+        ],
+        s.roster.form.score,
+        |s, v| s.roster.form.score = v,
+        k,
+    ))
 }
 
 /// What the chosen skills add to every message, in words, once there are any: their descriptions,

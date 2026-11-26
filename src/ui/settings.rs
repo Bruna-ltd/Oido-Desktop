@@ -251,7 +251,7 @@ fn score_row(s: &App, k: &Kit) -> El {
     setting(
         "score-runs",
         "Spot runs worth a skill",
-        "When a run finishes, TypeSafe reads its steps and marks it on the Runs screen if it holds a fix or method worth keeping as a skill. Needs TypeSafe connected; each finished run's steps go to TypeSafe, with secrets hidden.",
+        "When a run finishes, TypeSafe reads its steps and, if it holds a fix or method no skill has yet, its chat offers to make one. Each agent can differ (its page, More options). Needs TypeSafe connected; each finished run's steps go to TypeSafe, with secrets hidden.",
         Switch::new(s.score_runs)
             .label("Spot runs worth a skill")
             .hide_label()

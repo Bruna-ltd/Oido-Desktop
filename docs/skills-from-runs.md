@@ -219,6 +219,67 @@ run than a System One call.
 **Consequences.** When on, run text leaves the machine for TypeSafe after every run, so the
 setting says so. Runs with TypeSafe disconnected get no badge.
 
+### ADR-7: Offer in the chat; draft only on Review
+
+**Context.** A badge on the Runs screen is easy to miss, and nothing asked you whether to make a
+skill. Drafting every run judged worth it would cost a model call even for offers you dismiss.
+
+**Decision.** A run judged worth a skill gets a card under its last reply in the chat: **This run
+looks worth a skill**, with **Review** and **Not now**. Review opens the run on the Runs screen
+and starts the draft there, so the model is called only when you show interest. Not now, or
+saving any skill from that run, closes the offer for good (`runs.offer_closed`, migration 032).
+Open offers are loaded at startup. The badge on the Runs screen stays.
+
+**Alternatives.** A desktop notification: more noise, kept for later. Drafting right away: Review
+would open instantly, but every offer would cost a model call.
+
+**Consequences.** Review waits a few seconds for the draft. An offer stays open until you answer
+it, or until its run is removed after 30 days.
+
+### ADR-8: Each agent can override the setting
+
+**Context.** Some agents do repeatable work worth learning from (a deploy agent). Others do
+one-off or private work (a personal assistant) where sending steps to TypeSafe is unwanted.
+
+**Decision.** Each agent's page (More options) has **Spot runs worth a skill**: **As Settings**
+(the default), **On** or **Off**. The agent's choice wins. Otherwise the global switch decides.
+Choices are kept as a map in the `runs.score.agents` setting, so an agent row needs no new column.
+A choice left for a deleted agent does nothing.
+
+**Alternatives.** An agent column: a migration and a change to every agent query, for a value
+that is almost always unset.
+
+**Consequences.** A new agent follows Settings until you choose otherwise on its page.
+
+### ADR-9: One skill per lesson: check what exists, update instead of adding
+
+**Context.** Runs repeat. Without a check, the same lesson becomes `check-logs`,
+`check-the-logs-first` and `read-logs-before-restart`, and each one costs its description on every
+message. A run can also show that a skill is wrong, which calls for a correction, not a second
+skill.
+
+**Decision.** A run is checked against the skills it may repeat: those it read with the `skill`
+tool first, then the agent's own, then every skill made from a run (`metadata.oido_runs`). At most
+12, each with its instructions cut to 3 KB.
+- **TypeSafe** is shown their names and descriptions and asked a fourth question: is the lesson
+  already fully covered by one of them? At 0.5 or more, the run is not offered.
+- **The draft call** is shown them in full and must answer either a new skill, `none` (covered),
+  or `{"update": "<name>", ...}` with the complete new instructions for that skill. An update
+  naming a skill it was not shown becomes a new skill.
+- **An update** is saved under the skill's name, whatever its new title. The form says "Updates
+  the skill X" and shows the current text before **Replace**. The front matter keeps every run it
+  came from (`oido_runs`) and a count (`oido_version`).
+- **Any replace** first copies the old file to `SKILL.md.prev`, one step back. `discover` reads
+  only `SKILL.md`, so the old copy is never offered as a skill.
+
+**Alternatives.** Embedding similarity over all skills: a new dependency and an index to keep
+fresh, for a list that is usually short. Blocking only on a name clash: misses the same lesson
+under another name.
+
+**Consequences.** Skills you installed by hand are checked only when the agent has them or the
+run read them. A lesson that overlaps a skill outside that set can still become a new skill, and
+you see the draft before it is saved.
+
 ## Failure modes
 
 | Failure | What happens |
@@ -255,8 +316,10 @@ setting says so. Runs with TypeSafe disconnected get no badge.
    shows as a **worth a skill** badge in the run list. Team members' runs are not judged, and a
    failed call changes nothing. The gate tests include the #649 case (0.27/0.86/0.69 gets no
    badge).
-3. **Later, if wanted.** Update an existing skill from a new run (the draft call gets the old body
-   and is asked to merge). A cheaper drafting model setting.
+3. **P3. Offer, agent override, one skill per lesson (built).** ADR-7 to ADR-9: the chat card,
+   the per-agent choice, the covered question, update drafts, and `SKILL.md.prev`.
+4. **Later, if wanted.** A cheaper drafting model setting. A desktop notification for offers.
+   Undo from `SKILL.md.prev` in the UI.
 
 ## Risks
 
