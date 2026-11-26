@@ -153,6 +153,83 @@ pub struct MenuOpen {
     pub at: Option<(f32, f32)>,
 }
 
+/// Points the pointer travels before a press on a row becomes a drag.
+const DRAG_SLOP: f32 = 4.0;
+
+/// A sidebar row being dragged to a new place among its siblings: an agent (its team with it)
+/// within its section, or a team member within its team. Siblings can differ in height (an
+/// unfolded team is taller), so each one's extent, from its top to the next one's, is given.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowDrag {
+    pub target: Target,
+    pub from: usize,
+    to: usize,
+    dy: f32,
+    tops: Vec<f32>,
+    extents: Vec<f32>,
+}
+
+impl RowDrag {
+    /// The pointer moved `dy` since the press on sibling `from` of `target`. Starts the drag
+    /// once past the slop; until then a press is still a select.
+    pub fn follow(
+        drag: &mut Option<RowDrag>,
+        target: &Target,
+        from: usize,
+        extents: &[f32],
+        dy: f32,
+    ) {
+        if drag.is_none() {
+            if dy.abs() < DRAG_SLOP || from >= extents.len() {
+                return;
+            }
+            let tops = extents
+                .iter()
+                .scan(0.0, |top, e| {
+                    let t = *top;
+                    *top += e;
+                    Some(t)
+                })
+                .collect();
+            *drag = Some(RowDrag {
+                target: target.clone(),
+                from,
+                to: from,
+                dy,
+                tops,
+                extents: extents.to_vec(),
+            });
+        }
+        let Some(d) = drag else { return };
+        d.dy = dy;
+        // It lands past every sibling whose middle its own middle has passed.
+        let middle = d.tops[d.from] + dy + d.extents[d.from] / 2.0;
+        d.to = (0..d.extents.len())
+            .filter(|&j| j != d.from && d.tops[j] + d.extents[j] / 2.0 < middle)
+            .count();
+    }
+
+    /// How far sibling `index` sits from its place: the dragged one with the pointer, and the
+    /// ones between its place and where it would land a step toward the gap it left.
+    pub fn shift(&self, index: usize) -> f32 {
+        let step = self.extents[self.from];
+        if index == self.from {
+            self.dy
+        } else if self.from < index && index <= self.to {
+            -step
+        } else if self.to <= index && index < self.from {
+            step
+        } else {
+            0.0
+        }
+    }
+
+    /// Where to move the row on a drop: `None` for a cancel or a drop in place.
+    pub fn end(self, cancelled: bool) -> Option<(Target, usize)> {
+        (!cancelled && self.to != self.from).then_some((self.target, self.to))
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum FormKind {
     NewAgent,
@@ -280,6 +357,8 @@ pub struct Roster {
     /// Agents whose team is folded away in the sidebar.
     pub collapsed: Vec<String>,
     pub menu: Option<MenuOpen>,
+    /// The row being dragged to a new place, if any.
+    pub drag: Option<RowDrag>,
     /// The agent waiting on a delete confirmation.
     pub confirm: Option<Target>,
     /// The form on screen, if any.
@@ -314,10 +393,60 @@ impl Roster {
             selected,
             collapsed: Vec::new(),
             menu: None,
+            drag: None,
             confirm: None,
             editing: None,
             form: Form::empty(),
         }
+    }
+
+    /// Where `t` sits among its siblings, as `(index, count)`: an agent among the agents of its
+    /// section (pinned or not), a member within its team.
+    pub fn place_among(&self, t: &Target) -> Option<(usize, usize)> {
+        match &t.parent {
+            None => {
+                let pinned = self.find(t)?.pinned;
+                let section: Vec<&Agent> =
+                    self.list.iter().filter(|a| a.pinned == pinned).collect();
+                let i = section.iter().position(|a| a.id == t.id)?;
+                Some((i, section.len()))
+            }
+            Some(p) => {
+                let team = &self.list.iter().find(|a| &a.id == p)?.subagents;
+                Some((team.iter().position(|a| a.id == t.id)?, team.len()))
+            }
+        }
+    }
+
+    /// Moves `t` to place `to` among its siblings (see [`Self::place_among`]). False when it
+    /// is already there, or `to` is past the end.
+    pub fn move_within(&mut self, t: &Target, to: usize) -> bool {
+        let Some((from, count)) = self.place_among(t) else {
+            return false;
+        };
+        if from == to || to >= count {
+            return false;
+        }
+        match &t.parent {
+            None => {
+                let pinned = self.list.iter().any(|a| a.id == t.id && a.pinned);
+                // The section's places in the whole list. The agent goes into the place of the
+                // one it lands on, which steps toward the gap it left.
+                let slots: Vec<usize> = (0..self.list.len())
+                    .filter(|&i| self.list[i].pinned == pinned)
+                    .collect();
+                let a = self.list.remove(slots[from]);
+                self.list.insert(slots[to], a);
+            }
+            Some(p) => {
+                let Some(parent) = self.list.iter_mut().find(|a| &a.id == p) else {
+                    return false;
+                };
+                let m = parent.subagents.remove(from);
+                parent.subagents.insert(to, m);
+            }
+        }
+        true
     }
 
     pub fn find(&self, t: &Target) -> Option<&Agent> {
@@ -778,6 +907,69 @@ mod tests {
         assert_eq!(r.pinned().len(), 3);
         r.toggle_pin("atlas");
         assert_eq!(r.unpinned().len(), 2);
+    }
+
+    fn ids(r: &Roster) -> Vec<&str> {
+        r.list.iter().map(|a| a.id.as_str()).collect()
+    }
+
+    #[test]
+    fn an_agent_moves_only_within_its_section() {
+        let mut r = roster();
+        assert_eq!(ids(&r), ["atlas", "forge", "scout", "ledger"]);
+        let ledger = Target::agent("ledger");
+        assert_eq!(
+            r.place_among(&ledger),
+            Some((1, 2)),
+            "second of the unpinned"
+        );
+        assert!(r.move_within(&ledger, 0));
+        assert_eq!(ids(&r), ["atlas", "forge", "ledger", "scout"]);
+        assert!(r.move_within(&Target::agent("atlas"), 1));
+        assert_eq!(ids(&r), ["forge", "atlas", "ledger", "scout"]);
+        assert!(!r.move_within(&ledger, 2), "past its section's end");
+        assert!(!r.move_within(&ledger, 0), "already there");
+        // With the sections interleaved in the list, the other keeps its order.
+        r.toggle_pin("scout");
+        r.toggle_pin("forge");
+        assert!(r.move_within(&Target::agent("scout"), 0));
+        assert_eq!(ids(&r), ["forge", "scout", "atlas", "ledger"]);
+        assert_eq!(r.place_among(&Target::agent("scout")), Some((0, 2)));
+    }
+
+    #[test]
+    fn a_member_moves_within_its_team() {
+        let mut r = roster();
+        let atlas = r.list.iter_mut().find(|a| a.id == "atlas").unwrap();
+        let mut second = atlas.subagents[0].clone();
+        second.id = "second".into();
+        atlas.subagents.push(second);
+        let first = atlas.subagents[0].id.clone();
+        assert!(r.move_within(&Target::member("atlas", "second"), 0));
+        let team: Vec<&str> = r.list[0].subagents.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(team, ["second", first.as_str()]);
+    }
+
+    #[test]
+    fn a_dragged_row_passes_siblings_of_any_height() {
+        // A folded agent, an unfolded one with a tall team, then two folded.
+        let extents = [38.0, 112.0, 38.0, 38.0];
+        let t = Target::agent("a");
+        let mut d = None;
+        RowDrag::follow(&mut d, &t, 0, &extents, 3.0);
+        assert!(d.is_none(), "inside the slop it's still a press");
+        RowDrag::follow(&mut d, &t, 0, &extents, 60.0);
+        let drag = d.as_ref().unwrap();
+        assert_eq!(drag.to, 0, "not yet past the tall one's middle");
+        RowDrag::follow(&mut d, &t, 0, &extents, 100.0);
+        let drag = d.as_ref().unwrap();
+        assert_eq!(drag.to, 1);
+        let shifts: Vec<f32> = (0..4).map(|i| drag.shift(i)).collect();
+        assert_eq!(shifts, [100.0, -38.0, 0.0, 0.0]);
+        RowDrag::follow(&mut d, &t, 0, &extents, 500.0);
+        assert_eq!(d.as_ref().unwrap().to, 3, "clamped to the list");
+        assert_eq!(d.clone().unwrap().end(true), None, "a cancel moves nothing");
+        assert_eq!(d.unwrap().end(false), Some((t, 3)));
     }
 
     #[test]

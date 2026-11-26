@@ -3,12 +3,13 @@
 //! A failed save never stops the app: it is reported on stderr and the app carries on, since the
 //! screen is already right and the next change saves again.
 
-use crate::agents::{Roster, Target};
+use crate::agents::{Roster, RowDrag, Target};
 use crate::app::App;
 use crate::models::ModelRef;
 use crate::providers::{self, Providers};
 use crate::store::{self, Store, Verified};
 use crate::theme::Appearance;
+use rune::{Drag, Phase, Tx};
 use rune_kit::shell::PaneState;
 use serde::{Deserialize, Serialize};
 
@@ -375,6 +376,53 @@ impl App {
     pub fn toggle_pin(&mut self, id: &str) {
         self.roster.toggle_pin(id);
         self.save_agent_row(&Target::agent(id));
+    }
+
+    /// Moves an agent to place `to` in its sidebar section, or a member within its team, and
+    /// saves the new order.
+    pub fn move_agent(&mut self, t: &Target, to: usize) {
+        if !self.roster.move_within(t, to) {
+            return;
+        }
+        // Each row saves its place among its siblings, and every sibling's may have changed.
+        let siblings: Vec<Target> = match &t.parent {
+            None => self
+                .roster
+                .list
+                .iter()
+                .map(|a| Target::agent(a.id.clone()))
+                .collect(),
+            Some(p) => self
+                .roster
+                .list
+                .iter()
+                .filter(|a| &a.id == p)
+                .flat_map(|a| &a.subagents)
+                .map(|m| Target::member(p.clone(), m.id.clone()))
+                .collect(),
+        };
+        for s in &siblings {
+            self.save_agent_row(s);
+        }
+    }
+
+    /// A drag on sidebar row `t`, sibling `index` of siblings `extents` tall (see
+    /// [`RowDrag`]): it follows the pointer, and a drop moves it there.
+    pub fn drag_row(&mut self, t: &Target, index: usize, extents: &[f32], d: &Drag, tx: &mut Tx) {
+        match d.phase {
+            Phase::Down => {}
+            Phase::Move => {
+                // The siblings it passes spring aside; it follows the pointer exactly.
+                tx.animated();
+                RowDrag::follow(&mut self.roster.drag, t, index, extents, d.dy);
+            }
+            Phase::Up => {
+                let drop = self.roster.drag.take().and_then(|r| r.end(d.cancelled()));
+                if let Some((t, to)) = drop {
+                    self.move_agent(&t, to);
+                }
+            }
+        }
     }
 
     /// Remembers which sections and teams of the agents sidebar are folded.

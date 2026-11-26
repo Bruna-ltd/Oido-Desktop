@@ -453,6 +453,15 @@ A web picture waits for you:
 The definition is on the [wiki](https://example.com/wiki/churn)."##;
 
 pub static SCENES: &[Scene] = &[
+    // Atlas, with its team, dragged in the sidebar below Forge, which steps up into its place.
+    ("sidebar-drag", |s| {
+        load_samples(s);
+        s.roster.select(Target::agent("scout"));
+        let atlas = Target::agent("atlas");
+        // Atlas reaches past its member to Forge's top; Forge, the section's last, just itself.
+        let extents = [74.0, 68.0];
+        crate::agents::RowDrag::follow(&mut s.roster.drag, &atlas, 0, &extents, 80.0);
+    }),
     // The Settings page as this computer's Omarchy themes make it: following the desktop, then in
     // a light theme.
     ("settings", |s| {

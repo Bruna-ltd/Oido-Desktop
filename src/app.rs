@@ -998,6 +998,17 @@ mod tests {
     }
 
     #[test]
+    fn a_new_agent_order_survives_a_restart() {
+        let db = TempDb::new();
+        let mut app = db.open_with_samples();
+        app.move_agent(&Target::agent("ledger"), 0);
+        drop(app);
+        let app = db.open();
+        let ids: Vec<&str> = app.roster.list.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["atlas", "forge", "ledger", "scout"]);
+    }
+
+    #[test]
     fn what_you_change_survives_a_restart() {
         let db = TempDb::new();
         let mut app = db.open_with_samples();

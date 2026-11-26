@@ -2,12 +2,14 @@
 //! at most. A row's actions live in a menu you reach three ways: its ⋯ button, a right-click, or
 //! the same commands on the edit screen, so none is hidden behind a gesture.
 
-use rune::{El, PointerPress, el, row, text};
+use std::rc::Rc;
+
+use rune::{Anim, Drag, El, PointerPress, Tx, el, row, text};
 use rune_kit::shell::{Sidebar, SidebarRow, SidebarSection};
 use rune_kit::{IconButton, IconButtonVariant, Kit, Menu, MenuItem, Spinner, context_menu, glyphs};
 
 use super::icons;
-use crate::agents::{Agent, Target};
+use crate::agents::{Agent, Roster, Target};
 use crate::app::{App, Route};
 use crate::model::AgentStatus;
 use crate::theme;
@@ -58,7 +60,7 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             el().size(0.0, 0.0),
             Some(PointerPress { x, y }),
         );
-        entries(menu, &m.target, agent).build(k, layer);
+        entries(menu, &m.target, agent, r).build(k, layer);
     }
     // Indented to the rows' own padding, so it lines up with their avatars.
     sb.footer(
@@ -76,28 +78,102 @@ const SECTION_GAP: f32 = 14.0;
 
 /// Each agent's row, then its team (when unfolded). Members hang close under their lead, and an
 /// unfolded team ends with a little air, so a family reads as one unit before the next agent.
+/// An agent drags to a new place in its section, its team with it; a member, within its team.
 fn group(s: &App, agents: Vec<&Agent>, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
-    let mut rows = Vec::new();
+    let r = &s.roster;
     let count = agents.len();
-    for (i, a) in agents.into_iter().enumerate() {
-        rows.push(agent_row(s, a, None, k, layer));
-        if s.roster.team_open(&a.id) && !a.subagents.is_empty() {
-            for m in &a.subagents {
-                rows.push(agent_row(s, m, Some(&a.id), k, layer));
+    let open = |a: &Agent| r.team_open(&a.id) && !a.subagents.is_empty();
+    // How far each family reaches down the list, to the next one's top: what a dragged agent
+    // moves past.
+    let extents: Rc<[f32]> = agents
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let mut h = AGENT_H + ROW_GAP;
+            if open(a) {
+                h += a.subagents.len() as f32 * (MEMBER_H + ROW_GAP);
+                if i + 1 < count {
+                    h += TEAM_END + ROW_GAP;
+                }
             }
-            if i + 1 < count {
-                rows.push(
-                    el().key(format!("after-team-{}", a.id))
-                        .h(4.0)
-                        .a11y_hidden(),
-                );
+            h
+        })
+        .collect();
+    let drag = r
+        .drag
+        .as_ref()
+        .filter(|d| d.target.parent.is_none() && agents.iter().any(|a| a.id == d.target.id));
+    let mut rows = Vec::new();
+    for (i, a) in agents.iter().enumerate() {
+        let (shift, lifted) = drag.map_or((0.0, false), |d| (d.shift(i), d.from == i));
+        let place = Place {
+            index: i,
+            count,
+            extents: extents.clone(),
+            shift,
+            lifted,
+        };
+        rows.push(agent_row(s, a, None, place, k, layer));
+        if !open(a) {
+            continue;
+        }
+        let n = a.subagents.len();
+        let team: Rc<[f32]> = vec![MEMBER_H + ROW_GAP; n].into();
+        let in_team = r
+            .drag
+            .as_ref()
+            .filter(|d| d.target.parent.as_deref() == Some(a.id.as_str()));
+        for (j, m) in a.subagents.iter().enumerate() {
+            let place = Place {
+                index: j,
+                count: n,
+                extents: team.clone(),
+                shift: shift + in_team.map_or(0.0, |d| d.shift(j)),
+                lifted: lifted || in_team.is_some_and(|d| d.from == j),
+            };
+            rows.push(agent_row(s, m, Some(&a.id), place, k, layer));
+        }
+        if i + 1 < count {
+            let mut gap = el()
+                .key(format!("after-team-{}", a.id))
+                .h(TEAM_END)
+                .a11y_hidden()
+                .offset(0.0, shift);
+            if lifted {
+                gap = gap.raise().offset_motion(Anim::INSTANT);
             }
+            rows.push(gap);
         }
     }
     rows
 }
 
-fn agent_row(s: &App, a: &Agent, parent: Option<&str>, k: &Kit, layer: &mut Vec<El>) -> El {
+/// A row's agent row height, a team member's, and the air after an unfolded team.
+const AGENT_H: f32 = 36.0;
+const MEMBER_H: f32 = 28.0;
+const TEAM_END: f32 = 4.0;
+/// Points between a section's rows (the kit's).
+const ROW_GAP: f32 = 2.0;
+
+/// Where a row sits among its siblings, and where a drag has it now.
+struct Place {
+    index: usize,
+    count: usize,
+    /// Each sibling's reach down the list (see [`crate::agents::RowDrag`]).
+    extents: Rc<[f32]>,
+    shift: f32,
+    /// It is the dragged row, or of the dragged agent's team.
+    lifted: bool,
+}
+
+fn agent_row(
+    s: &App,
+    a: &Agent,
+    parent: Option<&str>,
+    place: Place,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
     let target = match parent {
         Some(p) => Target::member(p, a.id.clone()),
         None => Target::agent(a.id.clone()),
@@ -113,8 +189,9 @@ fn agent_row(s: &App, a: &Agent, parent: Option<&str>, k: &Kit, layer: &mut Vec<
         _ => "",
     };
     let t = target.clone();
-    SidebarRow::new(a.name.clone())
-        .height(if member { 28.0 } else { 36.0 })
+    let dragged = target.clone();
+    let row = SidebarRow::new(a.name.clone())
+        .height(if member { MEMBER_H } else { AGENT_H })
         .avatar(avatar(a, k, if member { 14.0 } else { 18.0 }))
         .depth(u8::from(member))
         .selected(selected)
@@ -129,6 +206,25 @@ fn agent_row(s: &App, a: &Agent, parent: Option<&str>, k: &Kit, layer: &mut Vec<
         .on_secondary_press(move |s: &mut App, p, _| {
             s.roster.open_menu(t.clone(), Some((p.x, p.y)))
         })
+        .position_in_set(place.index + 1, place.count)
+        .offset(0.0, place.shift);
+    let row = if place.lifted {
+        // Follows the pointer exactly while the rest springs around it, opaque so the rows it
+        // passes don't show through.
+        k.elevate(
+            row.raise()
+                .offset_motion(Anim::INSTANT)
+                .fill(k.c.surface_raised),
+            &k.elevation.raised,
+        )
+    } else {
+        row
+    };
+    let Place { index, extents, .. } = place;
+    // A press that doesn't move is still a select.
+    row.on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
+        s.drag_row(&dragged, index, &extents, d, tx)
+    })
 }
 
 /// What the row's status slot shows: working (its team counts, and so does a process it started
@@ -219,6 +315,7 @@ fn controls(
         Menu::new(format!("menu-{}", a.id)).trigger(more).open(here),
         target,
         a,
+        &s.roster,
     );
     // While its menu is open the ⋯ stays put, so the menu hangs from something visible.
     r.child(slot(
@@ -233,7 +330,7 @@ fn controls(
 const SLOT: f32 = 24.0;
 
 /// The row's commands. Unavailable ones are left out, not dimmed; the destructive one is last.
-fn entries(menu: Menu, target: &Target, a: &Agent) -> Menu {
+fn entries(menu: Menu, target: &Target, a: &Agent, r: &Roster) -> Menu {
     let member = target.is_member();
     let close = |s: &mut App| s.roster.menu = None;
     let mut menu = menu.on_close(close);
@@ -271,6 +368,19 @@ fn entries(menu: Menu, target: &Target, a: &Agent) -> Menu {
                 s.toggle_pin(&id);
             }),
         );
+    }
+    // The drag's moves, for the keyboard and anyone who'd rather not drag.
+    if let Some((i, count)) = r.place_among(target) {
+        for (label, to) in [("Move up", i.checked_sub(1)), ("Move down", Some(i + 1))] {
+            let Some(to) = to.filter(|&to| to < count) else {
+                continue;
+            };
+            let t = target.clone();
+            menu = menu.item(MenuItem::new(label).on_select(move |s: &mut App| {
+                s.roster.menu = None;
+                s.move_agent(&t, to);
+            }));
+        }
     }
     let t = target.clone();
     menu.separator().item(
