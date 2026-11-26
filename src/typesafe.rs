@@ -307,6 +307,32 @@ pub fn probability(
         .ok_or_else(|| "the answer had no probability.".to_owned())
 }
 
+/// How likely each of several yes/no `questions` (by id) is true of `content`, in one request, in
+/// the order asked. Blocks on the network, so call it from a worker thread.
+pub fn probabilities(
+    base: &str,
+    key: &str,
+    content: &str,
+    questions: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<Vec<f64>, String> {
+    let asked: Map<String, Value> = questions
+        .iter()
+        .map(|(id, q)| ((*id).to_owned(), json!({"type": "noul", "instructions": q})))
+        .collect();
+    let request = json!({"model": MODEL, "state": content, "questions": asked});
+    let body = systemone(base, key, &request, false, timeout)?;
+    let v: Value = serde_json::from_str(&body).map_err(|_| "the reply was not JSON.")?;
+    questions
+        .iter()
+        .map(|(id, _)| {
+            v.pointer(&format!("/answers/{id}/noul"))
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("the reply had no answer to {id}."))
+        })
+        .collect()
+}
+
 /// Asks TypeSafe, in words for the agent: the answer as JSON, or `Error: …`. Images are read from
 /// inside `root`, the agent's working folder. Blocks on the network and the disk, so call it from
 /// a worker thread.
@@ -492,6 +518,36 @@ mod tests {
         let (base, _) = serve(vec![(401, "{}")]);
         let told = run(&format!("{base}/v1"), "bad", None, YES_NO, args);
         assert!(told.contains("did not accept the key"), "{told}");
+    }
+
+    #[test]
+    fn several_questions_are_asked_in_one_request_and_answered_in_order() {
+        let (base, seen) = serve(vec![(
+            200,
+            r#"{"answers":{"b":{"type":"noul","noul":0.2},"a":{"type":"noul","noul":0.9}}}"#,
+        )]);
+        let got = probabilities(
+            &format!("{base}/v1"),
+            "k",
+            "the run",
+            &[("a", "Did it work?"), ("b", "Is it reusable?")],
+            TIMEOUT,
+        );
+        assert_eq!(got, Ok(vec![0.9, 0.2]));
+        let request = seen.recv().unwrap();
+        assert!(
+            request.contains(r#""a":{"instructions":"did it work?","type":"noul"}"#),
+            "{request}"
+        );
+        let (base, _) = serve(vec![(200, r#"{"answers":{"a":{"noul":0.9}}}"#)]);
+        let half = probabilities(
+            &format!("{base}/v1"),
+            "k",
+            "x",
+            &[("a", "?"), ("b", "?")],
+            TIMEOUT,
+        );
+        assert_eq!(half, Err("the reply had no answer to b.".into()));
     }
 
     #[test]

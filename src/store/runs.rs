@@ -6,7 +6,7 @@ use crate::models::ModelRef;
 use crate::runs::{Run, Status, Step, StepKind};
 use crate::usage::{Source, Totals};
 
-const COLUMNS: usize = 19;
+const COLUMNS: usize = 20;
 
 impl Store {
     /// A run begins: saved as running, so one that is cut off can be told from one that finished.
@@ -101,6 +101,14 @@ impl Store {
         Ok(())
     }
 
+    /// TypeSafe's verdict on whether run `id` is worth making a skill of.
+    pub fn set_run_worth(&self, id: &str, worth: bool) -> Result<()> {
+        self.conn
+            .prepare_cached(self.sql("SetRunWorth")?)?
+            .execute((id, worth))?;
+        Ok(())
+    }
+
     /// The newest runs, newest first.
     pub fn list_runs(&self, limit: usize) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare_cached(self.sql("ListRuns")?)?;
@@ -128,6 +136,7 @@ impl Store {
                 tools: r.get(16)?,
                 cache_read_tokens: r.get(17)?,
                 cache_write_tokens: r.get(18)?,
+                worth: r.get(19)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

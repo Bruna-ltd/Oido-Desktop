@@ -39,6 +39,46 @@ Answer with JSON only, no other text:
 
 Leave any placeholder such as ⟨secret-1⟩ out of what you write. If the run holds nothing reusable (it failed with no lesson, or was small talk), answer {"none": "<why, in one sentence>"} instead."#;
 
+/// What TypeSafe is asked about a finished run (ADR-6), task success first.
+pub const QUESTIONS: [(&str, &str); 3] = [
+    (
+        "task_success",
+        "Did the agent complete the person's task successfully?",
+    ),
+    (
+        "reusable",
+        "Does this run contain an approach, fix or debugging pattern that a future agent doing a similar task should reuse?",
+    ),
+    (
+        "evidence",
+        "Is that reusable lesson backed by concrete steps in the run, such as commands, results or errors?",
+    ),
+];
+/// Task success below this rules a run out, whatever the other answers: a mean alone lets two high
+/// answers outvote a failed task (0.27, 0.86, 0.69 averages 0.61).
+const TASK_FLOOR: f64 = 0.50;
+/// The mean of the answers a run needs, once its task succeeded.
+const MEAN_FLOOR: f64 = 0.60;
+const SCORE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether answers to [`QUESTIONS`], in their order, mark a run as worth a skill.
+pub fn worth(answers: &[f64]) -> bool {
+    let Some(&task) = answers.first() else {
+        return false;
+    };
+    task >= TASK_FLOOR && answers.iter().sum::<f64>() / answers.len() as f64 >= MEAN_FLOOR
+}
+
+/// What TypeSafe is shown of a run: its transcript with every secret and personal detail found in
+/// it hidden.
+pub fn judged_text(steps: &[Step]) -> String {
+    let text = transcript(steps);
+    let mut hidden = crate::guard::Hidden::default();
+    hidden.learn(&text);
+    hidden.learn_personal(&text);
+    hidden.hide(&text)
+}
+
 /// What the model drafted.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Draft {
@@ -545,6 +585,65 @@ impl App {
             .is_some_and(|a| !a.skills.contains(name))
     }
 
+    /// Settings: TypeSafe judges each finished run for a skill, or does not.
+    pub fn set_score_runs(&mut self, on: bool) {
+        self.score_runs = on;
+        self.save("the run scoring setting", |db| {
+            db.set_setting(crate::persist::SCORE_RUNS, &on)
+        });
+    }
+
+    /// Chat `sid`'s run finished well: with scoring on and TypeSafe connected, TypeSafe judges in
+    /// the background whether it is worth a skill, and the verdict is saved with the run. A team
+    /// member's run, or a skill draft's, is not judged.
+    pub fn score_run(&mut self, sid: &str) {
+        if !self.score_runs || !self.typesafe_connected() {
+            return;
+        }
+        let Some(run) = self.traces.get(sid).map(|t| t.run.clone()) else {
+            return;
+        };
+        if run.parent.is_some() || run.calls == 0 {
+            return;
+        }
+        let key = self
+            .store
+            .as_ref()
+            .and_then(|db| db.provider_key(crate::providers::TYPESAFE).ok().flatten());
+        let steps = self
+            .store
+            .as_ref()
+            .and_then(|db| db.list_steps(&run.id).ok())
+            .unwrap_or_default();
+        let (Some(key), false) = (key, steps.is_empty()) else {
+            return;
+        };
+        let text = judged_text(&steps);
+        let id = run.id;
+        self.spawn(
+            move || {
+                crate::typesafe::probabilities(
+                    crate::typesafe::BASE,
+                    &key,
+                    &text,
+                    &QUESTIONS,
+                    SCORE_WAIT,
+                )
+            },
+            move |app, got| match got {
+                Ok(answers) => app.scored(&id, worth(&answers)),
+                Err(why) => eprintln!("oido: TypeSafe could not judge the run: {why}"),
+            },
+        );
+    }
+
+    fn scored(&mut self, id: &str, worth: bool) {
+        self.save("the run's verdict", |db| db.set_run_worth(id, worth));
+        if let Some(r) = self.runs.iter_mut().find(|r| r.id == id) {
+            r.worth = Some(worth);
+        }
+    }
+
     /// The open draft form, for its fields' editors.
     pub fn skill_draft_mut(&mut self) -> &mut Form {
         self.skill_draft.get_or_insert_with(Form::blank)
@@ -622,6 +721,34 @@ mod tests {
             transcript(&[long]).len(),
             "[agent] ".len() + STEP_BYTES + "…".len()
         );
+    }
+
+    #[test]
+    fn a_run_is_worth_a_skill_only_when_its_task_succeeded_and_the_answers_are_high() {
+        assert!(worth(&[0.9, 0.8, 0.7]));
+        assert!(
+            !worth(&[0.27, 0.86, 0.69]),
+            "a failed task is not averaged in (beacon #649)"
+        );
+        assert!(!worth(&[0.9, 0.3, 0.4]), "a mean of 0.53");
+        assert!(worth(&[0.5, 0.65, 0.65]), "both floors are inclusive");
+        assert!(!worth(&[]));
+    }
+
+    #[test]
+    fn what_typesafe_sees_has_its_secrets_and_personal_details_hidden() {
+        let steps = [step(
+            StepKind::User,
+            "",
+            "",
+            "deploy with sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD and mail ops@example.com",
+        )];
+        let text = judged_text(&steps);
+        assert!(
+            !text.contains("sk-ant-api03") && !text.contains("ops@example.com"),
+            "{text}"
+        );
+        assert!(text.starts_with("[person] deploy with "));
     }
 
     #[test]

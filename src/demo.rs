@@ -896,6 +896,9 @@ pub static SCENES: &[Scene] = &[
     ("runs-skill", |s| {
         demo_runs(s);
         s.route = Route::Runs;
+        if let Some(r) = s.runs.first_mut() {
+            r.worth = Some(true);
+        }
         if let Some(run) = s.runs.get(s.run) {
             let mut f = crate::skill_draft::Form::new(run);
             f.phase = crate::skill_draft::Phase::Editing;

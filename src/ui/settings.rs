@@ -34,7 +34,11 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(24.0)
                 .child(section("Appearance", vec![theme_row(s, k, layer)], k))
                 .child(section("Schedules", vec![schedules_row(s, k)], k))
-                .child(section("Context", vec![router_row(s, k)], k))
+                .child(section(
+                    "Context",
+                    vec![router_row(s, k), score_row(s, k)],
+                    k,
+                ))
                 .child(section("Browser", browser_rows(s, k), k))
                 .child(section("Usage", vec![clear_usage_row(s, k)], k))
                 .child(section(
@@ -238,6 +242,20 @@ fn router_row(s: &App, k: &Kit) -> El {
             .label("Sort messages with TypeSafe")
             .hide_label()
             .on_toggle(|s: &mut App| s.set_route_bulk(!s.route_bulk))
+            .build(k),
+        k,
+    )
+}
+
+fn score_row(s: &App, k: &Kit) -> El {
+    setting(
+        "score-runs",
+        "Spot runs worth a skill",
+        "When a run finishes, TypeSafe reads its steps and marks it on the Runs screen if it holds a fix or method worth keeping as a skill. Needs TypeSafe connected; each finished run's steps go to TypeSafe, with secrets hidden.",
+        Switch::new(s.score_runs)
+            .label("Spot runs worth a skill")
+            .hide_label()
+            .on_toggle(|s: &mut App| s.set_score_runs(!s.score_runs))
             .build(k),
         k,
     )

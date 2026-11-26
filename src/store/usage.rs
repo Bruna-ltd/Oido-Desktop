@@ -278,6 +278,18 @@ mod tests {
     }
 
     #[test]
+    fn a_run_keeps_typesafe_s_verdict_on_whether_it_is_worth_a_skill() {
+        let (db, chat) = with_chat();
+        let r = run("judged", &chat);
+        db.start_run(&r).unwrap();
+        assert_eq!(db.list_runs(10).unwrap()[0].worth, None);
+        db.set_run_worth("judged", true).unwrap();
+        assert_eq!(db.list_runs(10).unwrap()[0].worth, Some(true));
+        db.set_run_worth("judged", false).unwrap();
+        assert_eq!(db.list_runs(10).unwrap()[0].worth, Some(false));
+    }
+
+    #[test]
     fn each_model_call_is_counted_once_when_saved_under_what_made_it() {
         let (db, chat) = with_chat();
         let lead = run("lead", &chat);

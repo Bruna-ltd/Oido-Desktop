@@ -86,6 +86,8 @@ pub struct Run {
     /// How many model calls and tool uses it has recorded.
     pub calls: u32,
     pub tools: u32,
+    /// Whether TypeSafe judged it worth making a skill of; `None` if it was not asked.
+    pub worth: Option<bool>,
 }
 
 impl Run {
@@ -116,6 +118,7 @@ impl Run {
             parent: None,
             calls: 0,
             tools: 0,
+            worth: None,
         }
     }
 }

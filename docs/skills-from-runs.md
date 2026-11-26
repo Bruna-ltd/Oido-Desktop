@@ -248,8 +248,13 @@ setting says so. Runs with TypeSafe disconnected get no badge.
    description cap, install with no-overwrite and atomic replace, secret block). **Make skill** on
    the Runs screen, the form, and "add to agent". Docs: this file, plus a mention in the README
    feature table (Runs row).
-2. **P2. TypeSafe badge.** The setting, a post-run scoring call, the badge, and gate tests
-   including the #649 case (0.27/0.86/0.69 gets no badge).
+2. **P2. TypeSafe badge (built).** Settings → Context → **Spot runs worth a skill**, off by
+   default. When a top-level run ends well, its transcript (secrets and personal details hidden
+   with `Hidden::learn` / `learn_personal`) goes to TypeSafe as three `noul` questions in one
+   request (`typesafe::probabilities`). The verdict is kept in `runs.worth` (migration 031) and
+   shows as a **worth a skill** badge in the run list. Team members' runs are not judged, and a
+   failed call changes nothing. The gate tests include the #649 case (0.27/0.86/0.69 gets no
+   badge).
 3. **Later, if wanted.** Update an existing skill from a new run (the draft call gets the old body
    and is asked to merge). A cheaper drafting model setting.
 

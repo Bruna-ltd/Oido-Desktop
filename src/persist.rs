@@ -19,6 +19,8 @@ const APPEARANCE: &str = "appearance";
 const AUTO_UPDATE: &str = "updates.auto";
 pub const RUN_SCHEDULES: &str = "schedules.run";
 pub const ROUTE_BULK: &str = "router.bulk";
+/// Whether TypeSafe judges each finished run for a skill (docs/skills-from-runs.md, ADR-6).
+pub const SCORE_RUNS: &str = "runs.score";
 const PANES: &str = "panes";
 const SIDEBAR_FOLDS: &str = "sidebar.folds";
 const ONBOARDED: &str = "onboarding.done";
@@ -108,6 +110,19 @@ pub fn run_schedules(store: Option<&Store>) -> bool {
             None
         })
         .unwrap_or(true)
+}
+
+/// Whether TypeSafe judges each finished run for a skill (Settings → Context). Off unless turned on.
+pub fn score_runs(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return false;
+    };
+    db.setting::<bool>(SCORE_RUNS)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the run scoring setting: {e}");
+            None
+        })
+        .unwrap_or(false)
 }
 
 /// Whether TypeSafe sorts each message first (Settings → Context). Off unless turned on.

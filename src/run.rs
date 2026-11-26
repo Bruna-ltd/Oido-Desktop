@@ -1162,6 +1162,9 @@ impl App {
                 crate::hooks::Event::AfterAgent,
                 serde_json::json!({"status": ended, "reply": shown, "error": failure}),
             );
+            if status == Status::Ok {
+                self.score_run(sid);
+            }
         }
         // The turn is over (nothing more runs in the chat): a chat carried on from a channel gets
         // what the agent wrote, before a message waiting for it goes.

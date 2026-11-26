@@ -87,6 +87,11 @@ fn run_row(s: &App, i: usize, r: &Run, k: &Kit) -> El {
                         .truncate(),
                 )
                 .child(el().grow(1.0))
+                .children((r.worth == Some(true)).then(|| {
+                    Badge::new("worth a skill")
+                        .variant(BadgeVariant::Accent)
+                        .build(k)
+                }))
                 .child(status_badge(r.status).build(k)),
         );
     if !r.title.is_empty() {
