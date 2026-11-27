@@ -97,6 +97,9 @@ pub(crate) struct Prep {
     pub trust_folder: bool,
     /// The places its agent has blocked for itself, beside the guard's.
     pub blocked: Vec<crate::guard::Blocked>,
+    /// The tools each call to which waits for a go-ahead: a team member's own (see
+    /// [`crate::guard::approvals`]); none for a workflow's steps.
+    pub ask: Vec<String>,
     /// The MCP tools the workflow calls, each with how to reach its server.
     pub mcp: Vec<McpTool>,
     /// The workflows its `flow` steps run, those they run too, and so on.
@@ -416,6 +419,7 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
         root: p.shell_dir.clone(),
         home: dirs::home_dir(),
         blocked: p.blocked.clone(),
+        ask: Vec::new(),
     };
     let run_tool = |name: &str, args: &Value, outside: Option<&str>| -> ToolOutcome {
         // A step is one you saved, not one a model chose, so outside text does not hold it, unless
@@ -430,7 +434,7 @@ fn work(def: &Definition, go: Go, p: &Prep, stop: &Arc<AtomicBool>, watch: Optio
         );
         if let Some(f) = found {
             let (_, refused) =
-                crate::guard::unattended(&p.asker, name, &args.to_string(), &f, stop);
+                crate::guard::unattended(&p.asker, name, &args.to_string(), None, &f, stop);
             if let Some(told) = refused {
                 return ToolOutcome {
                     value: Value::Null,
@@ -750,6 +754,7 @@ impl App {
             asker: crate::guard::ask::Asker::nobody(),
             trust_folder: agent.trust_workdir,
             blocked: agent.blocked.clone(),
+            ask: Vec::new(),
             mcp: Vec::new(),
             flows: Vec::new(),
             crew: Vec::new(),

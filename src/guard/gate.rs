@@ -119,6 +119,11 @@ impl App {
                 .owner_of(sid)
                 .map(|a| a.blocked.clone())
                 .unwrap_or_default(),
+            ask: self
+                .roster
+                .owner_of(sid)
+                .map(|a| a.approvals.asking())
+                .unwrap_or_default(),
         }
     }
 

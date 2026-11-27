@@ -11,7 +11,7 @@
 use super::press::{Action, clip};
 use super::{Kind, Place};
 use crate::app::App;
-use crate::guard::{Hidden, TripState};
+use crate::guard::{Hidden, SendTo, TripState};
 use crate::model::Message;
 
 /// The setting that names the channel approvals go to.
@@ -23,8 +23,16 @@ const SHOWN: usize = 300;
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Hold {
     user: String,
-    sid: String,
-    call: String,
+    held: Held,
+}
+
+/// What a card answers.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Held {
+    /// A call in chat `sid` the guard holds.
+    Call { sid: String, call: String },
+    /// A call from unwatched work (a team member's), waiting on its card by this id.
+    Waiting(String),
 }
 
 /// What a reply means as an answer to a card: allow (`A7`) or refuse (`R7`) card 7.
@@ -60,7 +68,26 @@ impl App {
     /// Where approvals go now, and to whom: the chosen channel's one trusted paired person.
     /// Otherwise why none go, in words for the screen (`Err(None)` when none is chosen).
     pub fn approver(&self) -> Result<(Kind, String), Option<String>> {
-        let kind = self.channels.approvals.ok_or(None)?;
+        self.approver_on(self.channels.approvals.ok_or(None)?)
+    }
+
+    /// Where chat `sid`'s held calls go: where its agent's approvals say, while they are on,
+    /// else where the Channels screen says. `Err(None)` for nowhere.
+    pub fn approver_for(&self, sid: &str) -> Result<(Kind, String), Option<String>> {
+        let to = self
+            .roster
+            .owner_of(sid)
+            .filter(|a| a.approvals.on)
+            .map_or(SendTo::Global, |a| a.approvals.to);
+        match (to, to.kind()) {
+            (_, Some(kind)) => self.approver_on(kind),
+            (SendTo::Desktop, None) => Err(None),
+            _ => self.approver(),
+        }
+    }
+
+    /// To whom approvals on `kind` go: its one trusted paired person, or why no one.
+    pub fn approver_on(&self, kind: Kind) -> Result<(Kind, String), Option<String>> {
         let c = self.channels.get(kind);
         if !c.connected() {
             return Err(Some(format!("{} is not connected.", kind.title())));
@@ -81,8 +108,8 @@ impl App {
 
     /// Where a held call is approved, in words: "on the computer running Oido", and on the
     /// channel approvals go to.
-    pub(super) fn approved_where(&self) -> String {
-        match self.approver() {
+    pub(super) fn approved_where(&self, sid: &str) -> String {
+        match self.approver_for(sid) {
             Ok((kind, _)) => format!(
                 "from the owner, on {} or on the computer running Oido",
                 kind.title()
@@ -94,7 +121,7 @@ impl App {
     /// Sends a card for each call in chat `sid` the guard holds that has none yet, to you, where
     /// approvals go. `hidden` is the chat's secrets: what the card shows is masked with them.
     pub(crate) fn offer_holds(&mut self, sid: &str, hidden: &Hidden) {
-        let Ok((kind, user)) = self.approver() else {
+        let Ok((kind, user)) = self.approver_for(sid) else {
             return;
         };
         let Some(agent) = self.roster.owner_of(sid) else {
@@ -127,55 +154,87 @@ impl App {
             })
             .collect();
         for (call, tool, what, why) in held {
-            let key = format!("hold:{call}");
-            let c = self.channels.get_mut(kind);
-            if !c.offered.insert(key) {
+            if !self
+                .channels
+                .get_mut(kind)
+                .offered
+                .insert(format!("hold:{call}"))
+            {
                 continue;
             }
-            c.next_code += 1;
-            let n = c.next_code;
-            c.holds.insert(
-                n,
-                Hold {
-                    user: user.clone(),
-                    sid: sid.to_owned(),
-                    call: call.clone(),
-                },
-            );
-            let mut said = format!(
+            let said = format!(
                 "🔒 **{name} waits for your go-ahead**\n\n{tool}: {}\n\nWhy it waits: {why}",
                 clip(&what, SHOWN)
             );
-            let buttons = if kind == Kind::WhatsApp {
-                said.push_str(&format!(
-                    "\n\nReply **A{n}** to allow it, or **R{n}** to refuse."
-                ));
-                Vec::new()
-            } else {
-                c.buttons(
-                    &user,
-                    vec![
-                        (
-                            "Allow".to_owned(),
-                            Action::Hold {
-                                sid: sid.to_owned(),
-                                call: call.clone(),
-                                allow: true,
-                            },
-                        ),
-                        (
-                            "Refuse".to_owned(),
-                            Action::Hold {
-                                sid: sid.to_owned(),
-                                call,
-                                allow: false,
-                            },
-                        ),
-                    ],
-                )
+            let held = Held::Call {
+                sid: sid.to_owned(),
+                call,
             };
-            c.say_with(&Place::private(&user), &said, buttons);
+            self.send_card(kind, &user, said, held);
         }
+    }
+
+    /// Sends a card for unwatched work's call `w` (a team member's) where its approvals go: its
+    /// agent's own setting, else where the chat that handed the work over sends them.
+    pub(crate) fn offer_waiting(&mut self, w: &crate::guard::ask::Waiting) {
+        use crate::guard::ask::Where;
+        let to = match (w.send_to, &w.at) {
+            (Some(to), _) => match (to, to.kind()) {
+                (_, Some(kind)) => self.approver_on(kind),
+                (SendTo::Desktop, None) => Err(None),
+                _ => self.approver(),
+            },
+            (None, Where::Chat(sid)) => self.approver_for(sid),
+            (None, Where::Workflow(_)) => self.approver(),
+        };
+        let Ok((kind, user)) = to else { return };
+        let what = if w.shown.trim().is_empty() {
+            "(what it does is shown on the computer running Oido)".to_owned()
+        } else {
+            clip(&w.shown, SHOWN)
+        };
+        let said = format!(
+            "🔒 **{} waits for your go-ahead**\n\n{}: {what}\n\nWhy it waits: {} ({})",
+            w.from,
+            crate::tools::shown(&w.tool, &self.mcp.servers).label,
+            w.trip.why,
+            crate::guard::title(&w.trip.rule)
+        );
+        self.send_card(kind, &user, said, Held::Waiting(w.id.clone()));
+    }
+
+    /// Sends `said` to `user` on `kind` as a card answering `held`: with Allow and Refuse buttons,
+    /// or on WhatsApp with a code to reply.
+    fn send_card(&mut self, kind: Kind, user: &str, mut said: String, held: Held) {
+        let c = self.channels.get_mut(kind);
+        c.next_code += 1;
+        let n = c.next_code;
+        c.holds.insert(
+            n,
+            Hold {
+                user: user.to_owned(),
+                held: held.clone(),
+            },
+        );
+        let buttons = if kind == Kind::WhatsApp {
+            said.push_str(&format!(
+                "\n\nReply **A{n}** to allow it, or **R{n}** to refuse."
+            ));
+            Vec::new()
+        } else {
+            let choice = |allow| Action::Hold {
+                held: held.clone(),
+                allow,
+            };
+            c.buttons(
+                user,
+                vec![
+                    ("Allow".to_owned(), choice(true)),
+                    ("Refuse".to_owned(), choice(false)),
+                ],
+            )
+        };
+        c.say_with(&Place::private(user), &said, buttons);
     }
 
     /// `user`'s message `text` on `kind` if it answers a card by its code: what to tell them.
@@ -184,12 +243,25 @@ impl App {
         let c = self.channels.get_mut(kind);
         let hold = c.holds.get(&n).filter(|h| h.user == user)?.clone();
         c.holds.remove(&n);
-        Some(self.decide_hold(&hold.sid, &hold.call, allow))
+        Some(self.decide_hold(&hold.held, allow))
     }
 
-    /// Allows or refuses held call `call` in chat `sid`, if it still waits: what to tell whoever
-    /// answered.
-    pub(super) fn decide_hold(&mut self, sid: &str, call: &str, allow: bool) -> String {
+    /// Allows or refuses what a card answers, if it still waits: what to tell whoever answered.
+    pub(super) fn decide_hold(&mut self, held: &Held, allow: bool) -> String {
+        let (sid, call) = match held {
+            Held::Call { sid, call } => (sid.as_str(), call.as_str()),
+            Held::Waiting(id) => {
+                if !self.waiting.iter().any(|w| &w.id == id && !w.gone()) {
+                    return "That was already decided.".to_owned();
+                }
+                self.decide_waiting(id, allow);
+                return if allow {
+                    "Allowed. It goes on.".to_owned()
+                } else {
+                    "Refused. It is told and goes on without it.".to_owned()
+                };
+            }
+        };
         let waits = self
             .roster
             .owner_of(sid)

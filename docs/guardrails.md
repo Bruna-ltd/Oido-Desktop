@@ -145,6 +145,28 @@ person that repeats 60 or more characters of the agent's brief and skills word f
 back (they are told so; your chat has it). Paths on this computer (`/home/…`, `~/…`) and local
 network addresses (`localhost`, `192.168…`, `*.local`) in a reply are left out.
 
+## An agent's own approvals
+
+On an agent's page (More options → **Ask before it uses chosen tools**) you choose tools each use
+of which waits for your go-ahead (`src/guard/approvals.rs`, saved as the agent's `approvals`
+column: `{on, to, tools}`). Any tool the agent has can be chosen, the app's own and the ones picked
+for it, but `ask_user_question`. A call to one is held like any the guard questions (rule
+`agent.ask`, "Needs your approval"), through `guard::Place::ask`, so it gets the same card, the
+same wait and the same run log. It only adds holds: the packs still apply.
+
+**Ask where** sends the agent's held calls (its own and the guard's) to a channel as well as the
+card here: As Channels (the Channels screen's **Send approvals to**), Only here, Telegram, Slack or
+WhatsApp (see `docs/channels.md`, Approvals on a channel). A channel it cannot use (not connected,
+or not exactly one trusted person paired) leaves the card here only, and the page says why. Off,
+the chosen tools are kept and nothing waits.
+
+It holds in the agent's chats, desktop and channel, scheduled runs among them, and in a team
+member's work when a lead hands it a task: the member's own approvals, never the lead's
+(`flows::Prep::ask`). A member's held call waits on its card in the lead's chat and is sent where
+the member's approvals say (or, while they are off, where the lead's chat sends them), masked with
+the member's secrets; a call a hook holds there has nothing to mask with, so its card on a channel
+says only that it waits. Workflow steps do not check it yet.
+
 ## What you see
 
 - A refused call has a "Refused by a guardrail" card under it; the model is told it did not run and

@@ -493,6 +493,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
         root: job.prep.shell_dir.clone(),
         home: dirs::home_dir(),
         blocked: job.prep.blocked.clone(),
+        ask: job.prep.ask.clone(),
     };
     // Its calls whose results are outside text, and what each is; and what it has in view now.
     let mut came_in: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -645,6 +646,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                         &job.prep.asker,
                         &call.name,
                         &call.args,
+                        Some(&hidden),
                         f,
                         &job.cancel,
                     );
@@ -1079,7 +1081,10 @@ impl App {
             tools,
             limit: self.context_limit(&ModelRef::new(&prep.provider, &prep.model)),
             prep: crate::flows::Prep {
-                asker: self.asker(at, &member.name),
+                asker: self
+                    .asker(at, &member.name)
+                    .sending_to(member.approvals.on.then_some(member.approvals.to)),
+                ask: member.approvals.asking(),
                 ..prep
             },
             task,
@@ -1633,6 +1638,45 @@ mod tests {
             "{}",
             given.brief
         );
+    }
+
+    #[test]
+    fn a_members_own_approvals_hold_its_calls_and_the_leads_do_not_pass_down() {
+        use crate::guard::{Approvals, SendTo};
+        let db = crate::testing::TempDb::new();
+        let (mut app, _seen) = crate::testing::app_with_server(&db, vec![]);
+        let lead = app.current().unwrap().clone();
+        let mut member = lead.clone();
+        let job = |app: &App, member: &Agent| {
+            app.member_job(
+                member,
+                &lead,
+                "s1",
+                Where::Chat("s1".into()),
+                "tidy the folder".into(),
+                None,
+                None,
+            )
+            .unwrap()
+            .1
+        };
+        app.roster.current_mut().unwrap().approvals = Approvals {
+            on: true,
+            to: SendTo::Telegram,
+            tools: vec![tools::SHELL.into()],
+        };
+        assert!(
+            job(&app, &member).prep.ask.is_empty(),
+            "the lead's are its own"
+        );
+        member.approvals = Approvals {
+            on: true,
+            to: SendTo::Desktop,
+            tools: vec![tools::SHELL.into()],
+        };
+        assert_eq!(job(&app, &member).prep.ask, [tools::SHELL]);
+        member.approvals.on = false;
+        assert!(job(&app, &member).prep.ask.is_empty(), "off: nothing waits");
     }
 
     #[test]

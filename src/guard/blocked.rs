@@ -255,6 +255,7 @@ mod tests {
             root: root.to_owned(),
             home: Some(home.to_owned()),
             blocked: Vec::new(),
+            ask: Vec::new(),
         }
     }
 

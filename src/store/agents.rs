@@ -75,6 +75,7 @@ impl Store {
                     trust_workdir: r.get::<_, i64>(13)? != 0,
                     channel_topics: Vec::new(),
                     blocked: Vec::new(),
+                    approvals: crate::guard::Approvals::default(),
                     workflows: Vec::new(),
                     description: r.get(12)?,
                     avatar: Avatar::from_columns(r.get(15)?, r.get(16)?),
@@ -90,15 +91,27 @@ impl Store {
                     r.get::<_, String>(14)?,
                     r.get::<_, String>(17)?,
                     r.get::<_, String>(18)?,
+                    r.get::<_, String>(19)?,
                 ))
             })?;
             for row in rows {
-                let (parent, mut agent, skills, tools, active, topics, blocked, workflows) = row?;
+                let (
+                    parent,
+                    mut agent,
+                    skills,
+                    tools,
+                    active,
+                    topics,
+                    blocked,
+                    workflows,
+                    approvals,
+                ) = row?;
                 agent.skills = serde_json::from_str(&skills)?;
                 agent.tools = serde_json::from_str(&tools)?;
                 agent.channel_topics = serde_json::from_str(&topics)?;
                 agent.blocked = serde_json::from_str(&blocked)?;
                 agent.workflows = serde_json::from_str(&workflows)?;
+                agent.approvals = serde_json::from_str(&approvals)?;
                 let mut chats = sessions.remove(&agent.id).unwrap_or_default();
                 if chats.is_empty() {
                     let first = chat("New chat", Vec::new());
@@ -150,6 +163,7 @@ impl Store {
                 avatar_image,
                 serde_json::to_string(&a.blocked)?,
                 serde_json::to_string(&a.workflows)?,
+                serde_json::to_string(&a.approvals)?,
             ])?;
         Ok(())
     }
@@ -320,5 +334,16 @@ mod tests {
         )];
         db.save_agent(&a, None, 0).unwrap();
         assert_eq!(db.load_agents().unwrap()[0].blocked, a.blocked);
+        assert_eq!(
+            db.load_agents().unwrap()[0].approvals,
+            crate::guard::Approvals::default()
+        );
+        a.approvals = crate::guard::Approvals {
+            on: true,
+            to: crate::guard::SendTo::Slack,
+            tools: vec!["shell".into()],
+        };
+        db.save_agent(&a, None, 0).unwrap();
+        assert_eq!(db.load_agents().unwrap()[0].approvals, a.approvals);
     }
 }

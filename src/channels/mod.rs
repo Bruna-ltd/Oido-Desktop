@@ -1371,7 +1371,7 @@ impl App {
             } else if self.holding_in(&sid) {
                 format!(
                     "{name} waits for approval {}. This goes after it.",
-                    self.approved_where()
+                    self.approved_where(&sid)
                 )
             } else {
                 format!("{name} waits for your answer first. This goes after it.")
@@ -1476,7 +1476,7 @@ impl App {
         if self.holding_in(sid) {
             said.push(format!(
                 "⏳ Something it wants to do needs approval {} first. It carries on once that is decided.",
-                self.approved_where()
+                self.approved_where(sid)
             ));
         }
         let len = messages.len();
@@ -2731,6 +2731,135 @@ mod tests {
             !reply(&mut app, "A1").starts_with("Allowed"),
             "a code works once; after that it is an ordinary message"
         );
+    }
+
+    #[test]
+    fn an_agents_chosen_tools_wait_and_its_cards_go_where_it_says() {
+        use crate::guard::{Approvals, SendTo};
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(crate::tools::SHELL, json!({"command": "echo hi"})),
+                text_stream("Done."),
+            ],
+        );
+        app.set_person_trusted(T, ADA, true);
+        assert_eq!(
+            app.approver(),
+            Err(None),
+            "Channels sends approvals nowhere"
+        );
+        app.roster.current_mut().unwrap().approvals = Approvals {
+            on: true,
+            to: SendTo::Telegram,
+            tools: vec![crate::tools::SHELL.into()],
+        };
+        app.composer.edit = TextEdit::new("say hi");
+        app.send();
+        let _ = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let sid = held(&app);
+        let rule = messages(&app, &sid).iter().find_map(|m| match m {
+            Message::Assistant { tools, .. } => tools.iter().find_map(|t| t.trip.clone()),
+            _ => None,
+        });
+        assert_eq!(rule.map(|t| t.rule), Some("agent.ask".to_owned()));
+        let card = said(&mut app).join("\n");
+        assert!(
+            card.contains("waits for your go-ahead") && card.contains("Needs your approval"),
+            "sent on Telegram though Channels sends nowhere: {card}"
+        );
+        assert_eq!(app.approver_for(&sid).map(|(k, _)| k), Ok(T));
+
+        app.roster.current_mut().unwrap().approvals.to = SendTo::Desktop;
+        app.set_channel_approvals(Some(T));
+        assert_eq!(
+            app.approver_for(&sid),
+            Err(None),
+            "only here, whatever Channels says"
+        );
+        app.roster.current_mut().unwrap().approvals.on = false;
+        assert_eq!(
+            app.approver_for(&sid).map(|(k, _)| k),
+            Ok(T),
+            "off: as Channels says"
+        );
+    }
+
+    #[test]
+    fn a_team_members_held_call_goes_where_its_own_approvals_say_and_is_answered_there() {
+        use crate::guard::ask::{Waiting, Where};
+        use crate::guard::{SendTo, Trip, TripState};
+        let db = TempDb::new();
+        let (mut app, _seen) = paired(&db, vec![]);
+        app.set_person_trusted(T, ADA, true);
+        let trip = Trip {
+            rule: "agent.ask".into(),
+            why: "You chose to approve every use of this tool by this agent.".into(),
+            state: TripState::Asking,
+            asked_at: Some(now()),
+        };
+        let mut w = Waiting::demo(
+            Where::Chat("s1".into()),
+            "reviewer",
+            "shell",
+            "rm -rf build",
+            trip,
+        );
+        w.shown = "rm -rf build".into();
+        w.send_to = Some(SendTo::Telegram);
+        let id = w.id.clone();
+        app.offer_waiting(&w);
+        app.waiting.push(w);
+        let (text, buttons) = std::mem::take(&mut app.channels.telegram.sent)
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Say { text, buttons, .. } if !buttons.is_empty() => Some((text, buttons)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            text.contains("reviewer waits for your go-ahead") && text.contains("rm -rf build"),
+            "{text}"
+        );
+        app.hear(
+            T,
+            Heard::Press {
+                from: from(ADA),
+                id: "cb".into(),
+                data: buttons[1].data.clone(),
+                message: None,
+            },
+            now(),
+        );
+        assert!(app.waiting.iter().all(|w| w.id != id), "answered: refused");
+
+        // Nothing of the call leaves when it could not be masked; "only here" sends nothing.
+        let mut hidden = Waiting::demo(
+            Where::Chat("s1".into()),
+            "reviewer",
+            "shell",
+            "x",
+            Trip {
+                rule: "hook".into(),
+                why: "A hook asked.".into(),
+                state: TripState::Asking,
+                asked_at: Some(now()),
+            },
+        );
+        hidden.shown = String::new();
+        hidden.send_to = Some(SendTo::Telegram);
+        app.offer_waiting(&hidden);
+        let told = said(&mut app).join("\n");
+        assert!(
+            told.contains("shown on the computer running Oido"),
+            "{told}"
+        );
+        hidden.send_to = Some(SendTo::Desktop);
+        app.offer_waiting(&hidden);
+        assert!(said(&mut app).is_empty());
     }
 
     const S: Kind = Kind::Slack;

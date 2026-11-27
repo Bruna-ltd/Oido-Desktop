@@ -44,10 +44,9 @@ pub(super) enum Action {
         sid: String,
         save: bool,
     },
-    /// A call the guard holds, allowed or refused (see [`super::approve`]).
+    /// A held call, allowed or refused (see [`super::approve`]).
     Hold {
-        sid: String,
-        call: String,
+        held: super::approve::Held,
         allow: bool,
     },
 }
@@ -164,7 +163,7 @@ impl App {
                 self.press_workflow(kind, user, &sid, save);
                 None
             }
-            Action::Hold { sid, call, allow } => Some(self.decide_hold(&sid, &call, allow)),
+            Action::Hold { held, allow } => Some(self.decide_hold(&held, allow)),
         }
     }
 
