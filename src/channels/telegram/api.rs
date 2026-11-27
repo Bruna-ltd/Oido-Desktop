@@ -176,6 +176,9 @@ pub struct Chat {
     /// `private`, `group`, `supergroup` or `channel`.
     #[serde(rename = "type")]
     pub kind: String,
+    /// A group's or a channel's title.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

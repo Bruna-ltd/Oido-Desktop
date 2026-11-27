@@ -38,3 +38,20 @@ INSERT OR IGNORE INTO channel_agents (channel, agent_id) VALUES (?1, ?2);
 
 -- name: RemoveChannelAgent :exec
 DELETE FROM channel_agents WHERE channel = ?1 AND agent_id = ?2;
+
+-- name: InsertChannelLog :exec
+INSERT OR IGNORE INTO channel_log (channel, chat, chat_name, sender, sender_name, at, text, file, msg_id)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);
+
+-- name: ListChannelLog :many
+SELECT chat, chat_name, sender, sender_name, at, text, file, msg_id FROM channel_log
+WHERE channel = ?1 AND at >= ?2 ORDER BY at DESC, id DESC LIMIT ?3;
+
+-- name: PurgeChannelLog :exec
+DELETE FROM channel_log WHERE at < ?1;
+
+-- name: ClearChannelLog :exec
+DELETE FROM channel_log WHERE channel = ?1;
+
+-- name: CountChannelLog :one
+SELECT count(*) FROM channel_log WHERE channel = ?1;

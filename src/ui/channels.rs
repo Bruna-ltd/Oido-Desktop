@@ -27,6 +27,10 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         };
         if c.get(kind).connected() {
             rows.push(agents_row(s, kind, k, layer));
+            rows.push(log_row(s, kind, k));
+            if kind == Kind::Slack {
+                rows.push(slack_update_row(k));
+            }
         }
         page = page.child(section_with(
             kind.title(),
@@ -135,6 +139,68 @@ fn agents_row(s: &App, kind: Kind, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(text(help).font(k.ty.caption()).color(k.c.text_muted).wrap()),
         )
         .child(super::multi_picker::build(s, k, layer, spec))
+}
+
+/// The log of what `kind` heard: how much is kept, and clearing it.
+fn log_row(s: &App, kind: Kind, k: &Kit) -> El {
+    let c = s.channels.get(kind);
+    let id = kind.as_str();
+    let kept = match c.logged {
+        0 => "Nothing kept yet.".to_owned(),
+        1 => "1 message kept.".to_owned(),
+        n => format!("{n} messages kept."),
+    };
+    let what = match kind {
+        Kind::Telegram => {
+            "Every message the bot gets, from anyone, and in groups it is in (all of a group's only with its privacy mode off in BotFather)"
+        }
+        Kind::Slack => "Every message the app gets, from anyone, and in channels it was added to",
+        Kind::WhatsApp => "Every message in every chat of the linked number, yours included",
+    };
+    let help = format!(
+        "{what}, kept on this computer for 30 days, words only. Agents given its Read messages tool can read it. {kept}"
+    );
+    let control = if c.confirm_clear {
+        row()
+            .gap(8.0)
+            .child(
+                button("Keep it")
+                    .variant(ButtonVariant::Ghost)
+                    .on_press(move |s: &mut App| s.channels.get_mut(kind).confirm_clear = false)
+                    .build(k)
+                    .key(format!("{id}-log-keep")),
+            )
+            .child(
+                button("Clear")
+                    .variant(ButtonVariant::Danger)
+                    .on_press(move |s: &mut App| s.clear_channel_log(kind))
+                    .build(k)
+                    .key(format!("{id}-log-clear-confirm")),
+            )
+    } else {
+        button("Clear…")
+            .variant(ButtonVariant::Outline)
+            .disabled(c.logged == 0)
+            .on_press(move |s: &mut App| s.channels.get_mut(kind).confirm_clear = true)
+            .build(k)
+            .key(format!("{id}-log-clear"))
+    };
+    setting(&format!("{id}-log"), "Message log", &help, control, k)
+}
+
+/// A Slack app made from an older manifest lacks what reading channels needs.
+fn slack_update_row(k: &Kit) -> El {
+    setting(
+        "slack-manifest-update",
+        "Keep the app up to date",
+        "Reading channels and listing the workspace need the newest manifest. If your app was made before, copy it, paste it under App Manifest at api.slack.com/apps, save, and reinstall the app.",
+        button("Copy manifest")
+            .variant(ButtonVariant::Outline)
+            .on_press_tx(|_: &mut App, tx: &mut Tx| tx.copy(slack::MANIFEST))
+            .build(k)
+            .key("slack-copy-manifest-again"),
+        k,
+    )
 }
 
 fn button(label: &str) -> Button {

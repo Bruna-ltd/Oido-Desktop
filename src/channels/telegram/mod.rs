@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use api::{Error, Update, User};
 
-use super::{Allowlist, Creds, Health, Heard, Kind, Link, Out, Person, Picture, Place, Status};
+use super::{
+    Allowlist, Creds, Health, Heard, Kind, Link, Logged, Out, Person, Picture, Place, Status,
+};
 use crate::app::App;
 
 /// How often "typing…" is said again while an agent works: Telegram shows it for 5 seconds.
@@ -200,8 +202,8 @@ fn person(u: &User) -> Person {
     }
 }
 
-/// What the core hears in an update: a press, a command, or a message from a private chat.
-/// Anything else (a group, a bot, an edit) is nothing.
+/// What the core hears in an update: a press, a command, or a message from a private chat; a
+/// message in a group the bot is in, only to keep. Anything else (a bot, an edit) is nothing.
 fn heard(u: Update) -> Option<Heard> {
     if let Some(cb) = u.callback_query {
         return Some(Heard::Press {
@@ -218,11 +220,11 @@ fn heard(u: Update) -> Option<Heard> {
         });
     }
     let m = u.message?;
-    let from = m
-        .from
-        .as_ref()
-        .filter(|f| !f.is_bot && m.chat.kind == "private")
-        .map(person)?;
+    let writer = m.from.as_ref().filter(|f| !f.is_bot)?;
+    if m.chat.kind != "private" {
+        return Some(overheard(&m, writer));
+    }
+    let from = person(writer);
     let place = Place {
         chat: m.chat.id.to_string(),
         thread: None,
@@ -258,6 +260,24 @@ fn heard(u: Update) -> Option<Heard> {
         at: m.date,
         text,
         picture,
+    })
+}
+
+/// A group's message `m` by `writer`, as the log keeps it: its words, and a file's name.
+fn overheard(m: &api::Message, writer: &User) -> Heard {
+    Heard::Overheard(Logged {
+        chat: m.chat.id.to_string(),
+        chat_name: m.chat.title.clone(),
+        sender: writer.id.to_string(),
+        sender_name: writer.name(),
+        at: m.date,
+        text: m
+            .text
+            .clone()
+            .or_else(|| m.caption.clone())
+            .unwrap_or_default(),
+        file: m.picture_file().map(|_| m.file_name()),
+        msg_id: Some(m.message_id.to_string()),
     })
 }
 
@@ -297,7 +317,17 @@ mod tests {
             ("42", "Ada L", Place::private("42"))
         );
         assert_eq!(text, "hello");
-        assert_eq!(heard(msg("group", "hello")), None);
+        let Some(Heard::Overheard(kept)) = heard(msg("group", "hello")) else {
+            panic!("a group's message is kept");
+        };
+        assert_eq!(
+            (
+                kept.chat.as_str(),
+                kept.sender_name.as_str(),
+                kept.text.as_str()
+            ),
+            ("42", "Ada L", "hello")
+        );
         let Some(Heard::Command { name, arg, .. }) =
             heard(msg("private", "/agent@oido_bot  Atlas "))
         else {

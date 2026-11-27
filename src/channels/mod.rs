@@ -10,6 +10,7 @@
 //! chat is over, what the agent wrote goes back to them, whoever wrote the message it answers,
 //! there or here; no desktop notification is raised for it.
 
+mod log;
 mod mrkdwn;
 mod press;
 mod send;
@@ -17,6 +18,8 @@ pub mod slack;
 pub mod telegram;
 pub mod tools;
 pub mod whatsapp;
+
+pub use log::Logged;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -179,6 +182,9 @@ pub enum Heard {
         data: String,
         message: Option<(Place, String)>,
     },
+    /// A message the channel saw that is not to the bot: in a group, a Slack channel, or another
+    /// of the linked WhatsApp number's chats. It is only kept in the log.
+    Overheard(Logged),
 }
 
 /// A button under a message: its label and what a press sends back.
@@ -400,6 +406,8 @@ pub struct Channel {
     pub picker: crate::picker::MultiPicker,
     /// Disconnecting waits for a second press.
     pub confirm_disconnect: bool,
+    /// Clearing the log waits for a second press.
+    pub confirm_clear: bool,
     /// How far each chat's messages have gone back.
     delivered: HashMap<String, usize>,
     /// Where each chat's person last wrote from, where its replies go.
@@ -422,6 +430,8 @@ pub struct Channel {
     api: Option<String>,
     /// Counts links started, so what an old one hears or says is ignored.
     generation: u64,
+    /// How many messages its log keeps, for the Channels screen.
+    pub logged: usize,
     /// What was sent, in tests (no threads run there).
     #[cfg(test)]
     pub sent: Vec<Out>,
@@ -539,6 +549,8 @@ pub struct Channels {
     pub slack_app_token: TextEdit,
     pub slack_bot_token: TextEdit,
     pub whatsapp: Channel,
+    /// When the log was last cut to what is kept (see [`log::KEEP_SECS`]).
+    purged: i64,
 }
 
 impl Channels {
@@ -608,6 +620,7 @@ impl App {
         for kind in Kind::ALL {
             self.load_channel(kind);
         }
+        self.purge_channel_log(now());
         self.rebuild_channel_servers();
     }
 
@@ -932,13 +945,18 @@ impl App {
         }
         let at = now();
         for h in heard {
-            self.hear(kind, h, at);
+            self.log_heard(kind, &h, at);
+            if !matches!(h, Heard::Overheard(_)) {
+                self.hear(kind, h, at);
+            }
         }
     }
 
     /// Acts on what `kind` heard, at time `at`.
     fn hear(&mut self, kind: Kind, heard: Heard, at: i64) {
         let (from, sent) = match &heard {
+            // Only kept in the log (see `channel_heard`).
+            Heard::Overheard(_) => return,
             Heard::Press { from, .. } => (from.clone(), None),
             Heard::Message { from, at, .. } | Heard::Command { from, at, .. } => {
                 (from.clone(), Some(*at))
@@ -955,7 +973,7 @@ impl App {
         if self.channels.get(kind).user(&from.id).is_none() {
             let text = match &heard {
                 Heard::Message { text, .. } => text.as_str(),
-                Heard::Command { .. } | Heard::Press { .. } => "",
+                Heard::Command { .. } | Heard::Press { .. } | Heard::Overheard(_) => "",
             };
             if sent.is_some()
                 && !self.take_invite(kind, &from, text, at)
@@ -1019,6 +1037,7 @@ impl App {
                 }
                 self.channel_ask(kind, &from.id, &place, id, prompt);
             }
+            Heard::Overheard(_) => {}
         }
     }
 
@@ -2507,6 +2526,56 @@ mod tests {
                 .unwrap()
                 .contains("reaches only the person you talk to")
         );
+    }
+
+    #[test]
+    fn what_a_channel_hears_is_logged_from_anyone_and_read_back_by_an_agent_given_it() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(
+                    "mcp__telegram__read_messages",
+                    json!({"chat": "Launch team", "since": "1d"}),
+                ),
+                text_stream("Read."),
+            ],
+        );
+        let at = now();
+        app.channel_heard(
+            T,
+            app.channels.telegram.generation,
+            vec![Heard::Overheard(Logged {
+                chat: "-100".into(),
+                chat_name: Some("Launch team".into()),
+                sender: "7".into(),
+                sender_name: "Grace".into(),
+                at,
+                text: "ship it friday".into(),
+                file: None,
+                msg_id: Some("1".into()),
+            })],
+        );
+        assert!(
+            said(&mut app).is_empty(),
+            "a group's message is not answered"
+        );
+        assert_eq!(app.channels.telegram.logged, 1, "kept");
+        app.roster
+            .current_mut()
+            .unwrap()
+            .tools
+            .push("mcp__telegram__read_messages".into());
+        app.composer.edit = TextEdit::new("what did the launch team say?");
+        app.send();
+        let _ = seen.recv();
+        let told = seen.recv().unwrap();
+        assert!(
+            told.contains("launch team (chat id -100)") && told.contains("grace: ship it friday"),
+            "{told}"
+        );
+        app.clear_channel_log(T);
+        assert_eq!(app.channels.telegram.logged, 0);
     }
 
     const S: Kind = Kind::Slack;

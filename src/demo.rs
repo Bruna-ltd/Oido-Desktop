@@ -512,6 +512,7 @@ pub static SCENES: &[Scene] = &[
             agent: Some("atlas".into()),
             trusted: false,
         });
+        t.logged = 128;
         s.route = Route::Channels;
     }),
     ("channels-connect", |s| {

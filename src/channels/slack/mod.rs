@@ -10,7 +10,7 @@
 mod api;
 pub mod format;
 
-pub use api::{API, MAX_FILE, Tokens, upload};
+pub use api::{API, Directory, MAX_FILE, Tokens, directory, history, upload};
 
 use std::collections::HashMap;
 use std::net::TcpStream;
@@ -24,7 +24,9 @@ use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message as Frame, WebSocket};
 
-use super::{Allowlist, Creds, Health, Heard, Kind, Link, Out, Person, Picture, Place, Status};
+use super::{
+    Allowlist, Creds, Health, Heard, Kind, Link, Logged, Out, Person, Picture, Place, Status,
+};
 use crate::app::App;
 
 /// How long a read on the socket waits before the listener looks whether it should stop.
@@ -62,13 +64,20 @@ pub const MANIFEST: &str = r#"{
     "scopes": {
       "bot": [
         "app_mentions:read",
+        "channels:history",
+        "channels:read",
         "chat:write",
+        "chat:write.public",
         "commands",
         "files:read",
         "files:write",
+        "groups:history",
+        "groups:read",
         "im:history",
         "im:read",
         "im:write",
+        "mpim:history",
+        "mpim:read",
         "reactions:write",
         "users:read"
       ]
@@ -76,7 +85,7 @@ pub const MANIFEST: &str = r#"{
   },
   "settings": {
     "event_subscriptions": {
-      "bot_events": ["app_mention", "message.im"]
+      "bot_events": ["app_mention", "message.channels", "message.groups", "message.im", "message.mpim"]
     },
     "interactivity": {
       "is_enabled": true
@@ -168,6 +177,7 @@ fn listen(
     let mut backoff = Duration::from_secs(2);
     let mut me = None;
     let mut names: HashMap<String, Person> = HashMap::new();
+    let mut titles: HashMap<String, Option<String>> = HashMap::new();
     while !stop.load(Ordering::Relaxed) {
         let opened = match &me {
             Some(_) => Ok(()),
@@ -203,6 +213,12 @@ fn listen(
             names
                 .entry(id.to_owned())
                 .or_insert_with(|| api::person(&agent, API, &tokens.bot, id))
+                .clone()
+        };
+        let mut title = |id: &str| {
+            titles
+                .entry(id.to_owned())
+                .or_insert_with(|| api::channel_name(&agent, API, &tokens.bot, id))
                 .clone()
         };
         // Only the files of people paired are fetched.
@@ -256,7 +272,17 @@ fn listen(
                     if kind == "interactive" {
                         unbutton(&agent, &tokens.bot, payload);
                     }
-                    if let Some(heard) = heard(kind, payload, &bot, &mut lookup, &mut fetch) {
+                    let heard = heard(
+                        kind,
+                        payload,
+                        &bot,
+                        &mut Names {
+                            who: &mut lookup,
+                            title: &mut title,
+                        },
+                        &mut fetch,
+                    );
+                    if let Some(heard) = heard {
                         app.update(move |s: &mut App, _| {
                             s.channel_heard(Kind::Slack, generation, vec![heard]);
                         });
@@ -354,16 +380,23 @@ fn picture_of(event: &Value, user: &str, fetch: &mut Fetch<'_>) -> Option<Pictur
     Some(Picture { name, bytes })
 }
 
+/// Names Slack gives by id: a user's, and a channel's title.
+struct Names<'a> {
+    who: &'a mut dyn FnMut(&str) -> Person,
+    title: &'a mut dyn FnMut(&str) -> Option<String>,
+}
+
 /// What the core hears in an envelope of `kind` with `payload`: a direct message (with a picture,
-/// if one was shared), a mention, the `/oido` command, or a press. `bot` is the bot's own user id;
-/// `who` names a user by id; `fetch` fetches a shared picture.
+/// if one was shared), a mention, the `/oido` command, or a press; a message in a channel the bot
+/// is in, only to keep. `bot` is the bot's own user id; `fetch` fetches a shared picture.
 fn heard(
     kind: &str,
     payload: &Value,
     bot: &str,
-    who: &mut dyn FnMut(&str) -> Person,
+    names: &mut Names<'_>,
     fetch: &mut Fetch<'_>,
 ) -> Option<Heard> {
+    let who = &mut *names.who;
     let s = |v: &Value| v.as_str().map(str::to_owned);
     match kind {
         "events_api" => {
@@ -378,7 +411,19 @@ fn heard(
             let ts = s(&e["ts"])?;
             let channel = s(&e["channel"])?;
             let place = match s(&e["type"])?.as_str() {
-                "message" if e["channel_type"].as_str() == Some("im") => Place {
+                "message" if e["channel_type"].as_str() != Some("im") => {
+                    return Some(Heard::Overheard(Logged {
+                        chat_name: (names.title)(&channel),
+                        chat: channel,
+                        sender_name: (names.who)(&user).name,
+                        sender: user,
+                        at: sent_at(&ts),
+                        text: s(&e["text"]).unwrap_or_default(),
+                        file: s(&e["files"][0]["name"]),
+                        msg_id: Some(ts),
+                    }));
+                }
+                "message" => Place {
                     chat: channel,
                     thread: None,
                 },
@@ -474,9 +519,16 @@ mod tests {
 
     fn hear(kind: &str, payload: &str) -> Option<Heard> {
         let v: Value = serde_json::from_str(payload).unwrap();
-        heard(kind, &v, "UBOT", &mut |id| ada(id), &mut |_, _, _| {
-            Err("no fetching in this test".into())
-        })
+        heard(
+            kind,
+            &v,
+            "UBOT",
+            &mut Names {
+                who: &mut |id| ada(id),
+                title: &mut |_| Some("#general".into()),
+            },
+            &mut |_, _, _| Err("no fetching in this test".into()),
+        )
     }
 
     #[test]
@@ -511,10 +563,23 @@ mod tests {
             r#"{"event":{"type":"message","channel_type":"im","user":"UBOT","text":"x","ts":"1.0","channel":"D9"}}"#,
             r#"{"event":{"type":"message","channel_type":"im","user":"U1","bot_id":"B1","text":"x","ts":"1.0","channel":"D9"}}"#,
             r#"{"event":{"type":"message","subtype":"message_changed","channel_type":"im","user":"U1","ts":"1.0","channel":"D9"}}"#,
-            r#"{"event":{"type":"message","channel_type":"channel","user":"U1","text":"x","ts":"1.0","channel":"C1"}}"#,
         ] {
             assert_eq!(hear("events_api", skipped), None, "{skipped}");
         }
+        let Some(Heard::Overheard(kept)) = hear(
+            "events_api",
+            r#"{"event":{"type":"message","channel_type":"channel","user":"U1","text":"x","ts":"1.0","channel":"C1"}}"#,
+        ) else {
+            panic!("a channel's message is kept");
+        };
+        assert_eq!(
+            (
+                kept.chat.as_str(),
+                kept.chat_name.as_deref(),
+                kept.text.as_str()
+            ),
+            ("C1", Some("#general"), "x")
+        );
     }
 
     #[test]
@@ -612,6 +677,7 @@ mod tests {
         assert_eq!(v["settings"]["socket_mode_enabled"], json!(true));
         let events = v["settings"]["event_subscriptions"]["bot_events"].to_string();
         assert!(events.contains("app_mention") && events.contains("message.im"));
+        assert!(events.contains("message.channels") && events.contains("message.groups"));
         assert_eq!(
             v["features"]["slash_commands"][0]["command"],
             json!("/oido")
@@ -632,7 +698,10 @@ mod tests {
             "events_api",
             &payload,
             "UBOT",
-            &mut |id| ada(id),
+            &mut Names {
+                who: &mut |id| ada(id),
+                title: &mut |_| None,
+            },
             &mut |user, url, declared| {
                 asked.push((user.to_owned(), url.to_owned(), declared.to_owned()));
                 Ok(b"notes".to_vec())
@@ -670,7 +739,10 @@ mod tests {
             "events_api",
             &payload,
             "UBOT",
-            &mut |id| ada(id),
+            &mut Names {
+                who: &mut |id| ada(id),
+                title: &mut |_| None,
+            },
             &mut |_, _, _| panic!("not fetched"),
         ) else {
             panic!("a message");

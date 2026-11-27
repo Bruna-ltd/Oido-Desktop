@@ -180,9 +180,16 @@ the channel's name like an extension's (`src/channels/tools.rs`; the server is b
 
 - `mcp__<channel>__send_message`: `to`, `text` (Markdown, formatted as replies are).
 - `mcp__<channel>__send_file`: `to`, `path` (in the working folder, as above), `caption`.
-- `mcp__<channel>__list_contacts`: the people paired there, and which is the owner.
+- `mcp__<channel>__list_contacts`: the people paired there (and which is the owner), the chats
+  the log heard lately with their ids, and on Slack the workspace's people and the channels the
+  app is in (`users.list`, `conversations.list`).
+- `mcp__<channel>__read_messages`: `chat`, `from`, `since` (`2h`, `3d`, `2026-11-27`,
+  `2026-11-27 09:30`), `limit` (30, at most 200): from the log (below), grouped by chat with
+  each chat's id so the agent can answer with `send_message`. On Slack, with `chat`, Slack's own
+  `conversations.history` is read instead (falling back to the log).
 
-**Who `to` is.** A paired person, by name, handle or id; or anyone the channel reaches by an id of
+**Who `to` is.** A paired person, by name, handle or id; a chat the log heard in the last 30
+days, by its title (a group's, a `#channel`) or whom a private one was with; or anyone the channel reaches by an id of
 its own: on Telegram a chat id or a public channel's `@name` (a bot reaches only people who wrote
 to it first, and chats it is in), on Slack a user or channel id (`U…`, `C…`: a DM to anyone in the
 workspace, or a channel the bot is in), on WhatsApp a phone number with its country code (sent as
@@ -199,9 +206,32 @@ agent was not given them, but there they reach only the person it talks to; give
 reach anyone.
 
 **Guard.** The sends act and leave the computer, so while outside text is in what the model sees
-(a web page, an untrusted person's message, a contact list) they wait for your go-ahead. What a
-send says back is the app's own words, not outside text. Workflows and team members cannot use
+(a web page, an untrusted person's message, a contact list, what `read_messages` read) they wait
+for your go-ahead. What a send says back is the app's own words, not outside text. Workflows and team members cannot use
 channel tools yet.
+
+## Message log
+
+Every connected channel keeps what it hears (`src/channels/log.rs`, table `channel_log`): every
+message to the bot, from anyone (paired or not), and what it sees without being written to,
+which adapters hand over as `Heard::Overheard`, kept but never answered:
+
+- Telegram: messages in groups the bot is in (all of them only with privacy mode off in BotFather;
+  otherwise commands, mentions and replies).
+- Slack: messages in channels the app was added to (`message.channels`, `message.groups`,
+  `message.mpim`; the channel's title from `conversations.info`).
+- WhatsApp: every chat of the linked number: groups (title from the group's metadata) and what
+  the owner writes to others from the phone (as "You"). What this device sent is left out.
+
+Words only: a file is noted by its name, never fetched for this. The same message (by channel,
+chat and id) is kept once, so a Slack mention heard both ways is one row. Rows older than 30 days
+are cut at launch and hourly. The Channels screen shows how many are kept and clears them (a second
+press confirms).
+
+Slack needs the newer manifest for this (`channels:history`, `channels:read`, `groups:history`,
+`groups:read`, `mpim:history`, `mpim:read`, `chat:write.public`, and the message events above): an
+app made before is updated by pasting the manifest under App Manifest and reinstalling; the
+Channels screen offers it again once connected.
 
 ## Not yet
 
