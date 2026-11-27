@@ -410,6 +410,19 @@ fn send_once(agent: &ureq::Agent, base: &str, bot: &Secret, out: &Out) -> Result
             reply.answer(Err("Slack sends files on their own".into()));
             Ok(())
         }
+        // How it went is the agent's to hear, not a failed message's.
+        Out::Tell { to, text, reply } => {
+            let posted = post(agent, base, bot, to, text, &[]);
+            let posted = match posted {
+                Err(Error::RetryAfter(s)) => {
+                    thread::sleep(Duration::from_secs(s.min(60)));
+                    post(agent, base, bot, to, text, &[])
+                }
+                other => other,
+            };
+            reply.answer(posted.map_err(|e| e.to_string()));
+            Ok(())
+        }
         Out::Working { to, message, on } => {
             let method = if *on {
                 "reactions.add"

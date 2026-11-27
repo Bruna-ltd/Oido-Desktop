@@ -138,6 +138,12 @@ impl App {
                     old.name
                 ));
             }
+            Transport::Channel(_) => {
+                return Err(format!(
+                    "{} is built in: its tools are there while it is connected on the Channels screen",
+                    old.name
+                ));
+            }
             Transport::Http { url } => {
                 if change.command.is_some() || change.args.is_some() || !change.env.is_empty() {
                     return Err(format!(
@@ -224,7 +230,7 @@ impl App {
                 let kind = match s.transport {
                     Transport::Http { .. } => "remote",
                     Transport::Stdio { .. } => "local",
-                    Transport::Extension { .. } => "built in",
+                    Transport::Extension { .. } | Transport::Channel(_) => "built in",
                 };
                 let state = match (s.enabled, s.status) {
                     (false, _) => "off".to_owned(),

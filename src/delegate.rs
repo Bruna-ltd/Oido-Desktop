@@ -990,6 +990,12 @@ impl App {
         let (server, tool) = crate::mcp::resolve(&self.mcp.servers, name)
             .filter(|(s, _)| s.enabled)
             .ok_or_else(|| crate::mcp::why_unavailable(&self.mcp.servers, name))?;
+        if let crate::mcp::Transport::Channel(kind) = server.transport {
+            return Err(format!(
+                "{} tools are used by the agent the person talks to, not by a team member",
+                kind.title()
+            ));
+        }
         if !server.is_extension() {
             return self.mcp_target_for(&server.id).map(|target| Route::Mcp {
                 server: server.id.clone(),

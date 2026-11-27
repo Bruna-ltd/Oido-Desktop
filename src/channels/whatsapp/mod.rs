@@ -661,16 +661,19 @@ async fn send(
     match out {
         Out::Say { to, text, buttons } => {
             let to = jid(&to)?;
-            for part in format::render(&text) {
-                let done = client
-                    .send_message(to.clone(), wa::Message::text(part))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                sent.add(done.message_id);
-            }
+            say(client, &to, &text, sent).await?;
             if !buttons.is_empty() {
                 send_poll(client, &to, &buttons, polls, sent).await?;
             }
+            Ok(())
+        }
+        // How it went is the agent's to hear, not a failed message's.
+        Out::Tell { to, text, reply } => {
+            let said = match jid(&to) {
+                Ok(to) => say(client, &to, &text, sent).await,
+                Err(why) => Err(why),
+            };
+            reply.answer(said);
             Ok(())
         }
         Out::Typing { to } => client
@@ -709,6 +712,23 @@ async fn send(
             Ok(())
         }
     }
+}
+
+/// Sends `markdown` to `to`, as many messages as it takes.
+async fn say(
+    client: &Arc<Client>,
+    to: &Jid,
+    markdown: &str,
+    sent: &mut Sent,
+) -> Result<(), String> {
+    for part in format::render(markdown) {
+        let done = client
+            .send_message(to.clone(), wa::Message::text(part))
+            .await
+            .map_err(|e| e.to_string())?;
+        sent.add(done.message_id);
+    }
+    Ok(())
 }
 
 /// How a file shows in the chat.

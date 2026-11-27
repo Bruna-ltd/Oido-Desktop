@@ -15,9 +15,8 @@ mod press;
 mod send;
 pub mod slack;
 pub mod telegram;
+pub mod tools;
 pub mod whatsapp;
-
-pub use send::{NAME as SEND_FILE, spec as send_file_spec};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -197,6 +196,13 @@ pub enum Out {
         to: Place,
         text: String,
         buttons: Vec<Button>,
+    },
+    /// A message an agent sends with a channel tool, written in Markdown: how it went is answered
+    /// on `reply`, so the agent is told.
+    Tell {
+        to: Place,
+        text: String,
+        reply: Reply,
     },
     /// "typing…" for a few seconds, where the channel has it.
     Typing { to: Place },
@@ -602,6 +608,7 @@ impl App {
         for kind in Kind::ALL {
             self.load_channel(kind);
         }
+        self.rebuild_channel_servers();
     }
 
     fn load_channel(&mut self, kind: Kind) {
@@ -669,6 +676,7 @@ impl App {
         c.bot = Some(name);
         c.enabled = true;
         c.start(creds);
+        self.rebuild_channel_servers();
         true
     }
 
@@ -720,6 +728,7 @@ impl App {
         c.pending.clear();
         c.invite = None;
         c.confirm_disconnect = false;
+        self.rebuild_channel_servers();
     }
 
     /// Makes a new invite for `kind`, in place of the one on show.
@@ -889,6 +898,7 @@ impl App {
         c.bot = Some(name);
         c.enabled = true;
         c.status = Status::Listening;
+        self.rebuild_channel_servers();
     }
 
     pub(crate) fn channel_send_failed(&mut self, kind: Kind, generation: u64, why: String) {
@@ -1495,8 +1505,9 @@ impl App {
             .map_or_else(|| "the person".to_owned(), |p| p.name.clone());
         let files = if self.channels.files_go(sid).is_some() {
             format!(
-                "a file you make reaches them only if you send it with `{}`",
-                send::NAME
+                "a file you make reaches them only if you send it with `mcp__{}__{}`",
+                kind.as_str(),
+                tools::SEND_FILE
             )
         } else {
             "files you make here do not reach them".to_owned()
@@ -1603,6 +1614,7 @@ mod tests {
         let open = app.current().unwrap().id.clone();
         app.channels.telegram.agents = vec![open];
         app.channels.telegram.bot = Some("oido_bot".into());
+        app.rebuild_channel_servers();
         write(&mut app, "hello?");
         app.approve_pairing(T, ADA);
         app.channels.telegram.sent.clear();
@@ -2349,9 +2361,12 @@ mod tests {
             &db,
             vec![
                 text_stream("hello"),
-                call_stream(SEND_FILE, json!({"path": "report.txt", "caption": "Here"})),
+                call_stream(
+                    TG_SEND_FILE,
+                    json!({"path": "report.txt", "caption": "Here"}),
+                ),
                 text_stream("Sent."),
-                call_stream(SEND_FILE, json!({"path": "../secret"})),
+                call_stream(TG_SEND_FILE, json!({"path": "../secret"})),
                 text_stream("Could not."),
             ],
         );
@@ -2366,7 +2381,9 @@ mod tests {
         let sid = bound(&app);
         app.roster.owner_of_mut(&sid).unwrap().workdir = Some(dir.display().to_string());
         assert!(
-            seen.recv().unwrap().contains("\"send_file\""),
+            seen.recv()
+                .unwrap()
+                .contains(&format!("\"{TG_SEND_FILE}\"")),
             "offered in a Telegram chat"
         );
 
@@ -2386,7 +2403,7 @@ mod tests {
         assert!(
             seen.recv()
                 .unwrap()
-                .contains("sent report.txt to them on telegram")
+                .contains("sent report.txt to ada on telegram")
         );
 
         write(&mut app, "and the secret");
@@ -2396,15 +2413,105 @@ mod tests {
     }
 
     #[test]
-    fn send_file_is_not_offered_outside_telegram_chats() {
+    fn channel_tools_are_not_offered_outside_channel_chats_unless_given() {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![(200, EVENTS, text_stream("hi"))]);
         app.composer.edit = TextEdit::new("hello");
         app.send();
-        assert!(!seen.recv().unwrap().contains("\"send_file\""));
+        assert!(!seen.recv().unwrap().contains("mcp__telegram__"));
+    }
+
+    /// A running Telegram link whose thread answers each message an agent sends with `answer`,
+    /// and passes on what it was told.
+    fn telling(app: &mut App, answer: Result<(), String>) -> Receiver<Out> {
+        let (tx, rx) = std::sync::mpsc::channel::<Out>();
+        let (told_tx, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for out in rx {
+                if let Out::Tell { reply, .. } = &out {
+                    reply.answer(answer.clone());
+                    let _ = told_tx.send(out);
+                }
+            }
+        });
+        app.channels.telegram.link = Some(Link::new(Arc::new(AtomicBool::new(false)), tx));
+        told
+    }
+
+    #[test]
+    fn an_agent_given_telegrams_tools_messages_the_owner_from_any_chat() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(TG_SEND_MESSAGE, json!({"text": "The report is ready."})),
+                text_stream("Told you."),
+            ],
+        );
+        app.set_person_trusted(T, ADA, true);
+        let told = telling(&mut app, Ok(()));
+        app.roster
+            .current_mut()
+            .unwrap()
+            .tools
+            .push(TG_SEND_MESSAGE.into());
+        app.composer.edit = TextEdit::new("tell me on Telegram when it is done");
+        app.send();
+        assert!(
+            seen.recv()
+                .unwrap()
+                .contains(&format!("\"{TG_SEND_MESSAGE}\""))
+        );
+        match told
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+        {
+            Out::Tell { to, text, .. } => {
+                assert_eq!(
+                    (to.chat.as_str(), text.as_str()),
+                    (ADA, "The report is ready.")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(seen.recv().unwrap().contains("sent to ada on telegram"));
+    }
+
+    #[test]
+    fn in_a_channel_chat_its_tools_reach_only_the_person_unless_the_agent_was_given_them() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                text_stream("hello"),
+                call_stream(
+                    TG_SEND_MESSAGE,
+                    json!({"to": "-100200300", "text": "hi all"}),
+                ),
+                text_stream("Could not."),
+            ],
+        );
+        app.set_person_trusted(T, ADA, true);
+        let _told = telling(&mut app, Ok(()));
+        write(&mut app, "hi");
+        assert!(
+            seen.recv()
+                .unwrap()
+                .contains(&format!("\"{TG_SEND_MESSAGE}\"")),
+            "offered in a Telegram chat"
+        );
+        write(&mut app, "post in the group");
+        let _ = seen.recv();
+        assert!(
+            seen.recv()
+                .unwrap()
+                .contains("reaches only the person you talk to")
+        );
     }
 
     const S: Kind = Kind::Slack;
+    const TG_SEND_FILE: &str = "mcp__telegram__send_file";
+    const TG_SEND_MESSAGE: &str = "mcp__telegram__send_message";
 
     /// What Slack hears when Ada writes `text` at `place`, as message `id`.
     fn slack_heard(text: &str, place: Place, id: &str) -> Heard {

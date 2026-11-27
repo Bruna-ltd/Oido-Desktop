@@ -155,6 +155,7 @@ fn columns(t: &Transport) -> Result<(&'static str, &str, &str, String)> {
             ("stdio", "", command.as_str(), serde_json::to_string(args)?)
         }
         Transport::Extension { id } => return Err(Error::NotStored(id.clone())),
+        Transport::Channel(kind) => return Err(Error::NotStored(kind.as_str().to_owned())),
     })
 }
 

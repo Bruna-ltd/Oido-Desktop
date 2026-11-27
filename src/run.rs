@@ -523,9 +523,11 @@ impl App {
             tools,
             cache_key: Some(sid.clone()),
         };
-        // A chat carried on privately from a channel can send files there.
-        if let Some(kind) = self.channels.files_go(&sid) {
-            request.tools.push(crate::channels::send_file_spec(kind));
+        // A chat carried on from a channel can message its person there, and send files privately.
+        for tool in self.bound_channel_tools(&sid) {
+            if !request.tools.iter().any(|t| t.name == tool.name) {
+                request.tools.push(tool);
+            }
         }
         // Older tool results and pictures are trimmed from what is sent when it would come near the
         // model's limit; the chat keeps them. If that is not enough, the older messages are
@@ -1539,10 +1541,6 @@ impl App {
         }
         if crate::mcp::is_tool(&name) {
             self.start_mcp_call(&sid, &id, &name, &args);
-            return true;
-        }
-        if name == crate::channels::SEND_FILE {
-            self.start_send_file(&sid, &id, &args);
             return true;
         }
         if name == crate::web::NAME {

@@ -49,6 +49,8 @@ pub enum Transport {
     Extension {
         id: String,
     },
+    /// A connected channel's tools (see [`crate::channels::tools`]).
+    Channel(crate::channels::Kind),
 }
 
 /// How a remote server knows who is calling.
@@ -173,7 +175,7 @@ impl Server {
                 .chain(args.iter().map(String::as_str))
                 .collect::<Vec<_>>()
                 .join(" "),
-            Transport::Extension { .. } => "Built in".to_owned(),
+            Transport::Extension { .. } | Transport::Channel(_) => "Built in".to_owned(),
         }
     }
 
@@ -181,6 +183,15 @@ impl Server {
     /// them nor shown on the MCP page.
     pub fn is_extension(&self) -> bool {
         matches!(self.transport, Transport::Extension { .. })
+    }
+
+    /// Whether the app itself stands behind it (an extension or a channel), so it is never saved
+    /// with the person's own servers nor shown on the MCP page.
+    pub fn is_built_in(&self) -> bool {
+        matches!(
+            self.transport,
+            Transport::Extension { .. } | Transport::Channel(_)
+        )
     }
 
     /// Whether its tools are offered to agents: it is on and was reached.
@@ -228,6 +239,14 @@ pub fn specs(servers: &[Server]) -> Vec<ToolSpec> {
 }
 
 fn spec(server: &Server, tool: &Tool) -> ToolSpec {
+    // A channel's tools are the app's own, and read files from the agent's working folder.
+    if let Transport::Channel(_) = server.transport {
+        return ToolSpec {
+            name: server.qualified(&tool.name),
+            description: tool.description.clone(),
+            schema: object_schema(&tool.schema),
+        };
+    }
     // A server runs in its own process, not in the agent's working folder.
     let from = format!(
         "(From {}. It does not run in your working folder: give it absolute paths.)",

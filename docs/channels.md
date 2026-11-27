@@ -6,7 +6,8 @@ Paired people talk to chosen agents from a messaging app: Telegram, Slack and Wh
 to, their chats, commands, and what goes back when a turn is over. A channel turns what it hears
 into `Heard` (a message, a command, a button press) and sends each `Out` (say, typing, unbutton,
 answered) its own way, from its own thread; replies go to a `Place` (a chat, and a thread in it).
-`press.rs` is the buttons (questions, drafts), `send.rs` the `send_file` tool. Each channel lives
+`press.rs` is the buttons (questions, drafts), `tools.rs` the channel tools (below) and `send.rs`
+what they send. Each channel lives
 in its own folder: `telegram/` (`api.rs` the Bot API, `format.rs` Markdown to Telegram HTML,
 `mod.rs` connecting, its threads, and updates turned into `Heard`), `slack/` (the same, for
 Slack's Web API, mrkdwn and Socket Mode) and `whatsapp/` (a linked device, below). `mrkdwn.rs`
@@ -71,14 +72,14 @@ waits goes after the answer. Other kinds (voice, stickers, video) are turned awa
 
 **Where the agent is.** In a chat carried on from a channel, the agent's context says so (a
 `Channel:` line beside the date and folder, `App::channel_context`): who it talks with, on which
-channel, and that a file it makes reaches them only through `send_file`.
+channel, and that a file it makes reaches them only through `mcp__<channel>__send_file`.
 
-**Sending files.** In a chat carried on from Telegram, the agent is also offered `send_file`
-(`src/channels/send.rs`): a file from its working folder (the home folder if it has none, as for
+**Sending files.** In a chat carried on from Telegram, the agent is also offered
+`mcp__telegram__send_file` (see Channel tools): a file from its working folder (the home folder if it has none, as for
 commands; nothing outside it) goes to the person, a PNG, JPEG or WebP picture as a photo (as a file
 if Telegram will not take it as one), anything else as a file, up to 50 MB, with an optional
 caption. It runs as a job, like a command: the chat is busy until the upload ends, and the agent
-hears whether it went. Elsewhere the tool is not offered, and a call to it says why.
+hears whether it went.
 
 **Formatting.** The core writes Markdown; Telegram's sender turns it into Telegram HTML (only `<`, `>`, `&` need escaping, unlike MarkdownV2):
 bold headings, bullets, `<pre>` code and tables, links. Each message holds at most 4096 UTF-16
@@ -116,7 +117,7 @@ with the message's words, read as on Telegram: the first file shared, fetched wi
 from Slack's file host only (`files.slack.com`), only for people paired, up to 20 MB. Slack hands
 back a web page when the app cannot read files, so a web page is refused unless the file shared is
 one. In a direct
-message the agent is offered `send_file`: Slack's upload in three steps (an address for the file,
+message the agent is offered `mcp__slack__send_file`: Slack's upload in three steps (an address for the file,
 the bytes, then the file shared in the person's private chat), up to 50 MB. Never into a channel's
 thread. Both need the `files:read` and `files:write` scopes in the manifest; an app made from an
 older manifest says `missing_scope` until it is updated and reinstalled.
@@ -168,8 +169,39 @@ heard: the ids of its last 256 messages are kept.
 
 **Pictures and files.** A picture or document from someone paired goes to the agent with its
 caption, read as on Telegram, up to 20 MB; voice notes, stickers and videos are turned away in
-words. `send_file` goes through the running client: a PNG, JPEG or WebP picture or an MP4 up to
+words. `mcp__whatsapp__send_file` goes through the running client: a PNG, JPEG or WebP picture or an MP4 up to
 16 MB shows in the chat, anything else comes as a document, up to 100 MB.
+
+## Channel tools
+
+While a channel is connected, its tools are a set agents can be given on their page, grouped under
+the channel's name like an extension's (`src/channels/tools.rs`; the server is built in,
+`Transport::Channel`, never saved nor shown on the MCP page):
+
+- `mcp__<channel>__send_message`: `to`, `text` (Markdown, formatted as replies are).
+- `mcp__<channel>__send_file`: `to`, `path` (in the working folder, as above), `caption`.
+- `mcp__<channel>__list_contacts`: the people paired there, and which is the owner.
+
+**Who `to` is.** A paired person, by name, handle or id; or anyone the channel reaches by an id of
+its own: on Telegram a chat id or a public channel's `@name` (a bot reaches only people who wrote
+to it first, and chats it is in), on Slack a user or channel id (`U…`, `C…`: a DM to anyone in the
+workspace, or a channel the bot is in), on WhatsApp a phone number with its country code (sent as
+the linked number). Left out, it is the person the chat is carried on with from that channel, else
+the owner: the one paired person marked trusted. None trusted, or several, and the call says to
+name someone.
+
+**A message** goes through the channel's own thread (`Out::Tell`), in order with replies, and the
+agent hears whether it went (or that it was not confirmed within a minute). A file goes as above.
+Both run as jobs: the chat is busy until they end, and Stop says it may have gone already.
+
+**In a channel chat** `send_message` and `send_file` of that channel are offered even when the
+agent was not given them, but there they reach only the person it talks to; given the set, they
+reach anyone.
+
+**Guard.** The sends act and leave the computer, so while outside text is in what the model sees
+(a web page, an untrusted person's message, a contact list) they wait for your go-ahead. What a
+send says back is the app's own words, not outside text. Workflows and team members cannot use
+channel tools yet.
 
 ## Not yet
 

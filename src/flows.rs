@@ -795,6 +795,12 @@ impl App {
                     server.name
                 ));
             }
+            if let crate::mcp::Transport::Channel(kind) = server.transport {
+                return Err(format!(
+                    "This workflow uses {name}, and {} tools cannot run in a workflow yet.",
+                    kind.title()
+                ));
+            }
             let account = if server.is_extension() {
                 match self
                     .store

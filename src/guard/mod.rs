@@ -679,7 +679,6 @@ impl Guard {
 fn off_machine(name: &str) -> bool {
     name == crate::web::NAME
         || crate::connector::is_tool(name)
-        || name == crate::channels::SEND_FILE
         || crate::mcp::is_tool(name)
         || crate::tools::needs_typesafe(name)
 }

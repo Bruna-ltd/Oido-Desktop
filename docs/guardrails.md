@@ -52,7 +52,7 @@ text is left alone:
 
 A tool gets the real value back in its arguments (`write_file` writing a `.env`, `shell` using a key).
 A placeholder going to a tool that sends it away from this computer (a web fetch, an MCP tool,
-`send_file`, TypeSafe) waits for your go-ahead. A placeholder this chat does not have (the model
+channel sends, TypeSafe) waits for your go-ahead. A placeholder this chat does not have (the model
 made one up) is refused.
 
 **Stop risky actions** (`Pack::Actions`, `guard/actions.rs`). A command or file write that can do
@@ -80,7 +80,7 @@ under it and is matched by where it really is (`..`, `~` and links worked out). 
 "allow once": change the list. Until you change it, the list holds keys and logins (`~/.ssh`,
 `~/.gnupg`, `~/.aws`), browser profiles and this app's own database. Checked by:
 
-- file tools and `send_file`: the `path`;
+- file tools and channel `send_file`: the `path`;
 - `shell`: every word in the command that names a place (it cannot tell reading from changing, so any
   mention counts);
 - MCP tools: every text in the arguments that looks like a path.
