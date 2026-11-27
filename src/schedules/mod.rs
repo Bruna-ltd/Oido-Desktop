@@ -68,6 +68,15 @@ pub fn every_tick(check: impl Fn() + Send + 'static) {
     });
 }
 
+/// A schedule's workflow fired: where it reports, and what it runs with.
+struct Fired {
+    schedule_id: String,
+    started_by: String,
+    chat_id: String,
+    inputs: Map<String, Value>,
+    cancel: Arc<AtomicBool>,
+}
+
 impl App {
     /// Reads the saved schedules. A fire still marked running was cut off by the app closing.
     pub(crate) fn load_schedules(&mut self) {
@@ -275,9 +284,59 @@ impl App {
         );
         let cancel = Arc::new(AtomicBool::new(false));
         self.wf_jobs.insert(wf.id.clone(), Arc::clone(&cancel));
-        let (schedule_id, chat_id, job) = (s.id.clone(), sid.to_owned(), wf.id.clone());
-        let started_by = format!("schedule: {}", s.name);
-        let started = self.launch_flow(&wf, &s.agent_id, inputs, &started_by, None, cancel, {
+        let fired = Fired {
+            schedule_id: s.id.clone(),
+            started_by: format!("schedule: {}", s.name),
+            chat_id: sid.to_owned(),
+            inputs: inputs.clone(),
+            cancel,
+        };
+        // Its steps using a tool the agent chose to approve, it waits for your go-ahead once, before
+        // it starts, on a card in the fire's chat and where the agent's approvals go.
+        let Some((agent_name, approvals)) = self
+            .roster
+            .agent_ref(&s.agent_id)
+            .map(|a| (a.name.clone(), a.approvals.clone()))
+        else {
+            self.start_fired(&wf, &s.agent_id, fired);
+            return;
+        };
+        let Some(found) = self.workflow_asks(&wf, &approvals.asking()) else {
+            self.start_fired(&wf, &s.agent_id, fired);
+            return;
+        };
+        let asker = self
+            .asker(crate::guard::ask::Where::Chat(sid.to_owned()), &agent_name)
+            .sending_to(Some(approvals.to));
+        let args = serde_json::json!({ "name": wf.name }).to_string();
+        let stop = Arc::clone(&fired.cancel);
+        let agent_id = s.agent_id.clone();
+        self.spawn(
+            move || {
+                let shown = crate::guard::Hidden::default();
+                let tool = crate::tools::RUN_WORKFLOW;
+                crate::guard::unattended(&asker, tool, &args, Some(&shown), &found, &stop).1
+            },
+            move |app, refused| match refused {
+                None => app.start_fired(&wf, &agent_id, fired),
+                Some(told) => app.fail_fired(&wf.id, &fired, &told),
+            },
+        );
+    }
+
+    /// Starts a schedule's workflow `wf`, as `agent_id`, once nothing holds it.
+    fn start_fired(&mut self, wf: &crate::workflow::Saved, agent_id: &str, fired: Fired) {
+        let Fired {
+            schedule_id,
+            started_by,
+            chat_id,
+            inputs,
+            cancel,
+        } = fired;
+        let job = wf.id.clone();
+        let chat = chat_id.clone();
+        let schedule = schedule_id.clone();
+        let started = self.launch_flow(wf, agent_id, &inputs, &started_by, None, cancel, {
             move |app, record, finish| {
                 app.wf_jobs.remove(&job);
                 let (crate::command::Finish::Done(text) | crate::command::Finish::Stopped(text)) =
@@ -292,15 +351,28 @@ impl App {
                 } else {
                     text.as_str()
                 };
-                app.append(&chat_id, Message::reply(text.clone(), None, outcome));
-                app.end_fire(&schedule_id, status, note, Some(record.id.clone()));
+                app.append(&chat, Message::reply(text.clone(), None, outcome));
+                app.end_fire(&schedule, status, note, Some(record.id.clone()));
             }
         });
         if let Err(why) = started {
             self.wf_jobs.remove(&wf.id);
-            self.append(sid, Message::reply("", None, Outcome::Failed(why.clone())));
-            self.end_fire(&s.id, FireStatus::Failed, &why, None);
+            self.append(
+                &chat_id,
+                Message::reply("", None, Outcome::Failed(why.clone())),
+            );
+            self.end_fire(&schedule_id, FireStatus::Failed, &why, None);
         }
+    }
+
+    /// A schedule's workflow `wf_id` did not start: `why`.
+    fn fail_fired(&mut self, wf_id: &str, fired: &Fired, why: &str) {
+        self.wf_jobs.remove(wf_id);
+        self.append(
+            &fired.chat_id,
+            Message::reply("", None, Outcome::Failed(why.to_owned())),
+        );
+        self.end_fire(&fired.schedule_id, FireStatus::Failed, why, None);
     }
 
     /// A run in chat `sid` ended with `status`. If the chat is a fire's: a question the agent asked
@@ -1169,6 +1241,33 @@ mod tests {
             panic!("a reply");
         };
         assert!(text.contains("succeeded"), "{text}");
+        assert!(app.wf_jobs.is_empty() && app.firing.is_empty());
+
+        // Its steps run commands, which the agent now asks about: it waits before it starts, and
+        // with nobody here to answer (no window in a test) it does not start.
+        app.roster.current_mut().unwrap().approvals = crate::guard::Approvals {
+            on: true,
+            to: crate::guard::SendTo::Desktop,
+            tools: vec![crate::tools::SHELL.into()],
+        };
+        app.fire_due(START + 60);
+        let all = fires(&app, &s);
+        assert_eq!(all.len(), 2, "{all:?}");
+        let f = all.iter().find(|f| f.due_at == START + 60).unwrap();
+        assert_eq!(f.status, FireStatus::Failed, "{f:?}");
+        assert!(
+            f.note.contains("Needs your approval") && f.note.contains("Run commands"),
+            "{}",
+            f.note
+        );
+        assert_eq!(f.workflow_run_id, None);
+        let runs = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_workflow_runs(&wf.id, 5)
+            .unwrap();
+        assert_eq!(runs.len(), 1, "it never started");
         assert!(app.wf_jobs.is_empty() && app.firing.is_empty());
     }
     // ---- the tool

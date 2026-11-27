@@ -1744,7 +1744,7 @@ impl App {
     }
 
     /// Why saved workflow `wf` waits once before it starts, for an agent asking about `asking`.
-    fn workflow_asks(
+    pub(crate) fn workflow_asks(
         &self,
         wf: &Saved,
         asking: &[String],

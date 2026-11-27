@@ -170,8 +170,10 @@ says only that it waits.
 A workflow or script asks once, before it starts: a `run_workflow` or `script` call whose steps
 (and the steps of the workflows its `flow` steps run) use a chosen tool is held as `agent.ask`, its
 card naming those tools (`App::steps_held`; for a member, `delegate::flow_asks`). Allowed, it runs
-and its steps do not ask again; refused, it does not start. A workflow you start yourself, from its
-page or a schedule, does not ask: no agent chose to run it.
+and its steps do not ask again; refused, it does not start. A schedule that fires such a workflow waits the same way, by its
+agent's approvals: a card in the fire's chat and where the agent's approvals go; refused, or
+unanswered in time, the fire fails and the workflow never starts. A workflow you start from its
+page does not ask: you chose to run it.
 
 ## What you see
 
