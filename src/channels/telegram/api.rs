@@ -176,6 +176,9 @@ pub struct Chat {
     /// `private`, `group`, `supergroup` or `channel`.
     #[serde(rename = "type")]
     pub kind: String,
+    /// A group's or a channel's title.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -492,6 +495,16 @@ fn send_once(agent: &ureq::Agent, base: &str, token: &Token, out: &Out) -> Resul
         // Files go up on their own (`send_file`), not through the listener.
         Out::File { reply, .. } => {
             reply.answer(Err("Telegram sends files on their own".into()));
+            Ok(())
+        }
+        // How it went is the agent's to hear, not a failed message's.
+        Out::Tell { to, text, reply } => {
+            let say = Out::Say {
+                to: to.clone(),
+                text: text.clone(),
+                buttons: Vec::new(),
+            };
+            reply.answer(send(agent, base, token, &say).map_err(|e| e.to_string()));
             Ok(())
         }
         Out::Typing { to } | Out::Working { to, on: true, .. } => call::<bool>(

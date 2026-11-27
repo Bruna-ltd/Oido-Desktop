@@ -397,6 +397,9 @@ struct Job {
     routes: std::collections::HashMap<String, Route>,
     /// Whether it has saved workflows to run (`run_workflow`).
     flows: bool,
+    /// Why each of its workflows whose steps use a tool it chose to approve waits once before it
+    /// starts, by the workflow's name in lower case.
+    flow_asks: std::collections::HashMap<String, crate::guard::actions::Finding>,
     /// Stops this task.
     cancel: Arc<AtomicBool>,
 }
@@ -454,6 +457,17 @@ fn run_tool(job: &Job, call: &Call) -> String {
     format!("Error: there is no tool called {} for you.", call.name)
 }
 
+/// Why the member's `run_workflow` call waits once before the run starts: the workflow's steps use
+/// a tool it chose to approve.
+fn flow_asks(job: &Job, call: &Call) -> Option<crate::guard::actions::Finding> {
+    if call.name != tools::RUN_WORKFLOW {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&call.args).ok()?;
+    let name = v.get("name")?.as_str()?.trim().to_lowercase();
+    job.flow_asks.get(&name).cloned()
+}
+
 /// Runs one of the member's workflows: the run is started on the UI thread, where the workflows
 /// and their connections are, and this waits for its result. Stopping the task stops the run.
 fn run_workflow(job: &Job, call: &Call) -> String {
@@ -493,6 +507,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
         root: job.prep.shell_dir.clone(),
         home: dirs::home_dir(),
         blocked: job.prep.blocked.clone(),
+        ask: job.prep.ask.clone(),
     };
     // Its calls whose results are outside text, and what each is; and what it has in view now.
     let mut came_in: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -627,6 +642,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                 .map(|c| {
                     let (args, found) =
                         guard.review(&hidden, &c.name, &c.args, &place, in_view.as_deref());
+                    let found = found.or_else(|| flow_asks(job, &c));
                     (Call { args, ..c }, found)
                 })
                 .collect();
@@ -645,6 +661,7 @@ fn work(job: &Job, tell: &dyn Fn(Note)) -> Outcome {
                         &job.prep.asker,
                         &call.name,
                         &call.args,
+                        Some(&hidden),
                         f,
                         &job.cancel,
                     );
@@ -990,6 +1007,12 @@ impl App {
         let (server, tool) = crate::mcp::resolve(&self.mcp.servers, name)
             .filter(|(s, _)| s.enabled)
             .ok_or_else(|| crate::mcp::why_unavailable(&self.mcp.servers, name))?;
+        if let crate::mcp::Transport::Channel(kind) = server.transport {
+            return Err(format!(
+                "{} tools are used by the agent the person talks to, not by a team member",
+                kind.title()
+            ));
+        }
         if !server.is_extension() {
             return self.mcp_target_for(&server.id).map(|target| Route::Mcp {
                 server: server.id.clone(),
@@ -1073,7 +1096,10 @@ impl App {
             tools,
             limit: self.context_limit(&ModelRef::new(&prep.provider, &prep.model)),
             prep: crate::flows::Prep {
-                asker: self.asker(at, &member.name),
+                asker: self
+                    .asker(at, &member.name)
+                    .sending_to(member.approvals.on.then_some(member.approvals.to)),
+                ask: member.approvals.asking(),
                 ..prep
             },
             task,
@@ -1081,6 +1107,7 @@ impl App {
             trust_folder: member.trust_workdir,
             routes,
             flows: flows.is_some(),
+            flow_asks: self.workflows_asking(&member.id, &member.approvals.asking()),
             cancel: Arc::new(AtomicBool::new(false)),
         };
         Ok((run, job))
@@ -1627,6 +1654,98 @@ mod tests {
             "{}",
             given.brief
         );
+    }
+
+    #[test]
+    fn a_members_own_approvals_hold_its_calls_and_the_leads_do_not_pass_down() {
+        use crate::guard::{Approvals, SendTo};
+        let db = crate::testing::TempDb::new();
+        let (mut app, _seen) = crate::testing::app_with_server(&db, vec![]);
+        let lead = app.current().unwrap().clone();
+        let mut member = lead.clone();
+        let job = |app: &App, member: &Agent| {
+            app.member_job(
+                member,
+                &lead,
+                "s1",
+                Where::Chat("s1".into()),
+                "tidy the folder".into(),
+                None,
+                None,
+            )
+            .unwrap()
+            .1
+        };
+        app.roster.current_mut().unwrap().approvals = Approvals {
+            on: true,
+            to: SendTo::Telegram,
+            tools: vec![tools::SHELL.into()],
+        };
+        assert!(
+            job(&app, &member).prep.ask.is_empty(),
+            "the lead's are its own"
+        );
+        member.approvals = Approvals {
+            on: true,
+            to: SendTo::Desktop,
+            tools: vec![tools::SHELL.into()],
+        };
+        assert_eq!(job(&app, &member).prep.ask, [tools::SHELL]);
+        member.approvals.on = false;
+        assert!(job(&app, &member).prep.ask.is_empty(), "off: nothing waits");
+    }
+
+    #[test]
+    fn a_members_workflow_using_a_tool_it_approves_waits_once_before_it_starts() {
+        use crate::guard::{Approvals, SendTo};
+        let db = crate::testing::TempDb::new();
+        let (mut app, _seen) = crate::testing::app_with_server(&db, vec![]);
+        let lead = app.current().unwrap().clone();
+        let mut member = lead.clone();
+        let step = crate::workflow::definition::Step {
+            id: "s".into(),
+            kind: "tool".into(),
+            tool: Some(tools::SHELL.into()),
+            args: json!({"command": "ls"}).as_object().cloned(),
+            ..Default::default()
+        };
+        app.workflows.push(crate::workflow::Saved {
+            id: "w1".into(),
+            agent_id: member.id.clone(),
+            name: "Tidy Up".into(),
+            goal: "Tidies.".into(),
+            definition: crate::workflow::definition::Definition {
+                steps: vec![step],
+                ..Default::default()
+            },
+            created_at: now(),
+            published: None,
+        });
+        member.approvals = Approvals {
+            on: true,
+            to: SendTo::Desktop,
+            tools: vec![tools::SHELL.into()],
+        };
+        let job = app
+            .member_job(
+                &member,
+                &lead,
+                "s1",
+                Where::Chat("s1".into()),
+                "tidy".into(),
+                None,
+                None,
+            )
+            .unwrap()
+            .1;
+        let call = |name: &str| Call {
+            id: "c".into(),
+            name: tools::RUN_WORKFLOW.into(),
+            args: json!({"name": name}).to_string(),
+        };
+        let f = flow_asks(&job, &call("tidy up"));
+        assert!(f.is_some_and(|f| f.rule == "agent.ask" && f.why.contains("Run commands")));
+        assert!(flow_asks(&job, &call("something else")).is_none());
     }
 
     #[test]

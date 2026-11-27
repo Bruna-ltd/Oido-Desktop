@@ -10,6 +10,7 @@
 //! The rules come in packs, each switched on or off on the Guardrails screen (see [`Pack`]).
 
 pub mod actions;
+pub mod approvals;
 pub mod ask;
 pub mod blocked;
 mod gate;
@@ -24,6 +25,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use self::actions::Place;
+pub use self::approvals::{Approvals, SendTo};
 pub use self::blocked::Blocked;
 pub use self::intake::topics;
 pub use self::secrets::Hidden;
@@ -229,13 +231,17 @@ pub fn unattended(
     asker: &ask::Asker,
     name: &str,
     args: &str,
+    hidden: Option<&Hidden>,
     f: &actions::Finding,
     stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> (TripState, Option<String>) {
     if f.action == Action::Block || !asker.can_ask() {
         return (TripState::Blocked, Some(refused_unattended(f)));
     }
-    let state = asker.ask(name, &crate::tools::summary(name, args), f, stop);
+    let summary = crate::tools::summary(name, args);
+    // Without the work's secrets nothing can be masked, so nothing of the call leaves this computer.
+    let shown = hidden.map(|h| h.hide(&summary)).unwrap_or_default();
+    let state = asker.ask(name, &summary, &shown, f, stop);
     let told = (state != TripState::Allowed).then(|| {
         Trip {
             rule: f.rule.to_owned(),
@@ -255,6 +261,7 @@ pub fn title(rule: &str) -> &'static str {
         "secrets.off_machine" => "Sends a secret away",
         "taint.outside" => "Acts after reading outside text",
         "hook" => "A hook you set",
+        "agent.ask" => "Needs your approval",
         other => crate::connector::approvals::title(other).unwrap_or_else(|| actions::title(other)),
     }
 }
@@ -590,6 +597,7 @@ impl Guard {
         // Put back whatever was hidden, even if the pack was turned off since.
         let revealed = hidden.reveal_json(args);
         found.extend(blocked::check(name, &revealed, at, &self.blocked()));
+        found.extend(approvals::check(name, &at.ask));
         if self.on(Pack::Secrets) || !hidden.is_empty() {
             if let Some(unknown) = secrets::first_placeholder(&revealed) {
                 found.push(actions::Finding {
@@ -679,7 +687,6 @@ impl Guard {
 fn off_machine(name: &str) -> bool {
     name == crate::web::NAME
         || crate::connector::is_tool(name)
-        || name == crate::channels::SEND_FILE
         || crate::mcp::is_tool(name)
         || crate::tools::needs_typesafe(name)
 }
@@ -701,6 +708,7 @@ mod tests {
             root: PathBuf::from("/home/ada/project"),
             home: Some(PathBuf::from("/home/ada")),
             blocked: Vec::new(),
+            ask: Vec::new(),
         }
     }
 

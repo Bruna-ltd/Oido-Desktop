@@ -43,7 +43,7 @@ pub fn screen(s: &App, cx: &Cx<App>, k: &Kit) -> El {
     let shown: Vec<&Server> = m
         .servers
         .iter()
-        .filter(|x| !x.is_extension())
+        .filter(|x| !x.is_built_in())
         .filter(|x| {
             let target = x.target();
             let mut fields = vec![x.name.as_str(), target.as_str()];
@@ -290,7 +290,7 @@ fn server_card(s: &App, server: &Server, k: &Kit) -> El {
 fn server_tile(server: &Server, k: &Kit) -> El {
     match &server.transport {
         Transport::Http { url } => logo::tile(url, k),
-        Transport::Stdio { .. } | Transport::Extension { .. } => None,
+        Transport::Stdio { .. } | Transport::Extension { .. } | Transport::Channel(_) => None,
     }
     .unwrap_or_else(|| tile(&server.name, crate::providers::SERVER_COLOR, k))
 }

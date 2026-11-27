@@ -39,6 +39,9 @@ pub struct Agent {
     /// Folders and files no tool of this agent may reach, beside the ones blocked for every agent
     /// (see `guard::blocked`). Only you can change it, never an agent.
     pub blocked: Vec<crate::guard::Blocked>,
+    /// Tools it may use only with your go-ahead, and where that is asked for. Only you can change
+    /// it, never an agent.
+    pub approvals: crate::guard::Approvals,
     /// Other agents' workflows it may run too, by id, beside its own. Its own win a name clash.
     pub workflows: Vec<String>,
     /// For a team member: when its lead should hand it a task. The lead reads this to choose.
@@ -65,6 +68,7 @@ impl Agent {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            approvals: crate::guard::Approvals::default(),
             workflows: Vec::new(),
             description: String::new(),
             active: 0,
@@ -307,6 +311,9 @@ pub struct Form {
     pub skill_picker: crate::picker::MultiPicker,
     pub tool_picker: crate::picker::MultiPicker,
     pub workflow_picker: crate::picker::MultiPicker,
+    /// Tools that wait for your go-ahead, and where it is asked for.
+    pub approvals: crate::guard::Approvals,
+    pub approval_picker: crate::picker::MultiPicker,
 }
 
 impl Form {
@@ -336,6 +343,8 @@ impl Form {
             skill_picker: crate::picker::MultiPicker::default(),
             tool_picker: crate::picker::MultiPicker::default(),
             workflow_picker: crate::picker::MultiPicker::default(),
+            approvals: crate::guard::Approvals::default(),
+            approval_picker: crate::picker::MultiPicker::default(),
         }
     }
 
@@ -647,6 +656,7 @@ impl Roster {
         form.trust_workdir = a.trust_workdir;
         form.topics = TextEdit::new(a.channel_topics.join(", "));
         form.blocked = TextEdit::new(crate::guard::blocked::render(&a.blocked));
+        form.approvals = a.approvals.clone();
         form.description = TextEdit::new(a.description.clone());
         form.advanced = !(a.skills.is_empty()
             && a.tools.is_empty()
@@ -654,7 +664,8 @@ impl Roster {
             && a.workdir.is_none()
             && a.trust_workdir
             && a.channel_topics.is_empty()
-            && a.blocked.is_empty());
+            && a.blocked.is_empty()
+            && !a.approvals.on);
         form.name.focused = true;
         self.form = form;
         self.editing = Some(FormKind::Edit(t.clone()));
@@ -706,6 +717,11 @@ impl Roster {
         toggle(&mut self.form.workflows, id);
     }
 
+    /// Adds `name` to the tools that wait for your go-ahead, or takes it off.
+    pub fn toggle_approval_tool(&mut self, name: &str) {
+        toggle(&mut self.form.approvals.tools, name);
+    }
+
     /// Creates or saves, selects the result, and closes the form.
     pub fn submit(&mut self) -> Option<Target> {
         if !self.can_submit() {
@@ -728,6 +744,7 @@ impl Roster {
             a.trust_workdir = f.trust_workdir;
             a.channel_topics = crate::guard::topics(&f.topics.text);
             a.blocked = crate::guard::blocked::parse(&f.blocked.text);
+            a.approvals = f.approvals.clone();
             a.description = f.description.text.trim().to_owned();
         };
         let target = match kind {

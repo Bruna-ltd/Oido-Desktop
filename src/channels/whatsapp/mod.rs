@@ -31,7 +31,9 @@ use whatsapp_rust::wacore::poll::compute_option_hash;
 use whatsapp_rust::{PollVoteCiphertext, async_channel};
 use zeroize::Zeroizing;
 
-use super::{Allowlist, Button, Creds, Health, Heard, Kind, Link, Out, Person, Picture, Place};
+use super::{
+    Allowlist, Button, Creds, Health, Heard, Kind, Link, Logged, Out, Person, Picture, Place,
+};
 use crate::app::App;
 
 /// How often "typing…" is said again while a chat is busy (WhatsApp shows it for about 25 s).
@@ -340,6 +342,8 @@ async fn session(
     let client = handle.client();
     let mut polls: HashMap<String, Poll> = HashMap::new();
     let mut sent = Sent::default();
+    // Groups' titles, as they are learned.
+    let mut groups: HashMap<String, String> = HashMap::new();
     let mut typing = tokio::time::interval(TYPING_EVERY);
     let mut signed_in = false;
     let end = loop {
@@ -403,7 +407,7 @@ async fn session(
                     Event::Messages(batch) => {
                         let mut heard = Vec::new();
                         for m in batch.messages.iter() {
-                            if let Some(h) = hear(&client, m, allowlist, &polls, &sent).await {
+                            if let Some(h) = hear(&client, m, allowlist, &polls, &sent, &mut groups).await {
                                 heard.push(h);
                             }
                         }
@@ -469,6 +473,79 @@ fn writer(chat: &Jid, alt: Option<&Jid>) -> Option<Jid> {
     chat.is_pn().then_some(chat)
 }
 
+/// A message only to keep in the log: one in a group, or one the owner wrote in another chat
+/// from the phone. A file is noted by its name, never fetched. `groups` keeps groups' titles.
+async fn overheard(
+    client: &Arc<Client>,
+    m: &InboundMessage,
+    groups: &mut HashMap<String, String>,
+) -> Option<Heard> {
+    let source = &m.info.source;
+    let chat = source.chat.to_non_ad();
+    let id = chat.to_string();
+    // Status updates and channels are not chats.
+    if id.contains("broadcast") || id.ends_with("@newsletter") {
+        return None;
+    }
+    let base = m.message.get_base_message();
+    let image = base.image_message.as_option();
+    let document = base.document_message.as_option();
+    let text = m
+        .message
+        .text_content()
+        .map(str::to_owned)
+        .or_else(|| image.and_then(|i| i.caption.clone()))
+        .or_else(|| document.and_then(|d| d.caption.clone()))
+        .unwrap_or_default();
+    let file = match (image, document) {
+        (Some(_), _) => Some("a photo".to_owned()),
+        (None, Some(d)) => Some(d.file_name.clone().unwrap_or_else(|| "a file".to_owned())),
+        (None, None) => None,
+    };
+    if text.trim().is_empty() && file.is_none() {
+        return None;
+    }
+    let chat_name = if source.is_group {
+        match groups.get(&id) {
+            Some(title) => Some(title.clone()),
+            None => {
+                let title = client
+                    .groups()
+                    .get_metadata(&chat)
+                    .await
+                    .ok()
+                    .map(|g| g.subject)
+                    .filter(|t| !t.trim().is_empty());
+                if let Some(t) = &title {
+                    groups.insert(id.clone(), t.clone());
+                }
+                title
+            }
+        }
+    } else {
+        // The owner wrote to someone: the chat is theirs, named by its number.
+        Some(format!("+{}", chat.user))
+    };
+    let push_name = m.info.push_name.trim();
+    let sender_name = if source.is_from_me {
+        "You".to_owned()
+    } else if push_name.is_empty() {
+        source.sender.user.to_string()
+    } else {
+        push_name.to_owned()
+    };
+    Some(Heard::Overheard(Logged {
+        chat: id,
+        chat_name,
+        sender: source.sender.to_non_ad().to_string(),
+        sender_name,
+        at: m.info.timestamp.timestamp(),
+        text,
+        file,
+        msg_id: Some(m.info.id.to_string()),
+    }))
+}
+
 /// Whether a message the owner sent is one to hear: written in their own chat, and not by this
 /// device. What they write to others from the phone is theirs, not the agent's.
 fn owner_wrote_to_self(chat: &Jid, pn: Option<&Jid>, lid: Option<&Jid>, sent: bool) -> bool {
@@ -490,20 +567,25 @@ async fn hear(
     allowlist: &Allowlist,
     polls: &HashMap<String, Poll>,
     sent: &Sent,
+    groups: &mut HashMap<String, String>,
 ) -> Option<Heard> {
     let source = &m.info.source;
-    if source.is_group {
+    if source.is_from_me && sent.has(&m.info.id) {
+        // What this device sent: the agents' own words.
         return None;
+    }
+    if source.is_group {
+        return overheard(client, m, groups).await;
     }
     if source.is_from_me
         && !owner_wrote_to_self(
             &source.chat,
             client.pn().as_ref(),
             client.lid().as_ref(),
-            sent.has(&m.info.id),
+            false,
         )
     {
-        return None;
+        return overheard(client, m, groups).await;
     }
     let who = writer(&source.chat, source.sender_alt.as_ref())?;
     let id = who.to_string();
@@ -661,16 +743,19 @@ async fn send(
     match out {
         Out::Say { to, text, buttons } => {
             let to = jid(&to)?;
-            for part in format::render(&text) {
-                let done = client
-                    .send_message(to.clone(), wa::Message::text(part))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                sent.add(done.message_id);
-            }
+            say(client, &to, &text, sent).await?;
             if !buttons.is_empty() {
                 send_poll(client, &to, &buttons, polls, sent).await?;
             }
+            Ok(())
+        }
+        // How it went is the agent's to hear, not a failed message's.
+        Out::Tell { to, text, reply } => {
+            let said = match jid(&to) {
+                Ok(to) => say(client, &to, &text, sent).await,
+                Err(why) => Err(why),
+            };
+            reply.answer(said);
             Ok(())
         }
         Out::Typing { to } => client
@@ -709,6 +794,23 @@ async fn send(
             Ok(())
         }
     }
+}
+
+/// Sends `markdown` to `to`, as many messages as it takes.
+async fn say(
+    client: &Arc<Client>,
+    to: &Jid,
+    markdown: &str,
+    sent: &mut Sent,
+) -> Result<(), String> {
+    for part in format::render(markdown) {
+        let done = client
+            .send_message(to.clone(), wa::Message::text(part))
+            .await
+            .map_err(|e| e.to_string())?;
+        sent.add(done.message_id);
+    }
+    Ok(())
 }
 
 /// How a file shows in the chat.

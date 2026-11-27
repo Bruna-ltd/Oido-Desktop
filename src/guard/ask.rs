@@ -30,6 +30,10 @@ pub struct Waiting {
     pub tool: String,
     /// The call in a line (the command, the file).
     pub summary: String,
+    /// The same with the work's secrets as their placeholders: what may leave this computer.
+    pub shown: String,
+    /// Where its card also goes, when the agent that asks says so (see [`super::approvals`]).
+    pub send_to: Option<super::SendTo>,
     pub trip: Trip,
     answer: Sender<TripState>,
     /// The work's own stop: once set, nobody waits for the answer.
@@ -46,6 +50,8 @@ impl Waiting {
             from: from.to_owned(),
             tool: tool.to_owned(),
             summary: summary.to_owned(),
+            shown: summary.to_owned(),
+            send_to: None,
             trip,
             answer: mpsc::channel().0,
             stopped: Arc::new(AtomicBool::new(false)),
@@ -67,6 +73,7 @@ pub struct Asker {
     at: Option<Where>,
     from: String,
     post: Option<Post>,
+    send_to: Option<super::SendTo>,
 }
 
 impl std::fmt::Debug for Asker {
@@ -90,6 +97,7 @@ impl Asker {
             at: None,
             from: String::new(),
             post: None,
+            send_to: None,
         }
     }
 
@@ -99,16 +107,27 @@ impl Asker {
             at: Some(at),
             from: from.to_owned(),
             post: Some(Arc::new(post)),
+            send_to: None,
         }
     }
 
-    /// Puts the call `tool` (`summary` in a line), which broke the rule in `found`, to the person,
-    /// and waits for their answer: allowed, turned down, or unanswered in time. Stopping the work
-    /// (`stop`) ends the wait as turned down. With nobody to ask, it is turned down at once.
+    /// The same, its cards also sent where `to` says.
+    pub fn sending_to(self, to: Option<super::SendTo>) -> Asker {
+        Asker {
+            send_to: to,
+            ..self
+        }
+    }
+
+    /// Puts the call `tool` (`summary` in a line; `shown`, the same with secrets as placeholders),
+    /// which broke the rule in `found`, to the person, and waits for their answer: allowed, turned
+    /// down, or unanswered in time. Stopping the work (`stop`) ends the wait as turned down. With
+    /// nobody to ask, it is turned down at once.
     pub fn ask(
         &self,
         tool: &str,
         summary: &str,
+        shown: &str,
         found: &Finding,
         stop: &Arc<AtomicBool>,
     ) -> TripState {
@@ -122,6 +141,8 @@ impl Asker {
             from: self.from.clone(),
             tool: tool.to_owned(),
             summary: summary.to_owned(),
+            shown: shown.to_owned(),
+            send_to: self.send_to,
             trip: Trip {
                 rule: found.rule.to_owned(),
                 why: found.why.clone(),
@@ -169,6 +190,7 @@ impl App {
             body: "Needs your go-ahead to carry on.".to_owned(),
             chat,
         });
+        self.offer_waiting(&waiting);
         self.waiting.push(waiting);
     }
 
@@ -184,7 +206,7 @@ impl App {
         );
     }
 
-    fn answer_waiting(&mut self, id: &str, state: TripState) {
+    pub(crate) fn answer_waiting(&mut self, id: &str, state: TripState) {
         if let Some(i) = self.waiting.iter().position(|w| w.id == id) {
             let w = self.waiting.remove(i);
             // The work may have been stopped meanwhile; then nobody listens, which is fine.
@@ -257,7 +279,8 @@ mod tests {
         let mut app = App::new(None);
         let (posted, asker) = asking(Where::Chat("s1".into()));
         let stop = Arc::new(AtomicBool::new(false));
-        let worker = std::thread::spawn(move || asker.ask("shell", "sudo ls", &found(), &stop));
+        let worker =
+            std::thread::spawn(move || asker.ask("shell", "sudo ls", "sudo ls", &found(), &stop));
         let id = answered(&posted, &mut app);
         assert_eq!(app.waiting_at(&Where::Chat("s1".into())).count(), 1);
         assert_eq!(app.waiting_at(&Where::Chat("s2".into())).count(), 0);
@@ -274,7 +297,7 @@ mod tests {
         let worker = std::thread::spawn({
             let asker = asker.clone();
             let stop = Arc::clone(&stop);
-            move || asker.ask("shell", "sudo ls", &found(), &stop)
+            move || asker.ask("shell", "sudo ls", "sudo ls", &found(), &stop)
         });
         answered(&posted, &mut app);
         app.expire_waiting(crate::app::now() + 600, 600);
@@ -282,7 +305,7 @@ mod tests {
 
         let worker = std::thread::spawn({
             let stop = Arc::clone(&stop);
-            move || asker.ask("shell", "sudo ls", &found(), &stop)
+            move || asker.ask("shell", "sudo ls", "sudo ls", &found(), &stop)
         });
         answered(&posted, &mut app);
         stop.store(true, Ordering::Relaxed);
@@ -295,7 +318,7 @@ mod tests {
     fn with_nobody_to_ask_a_questioned_call_does_not_run() {
         let stop = Arc::new(AtomicBool::new(false));
         assert_eq!(
-            Asker::nobody().ask("shell", "sudo ls", &found(), &stop),
+            Asker::nobody().ask("shell", "sudo ls", "sudo ls", &found(), &stop),
             TripState::Denied
         );
     }

@@ -26,6 +26,8 @@ pub struct Place {
     pub home: Option<PathBuf>,
     /// The places the agent acting here has blocked for itself (see [`super::blocked`]).
     pub blocked: Vec<super::blocked::Blocked>,
+    /// The tools each call to which waits for your go-ahead (see [`super::approvals`]).
+    pub ask: Vec<String>,
 }
 
 struct Rule {
@@ -329,6 +331,7 @@ mod tests {
             root: PathBuf::from("/home/ada/project"),
             home: Some(PathBuf::from("/home/ada")),
             blocked: Vec::new(),
+            ask: Vec::new(),
         }
     }
 

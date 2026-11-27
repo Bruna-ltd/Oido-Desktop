@@ -3,7 +3,7 @@
 //! paired. See `src/channels`.
 
 use rune::{El, ScrollSpec, Tx, col, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Switch, TextInput};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Switch, TextInput};
 
 use super::logo;
 use super::settings::{section, section_with, setting};
@@ -27,6 +27,10 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         };
         if c.get(kind).connected() {
             rows.push(agents_row(s, kind, k, layer));
+            rows.push(log_row(s, kind, k));
+            if kind == Kind::Slack {
+                rows.push(slack_update_row(k));
+            }
         }
         page = page.child(section_with(
             kind.title(),
@@ -34,6 +38,9 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             rows,
             k,
         ));
+    }
+    if Kind::ALL.into_iter().any(|kind| c.get(kind).connected()) {
+        page = page.child(section("Approvals", vec![approvals_row(s, k)], k));
     }
     let pending: Vec<El> = Kind::ALL
         .into_iter()
@@ -135,6 +142,122 @@ fn agents_row(s: &App, kind: Kind, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(text(help).font(k.ty.caption()).color(k.c.text_muted).wrap()),
         )
         .child(super::multi_picker::build(s, k, layer, spec))
+}
+
+/// Where calls the guard holds for your go-ahead are also sent: nowhere, or one channel.
+fn approvals_row(s: &App, k: &Kit) -> El {
+    let help = match s.approver() {
+        Ok((kind, user)) => {
+            let name = s
+                .channels
+                .get(kind)
+                .users
+                .iter()
+                .find(|u| u.id == user)
+                .map_or(user.as_str(), |u| u.name.as_str());
+            format!(
+                "When the guard holds something an agent wants to do, {name} gets a card on {} to allow or refuse it{}. The first answer, there or here, decides.",
+                kind.title(),
+                if kind == Kind::WhatsApp {
+                    " by replying with its code"
+                } else {
+                    ""
+                }
+            )
+        }
+        Err(Some(why)) => why,
+        Err(None) => "Off: what the guard holds waits for you here.".to_owned(),
+    };
+    let options = ["Off", "Telegram", "Slack", "WhatsApp"];
+    let selected = match s.channels.approvals {
+        None => 0,
+        Some(Kind::Telegram) => 1,
+        Some(Kind::Slack) => 2,
+        Some(Kind::WhatsApp) => 3,
+    };
+    let control = SegmentedControl::new(&options, Some(selected))
+        .label("Send approvals to")
+        .fit()
+        .on_pick(|s: &mut App, i, _| {
+            let kind = match i {
+                1 => Some(Kind::Telegram),
+                2 => Some(Kind::Slack),
+                3 => Some(Kind::WhatsApp),
+                _ => None,
+            };
+            s.set_channel_approvals(kind);
+        })
+        .build(k)
+        .key("channel-approvals");
+    setting(
+        "channel-approvals-row",
+        "Send approvals to",
+        &help,
+        control,
+        k,
+    )
+}
+
+/// The log of what `kind` heard: how much is kept, and clearing it.
+fn log_row(s: &App, kind: Kind, k: &Kit) -> El {
+    let c = s.channels.get(kind);
+    let id = kind.as_str();
+    let kept = match c.logged {
+        0 => "Nothing kept yet.".to_owned(),
+        1 => "1 message kept.".to_owned(),
+        n => format!("{n} messages kept."),
+    };
+    let what = match kind {
+        Kind::Telegram => {
+            "Every message the bot gets, from anyone, and in groups it is in (all of a group's only with its privacy mode off in BotFather)"
+        }
+        Kind::Slack => "Every message the app gets, from anyone, and in channels it was added to",
+        Kind::WhatsApp => "Every message in every chat of the linked number, yours included",
+    };
+    let help = format!(
+        "{what}, kept on this computer for 30 days, words only. Agents given its Read messages tool can read it. {kept}"
+    );
+    let control = if c.confirm_clear {
+        row()
+            .gap(8.0)
+            .child(
+                button("Keep it")
+                    .variant(ButtonVariant::Ghost)
+                    .on_press(move |s: &mut App| s.channels.get_mut(kind).confirm_clear = false)
+                    .build(k)
+                    .key(format!("{id}-log-keep")),
+            )
+            .child(
+                button("Clear")
+                    .variant(ButtonVariant::Danger)
+                    .on_press(move |s: &mut App| s.clear_channel_log(kind))
+                    .build(k)
+                    .key(format!("{id}-log-clear-confirm")),
+            )
+    } else {
+        button("Clear…")
+            .variant(ButtonVariant::Outline)
+            .disabled(c.logged == 0)
+            .on_press(move |s: &mut App| s.channels.get_mut(kind).confirm_clear = true)
+            .build(k)
+            .key(format!("{id}-log-clear"))
+    };
+    setting(&format!("{id}-log"), "Message log", &help, control, k)
+}
+
+/// A Slack app made from an older manifest lacks what reading channels needs.
+fn slack_update_row(k: &Kit) -> El {
+    setting(
+        "slack-manifest-update",
+        "Keep the app up to date",
+        "Reading channels and listing the workspace need the newest manifest. If your app was made before, copy it, paste it under App Manifest at api.slack.com/apps, save, and reinstall the app.",
+        button("Copy manifest")
+            .variant(ButtonVariant::Outline)
+            .on_press_tx(|_: &mut App, tx: &mut Tx| tx.copy(slack::MANIFEST))
+            .build(k)
+            .key("slack-copy-manifest-again"),
+        k,
+    )
 }
 
 fn button(label: &str) -> Button {

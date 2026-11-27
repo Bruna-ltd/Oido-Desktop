@@ -254,7 +254,6 @@ pub fn is_job(name: &str) -> bool {
         || crate::connector::is_tool(name)
         || needs_typesafe(name)
         || crate::mcp::is_tool(name)
-        || name == crate::channels::SEND_FILE
 }
 
 /// Whether a tool waits for you (an answer, or a go-ahead) before its result exists.
@@ -268,7 +267,7 @@ pub fn summary(name: &str, args: &str) -> String {
         ASK => question(args).text,
         SHELL => crate::command::parse(args).map_or_else(|| args.to_owned(), |s| s.command),
         PROCESS => process_summary(args),
-        n if crate::files::is_file_tool(n) || n == crate::channels::SEND_FILE => {
+        n if crate::files::is_file_tool(n) || crate::channels::tools::sends_file(n) => {
             crate::files::path_of(args)
         }
         DELEGATE => crate::delegate::summary(args),
@@ -493,11 +492,9 @@ fn one_line(text: &str) -> String {
 }
 
 pub fn knows(name: &str) -> bool {
-    // `send_file` is offered only in chats carried on from Telegram; elsewhere it says so. The
-    // delegate and skill tools are offered only to agents with a team or skills.
+    // The delegate and skill tools are offered only to agents with a team or skills.
     name == DELEGATE
         || name == SKILL
-        || name == crate::channels::SEND_FILE
         || name == crate::onboarding::TIGHTEN
         || registered().iter().any(|t| t.name == name)
 }

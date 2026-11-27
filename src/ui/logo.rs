@@ -162,10 +162,16 @@ pub fn of(name: &'static str, logo: Logo, k: &Kit) -> El {
     sized(name, logo, SIDE, k)
 }
 
-/// The picture of the server whose tool is `tool` (`mcp__server__name`): an extension's, or a
-/// preset's. `None` for a built-in tool or a server with no picture of its own.
+/// The picture of the server whose tool is `tool` (`mcp__server__name`): a channel's, an
+/// extension's, or a preset's. `None` for a built-in tool or a server with no picture of its own.
 pub fn of_tool(tool: &str, side: f32, k: &Kit) -> Option<El> {
     let server = tool.strip_prefix(crate::mcp::PREFIX)?.split("__").next()?;
+    if let Some(kind) = crate::channels::Kind::ALL
+        .into_iter()
+        .find(|k| k.as_str() == server)
+    {
+        return Some(channel(kind, side));
+    }
     let (name, logo) = crate::extensions::ALL
         .iter()
         .find(|e| crate::extensions::id_of(**e) == server)

@@ -39,6 +39,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            approvals: crate::guard::Approvals::default(),
             workflows: Vec::new(),
             description: String::new(),
             active: 0,
@@ -117,6 +118,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            approvals: crate::guard::Approvals::default(),
             workflows: Vec::new(),
             description: String::new(),
             active: 0,
@@ -166,6 +168,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            approvals: crate::guard::Approvals::default(),
             workflows: Vec::new(),
             description: String::new(),
             active: 0,
@@ -187,6 +190,7 @@ pub fn sample_agents() -> Vec<Agent> {
             trust_workdir: true,
             channel_topics: Vec::new(),
             blocked: Vec::new(),
+            approvals: crate::guard::Approvals::default(),
             workflows: Vec::new(),
             description: String::new(),
             active: 0,
@@ -512,6 +516,8 @@ pub static SCENES: &[Scene] = &[
             agent: Some("atlas".into()),
             trusted: false,
         });
+        t.logged = 128;
+        s.channels.approvals = Some(crate::channels::Kind::Telegram);
         s.route = Route::Channels;
     }),
     ("channels-connect", |s| {
@@ -1195,6 +1201,16 @@ pub static SCENES: &[Scene] = &[
         load_samples(s);
         s.edit_agent(&Target::agent("atlas"));
         s.roster.form.advanced = true;
+    }),
+    ("agent-approvals", |s| {
+        load_samples(s);
+        s.edit_agent(&Target::agent("atlas"));
+        s.roster.form.advanced = true;
+        s.roster.form.approvals = crate::guard::Approvals {
+            on: true,
+            to: crate::guard::SendTo::Telegram,
+            tools: vec![crate::tools::SHELL.into(), crate::web::NAME.into()],
+        };
     }),
     // A brief far longer than the field: it stops growing and scrolls.
     ("agent-edit-long", |s| {

@@ -119,6 +119,11 @@ impl App {
                 .owner_of(sid)
                 .map(|a| a.blocked.clone())
                 .unwrap_or_default(),
+            ask: self
+                .roster
+                .owner_of(sid)
+                .map(|a| a.approvals.asking())
+                .unwrap_or_default(),
         }
     }
 
@@ -190,6 +195,25 @@ impl App {
     /// held for your go-ahead, and the others wait with it. Returns whether any is held.
     pub(crate) fn review_calls(&mut self, sid: &str, hidden: &Hidden) -> bool {
         let place = self.place_of(sid);
+        // A workflow or script whose steps use a tool the agent chose to approve waits once, here.
+        let steps: std::collections::HashMap<String, super::actions::Finding> = self
+            .roster
+            .owner_of(sid)
+            .and_then(|a| Some((a, a.sessions.iter().find(|s| s.id == sid)?)))
+            .and_then(|(agent, chat)| match chat.messages.last() {
+                Some(Message::Assistant { tools, .. }) => Some(
+                    tools
+                        .iter()
+                        .filter(|t| t.output.is_none() && t.trip.is_none())
+                        .filter_map(|t| {
+                            let f = self.steps_held(&agent.id, &t.name, &t.args, &place.ask)?;
+                            Some((t.id.clone(), f))
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
         let mut tripped: Vec<(String, String, Trip)> = Vec::new();
         let mut saved = None;
         if let Some(chat) = self
@@ -205,6 +229,7 @@ impl App {
             for t in waiting {
                 let outside = self.tainted.get(sid).map(String::as_str);
                 let (args, found) = self.guard.review(hidden, &t.name, &t.args, &place, outside);
+                let found = found.or_else(|| steps.get(&t.id).cloned());
                 if args != t.args {
                     t.summary = crate::tools::summary(&t.name, &args);
                     t.args = args;

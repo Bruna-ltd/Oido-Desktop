@@ -210,7 +210,7 @@ impl Worker {
             let (_, found) =
                 guard.review(&crate::guard::Hidden::default(), tool, args, place, outside);
             if let Some(f) = found {
-                let (state, told) = crate::guard::unattended(asker, tool, args, &f, stop);
+                let (state, told) = crate::guard::unattended(asker, tool, args, None, &f, stop);
                 notes.push((format!("{}: {state:?}", crate::guard::title(f.rule)), f.why));
                 if told.is_some() {
                     return told;
@@ -225,7 +225,7 @@ impl Worker {
                     why,
                     action: crate::guard::Action::Ask,
                 };
-                let (state, told) = crate::guard::unattended(asker, tool, args, &f, stop);
+                let (state, told) = crate::guard::unattended(asker, tool, args, None, &f, stop);
                 notes.push((format!("Hook: {state:?}"), f.why));
                 return told;
             }
@@ -1018,6 +1018,7 @@ mod tests {
                 root: tmp(),
                 home: None,
                 blocked: Vec::new(),
+                ask: Vec::new(),
             },
         )
     }

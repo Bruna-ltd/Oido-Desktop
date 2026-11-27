@@ -617,6 +617,7 @@ fn more_options(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             workdir_field(s, k, layer),
             topics_field(s, k),
             blocked_field(s, k, layer),
+            approvals_field(s, k, layer),
         ];
         let mut body = col().w_full().px(20.0).pb(20.0).gap(20.0);
         for (i, f) in fields.into_iter().enumerate() {
@@ -810,6 +811,106 @@ fn trust_field(s: &App, k: &Kit) -> El {
                 .on_toggle(move |s: &mut App| s.roster.form.trust_workdir = !on)
                 .build(k),
         )
+}
+
+/// The approvals block: tools each use of which waits for your go-ahead, and where that is asked.
+fn approvals_field(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    use crate::guard::SendTo;
+    let a = &s.roster.form.approvals;
+    let on = a.on;
+    let switch = row()
+        .key("approvals-on")
+        .w_full()
+        .gap(16.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text("Ask before it uses chosen tools")
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base),
+                )
+                .child(hint(
+                    "Each use of a tool chosen below waits for your go-ahead, on a card here and where approvals go. The guard's own rules still apply.",
+                    k,
+                )),
+        )
+        .child(
+            rune_kit::Switch::new(on)
+                .label("Ask before it uses chosen tools")
+                .hide_label()
+                .on_toggle(move |s: &mut App| s.roster.form.approvals.on = !on)
+                .build(k),
+        );
+    let mut out = col().w_full().gap(12.0).child(switch);
+    if !on {
+        return out;
+    }
+    let where_ = match (a.to, a.to.kind()) {
+        (_, Some(kind)) => s.approver_on(kind).map(|(kind, _)| kind),
+        (SendTo::Desktop, None) => Err(Some("Only the card here.".to_owned())),
+        _ => s.approver().map(|(kind, _)| kind).map_err(|why| {
+            why.or_else(|| Some("Channels sends approvals nowhere: only the card here.".into()))
+        }),
+    };
+    let said = match where_ {
+        Ok(kind) => format!("Cards also go to you on {}.", kind.title()),
+        Err(why) => why.unwrap_or_default(),
+    };
+    let labels: Vec<&str> = SendTo::ALL.iter().map(|t| t.label()).collect();
+    let selected = SendTo::ALL.iter().position(|t| *t == a.to);
+    out = out.child(
+        col()
+            .gap(6.0)
+            .child(
+                rune_kit::SegmentedControl::new(&labels, selected)
+                    .label("Ask where")
+                    .width(None)
+                    .on_pick(|s: &mut App, i, _| {
+                        s.roster.form.approvals.to = SendTo::ALL[i.min(SendTo::ALL.len() - 1)];
+                    })
+                    .build(k)
+                    .key("approvals-to"),
+            )
+            .child(hint(&said, k)),
+    );
+    let items = s
+        .all_tools()
+        .iter()
+        .filter(|t| t.name != crate::tools::ASK)
+        .filter(|t| crate::tools::is_builtin(&t.name) || s.roster.form.tools.contains(&t.name))
+        .map(|t| {
+            let shown = crate::tools::shown(&t.name, &s.mcp.servers);
+            Item {
+                name: t.name.clone(),
+                label: shown.label,
+                description: shown.about,
+                group: shown.group,
+            }
+        })
+        .collect();
+    out.child(super::multi_picker::build(
+        s,
+        k,
+        layer,
+        super::multi_picker::Spec {
+            key: "approval-tools",
+            title: "Tools that ask",
+            placeholder: "Choose tools",
+            noun: ("tool", "tools"),
+            none: "No tools.",
+            items,
+            chosen: a.tools.clone(),
+            get: |s| &s.roster.form.approval_picker,
+            edit: |s| &mut s.roster.form.approval_picker,
+            toggle: |s, name| s.roster.toggle_approval_tool(name),
+            single: false,
+            on_open: None,
+        },
+    ))
 }
 
 /// The tools block: the TypeSafe and MCP tools the agent may use. The app's own tools are every

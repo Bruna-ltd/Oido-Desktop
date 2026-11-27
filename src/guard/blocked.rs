@@ -150,7 +150,7 @@ pub fn check(name: &str, args: &str, at: &Place, global: &[Blocked]) -> Option<F
     let found = if name == crate::tools::SHELL {
         let command = value.get("command").and_then(Value::as_str)?;
         shell_words(command).iter().find_map(|w| hit(w, Act::Both))
-    } else if name == crate::files::READ || name == crate::channels::SEND_FILE {
+    } else if name == crate::files::READ || crate::channels::tools::sends_file(name) {
         let path = value.get("path").and_then(Value::as_str)?;
         hit(path, Act::Read)
     } else if name == crate::files::WRITE || name == crate::files::EDIT {
@@ -255,6 +255,7 @@ mod tests {
             root: root.to_owned(),
             home: Some(home.to_owned()),
             blocked: Vec::new(),
+            ask: Vec::new(),
         }
     }
 
@@ -305,7 +306,10 @@ mod tests {
         assert_eq!(r("read_file", "../.ssh/id_rsa"), Some("path.blocked"));
         assert_eq!(r("write_file", "private/a.txt"), None, "reading only");
         assert_eq!(r("read_file", "private/a.txt"), Some("path.blocked"));
-        assert_eq!(r("send_file", "private/a.txt"), Some("path.blocked"));
+        assert_eq!(
+            r("mcp__telegram__send_file", "private/a.txt"),
+            Some("path.blocked")
+        );
         assert_eq!(r("read_file", "src/lock.toml"), None, "changing only");
         assert_eq!(r("edit_file", "src/lock.toml"), Some("path.blocked"));
         assert_eq!(r("read_file", "src/main.rs"), None);

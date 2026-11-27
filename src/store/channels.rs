@@ -5,7 +5,7 @@ use rusqlite::OptionalExtension;
 use zeroize::Zeroizing;
 
 use super::{Result, Store};
-use crate::channels::{Binding, Kind, Paired};
+use crate::channels::{Binding, Kind, Logged, Paired};
 
 /// A connected bot as saved: what it signs in with, opened (as the channel writes it), its
 /// handle and whether it listens.
@@ -136,6 +136,68 @@ impl Store {
             .prepare_cached(self.sql(name)?)?
             .execute((kind.as_str(), agent))?;
         Ok(())
+    }
+
+    /// Keeps what `kind` heard. The same message (by its id) is kept once.
+    pub fn log_channel_message(&self, kind: Kind, m: &Logged) -> Result<()> {
+        self.conn
+            .prepare_cached(self.sql("InsertChannelLog")?)?
+            .execute((
+                kind.as_str(),
+                &m.chat,
+                &m.chat_name,
+                &m.sender,
+                &m.sender_name,
+                m.at,
+                &m.text,
+                &m.file,
+                &m.msg_id,
+            ))?;
+        Ok(())
+    }
+
+    /// What `kind` heard since `since`, newest first, at most `limit`.
+    pub fn channel_log(&self, kind: Kind, since: i64, limit: usize) -> Result<Vec<Logged>> {
+        let mut stmt = self.conn.prepare_cached(self.sql("ListChannelLog")?)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map((kind.as_str(), since, limit), |r| {
+            Ok(Logged {
+                chat: r.get(0)?,
+                chat_name: r.get(1)?,
+                sender: r.get(2)?,
+                sender_name: r.get(3)?,
+                at: r.get(4)?,
+                text: r.get(5)?,
+                file: r.get(6)?,
+                msg_id: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Forgets everything every channel heard before `before`.
+    pub fn purge_channel_log(&self, before: i64) -> Result<()> {
+        self.conn
+            .prepare_cached(self.sql("PurgeChannelLog")?)?
+            .execute([before])?;
+        Ok(())
+    }
+
+    /// Forgets everything `kind` heard.
+    pub fn clear_channel_log(&self, kind: Kind) -> Result<()> {
+        self.conn
+            .prepare_cached(self.sql("ClearChannelLog")?)?
+            .execute([kind.as_str()])?;
+        Ok(())
+    }
+
+    /// How many messages `kind` keeps.
+    pub fn channel_log_len(&self, kind: Kind) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .prepare_cached(self.sql("CountChannelLog")?)?
+            .query_row([kind.as_str()], |r| r.get(0))?;
+        Ok(usize::try_from(n).unwrap_or(0))
     }
 }
 
@@ -285,5 +347,44 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert_eq!(rows, [("telegram".to_owned(), "a".to_owned())]);
+    }
+
+    #[test]
+    fn what_a_channel_heard_is_kept_once_newest_first_until_purged_or_cleared() {
+        let s = mem();
+        let m = |chat: &str, at: i64, id: Option<&str>| Logged {
+            chat: chat.into(),
+            chat_name: Some("Family".into()),
+            sender: "1".into(),
+            sender_name: "Ada".into(),
+            at,
+            text: format!("at {at}"),
+            file: None,
+            msg_id: id.map(str::to_owned),
+        };
+        s.log_channel_message(T, &m("g", 10, Some("a"))).unwrap();
+        s.log_channel_message(T, &m("g", 10, Some("a"))).unwrap();
+        s.log_channel_message(T, &m("g", 20, None)).unwrap();
+        s.log_channel_message(T, &m("g", 30, None)).unwrap();
+        s.log_channel_message(Kind::Slack, &m("c", 40, Some("a")))
+            .unwrap();
+        assert_eq!(s.channel_log_len(T).unwrap(), 3, "the same message once");
+        let got: Vec<i64> = s
+            .channel_log(T, 15, 10)
+            .unwrap()
+            .iter()
+            .map(|l| l.at)
+            .collect();
+        assert_eq!(got, [30, 20]);
+        assert_eq!(s.channel_log(T, 0, 1).unwrap()[0], m("g", 30, None));
+        s.purge_channel_log(25).unwrap();
+        assert_eq!(s.channel_log_len(T).unwrap(), 1);
+        s.clear_channel_log(T).unwrap();
+        assert_eq!(s.channel_log_len(T).unwrap(), 0);
+        assert_eq!(
+            s.channel_log_len(Kind::Slack).unwrap(),
+            1,
+            "only that channel's"
+        );
     }
 }

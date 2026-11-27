@@ -10,14 +10,17 @@
 //! chat is over, what the agent wrote goes back to them, whoever wrote the message it answers,
 //! there or here; no desktop notification is raised for it.
 
+mod approve;
+mod log;
 mod mrkdwn;
 mod press;
 mod send;
 pub mod slack;
 pub mod telegram;
+pub mod tools;
 pub mod whatsapp;
 
-pub use send::{NAME as SEND_FILE, spec as send_file_spec};
+pub use log::Logged;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -180,6 +183,9 @@ pub enum Heard {
         data: String,
         message: Option<(Place, String)>,
     },
+    /// A message the channel saw that is not to the bot: in a group, a Slack channel, or another
+    /// of the linked WhatsApp number's chats. It is only kept in the log.
+    Overheard(Logged),
 }
 
 /// A button under a message: its label and what a press sends back.
@@ -197,6 +203,13 @@ pub enum Out {
         to: Place,
         text: String,
         buttons: Vec<Button>,
+    },
+    /// A message an agent sends with a channel tool, written in Markdown: how it went is answered
+    /// on `reply`, so the agent is told.
+    Tell {
+        to: Place,
+        text: String,
+        reply: Reply,
     },
     /// "typing…" for a few seconds, where the channel has it.
     Typing { to: Place },
@@ -394,6 +407,8 @@ pub struct Channel {
     pub picker: crate::picker::MultiPicker,
     /// Disconnecting waits for a second press.
     pub confirm_disconnect: bool,
+    /// Clearing the log waits for a second press.
+    pub confirm_clear: bool,
     /// How far each chat's messages have gone back.
     delivered: HashMap<String, usize>,
     /// Where each chat's person last wrote from, where its replies go.
@@ -405,6 +420,9 @@ pub struct Channel {
     next_group: u64,
     /// Drafts already offered with buttons, by their key.
     offered: HashSet<String>,
+    /// The held calls cards sent here answer by their code, by its number.
+    holds: HashMap<u64, approve::Hold>,
+    next_code: u64,
     link: Option<Link>,
     /// The open database's folder, where a channel keeps a session of its own (WhatsApp);
     /// `None` for a database in memory.
@@ -416,6 +434,8 @@ pub struct Channel {
     api: Option<String>,
     /// Counts links started, so what an old one hears or says is ignored.
     generation: u64,
+    /// How many messages its log keeps, for the Channels screen.
+    pub logged: usize,
     /// What was sent, in tests (no threads run there).
     #[cfg(test)]
     pub sent: Vec<Out>,
@@ -533,6 +553,10 @@ pub struct Channels {
     pub slack_app_token: TextEdit,
     pub slack_bot_token: TextEdit,
     pub whatsapp: Channel,
+    /// When the log was last cut to what is kept (see [`log::KEEP_SECS`]).
+    purged: i64,
+    /// The channel the guard's holds are sent to for your go-ahead, if any (see [`approve`]).
+    pub approvals: Option<Kind>,
 }
 
 impl Channels {
@@ -602,6 +626,9 @@ impl App {
         for kind in Kind::ALL {
             self.load_channel(kind);
         }
+        self.purge_channel_log(now());
+        self.load_channel_approvals();
+        self.rebuild_channel_servers();
     }
 
     fn load_channel(&mut self, kind: Kind) {
@@ -669,6 +696,7 @@ impl App {
         c.bot = Some(name);
         c.enabled = true;
         c.start(creds);
+        self.rebuild_channel_servers();
         true
     }
 
@@ -720,6 +748,7 @@ impl App {
         c.pending.clear();
         c.invite = None;
         c.confirm_disconnect = false;
+        self.rebuild_channel_servers();
     }
 
     /// Makes a new invite for `kind`, in place of the one on show.
@@ -889,6 +918,7 @@ impl App {
         c.bot = Some(name);
         c.enabled = true;
         c.status = Status::Listening;
+        self.rebuild_channel_servers();
     }
 
     pub(crate) fn channel_send_failed(&mut self, kind: Kind, generation: u64, why: String) {
@@ -922,13 +952,18 @@ impl App {
         }
         let at = now();
         for h in heard {
-            self.hear(kind, h, at);
+            self.log_heard(kind, &h, at);
+            if !matches!(h, Heard::Overheard(_)) {
+                self.hear(kind, h, at);
+            }
         }
     }
 
     /// Acts on what `kind` heard, at time `at`.
     fn hear(&mut self, kind: Kind, heard: Heard, at: i64) {
         let (from, sent) = match &heard {
+            // Only kept in the log (see `channel_heard`).
+            Heard::Overheard(_) => return,
             Heard::Press { from, .. } => (from.clone(), None),
             Heard::Message { from, at, .. } | Heard::Command { from, at, .. } => {
                 (from.clone(), Some(*at))
@@ -945,7 +980,7 @@ impl App {
         if self.channels.get(kind).user(&from.id).is_none() {
             let text = match &heard {
                 Heard::Message { text, .. } => text.as_str(),
-                Heard::Command { .. } | Heard::Press { .. } => "",
+                Heard::Command { .. } | Heard::Press { .. } | Heard::Overheard(_) => "",
             };
             if sent.is_some()
                 && !self.take_invite(kind, &from, text, at)
@@ -982,6 +1017,12 @@ impl App {
                 ..
             } => {
                 let text = text.trim();
+                if picture.is_none()
+                    && let Some(said) = self.answer_by_code(kind, &from.id, text)
+                {
+                    self.channels.get_mut(kind).say(&from.id, &said);
+                    return;
+                }
                 let mut prompt = Prompt::from(text);
                 if let Some(p) = picture {
                     let file = p
@@ -1009,6 +1050,7 @@ impl App {
                 }
                 self.channel_ask(kind, &from.id, &place, id, prompt);
             }
+            Heard::Overheard(_) => {}
         }
     }
 
@@ -1328,7 +1370,8 @@ impl App {
                 format!("{name} is still working. This goes next.")
             } else if self.holding_in(&sid) {
                 format!(
-                    "{name} waits for approval on the computer running Oido. This goes after it."
+                    "{name} waits for approval {}. This goes after it.",
+                    self.approved_where(&sid)
                 )
             } else {
                 format!("{name} waits for your answer first. This goes after it.")
@@ -1429,12 +1472,12 @@ impl App {
                 }),
             _ => None,
         });
-        // Something it asked to do waits for the owner's go-ahead, which is given in Oido only.
+        // Something it asked to do waits for the owner's go-ahead.
         if self.holding_in(sid) {
-            said.push(
-                "⏳ Something it wants to do needs approval on the computer running Oido first. It carries on once that is decided."
-                    .to_owned(),
-            );
+            said.push(format!(
+                "⏳ Something it wants to do needs approval {} first. It carries on once that is decided.",
+                self.approved_where(sid)
+            ));
         }
         let len = messages.len();
         // Told already (a turn can end twice when the run it started ended first): nothing new.
@@ -1495,8 +1538,9 @@ impl App {
             .map_or_else(|| "the person".to_owned(), |p| p.name.clone());
         let files = if self.channels.files_go(sid).is_some() {
             format!(
-                "a file you make reaches them only if you send it with `{}`",
-                send::NAME
+                "a file you make reaches them only if you send it with `mcp__{}__{}`",
+                kind.as_str(),
+                tools::SEND_FILE
             )
         } else {
             "files you make here do not reach them".to_owned()
@@ -1603,6 +1647,7 @@ mod tests {
         let open = app.current().unwrap().id.clone();
         app.channels.telegram.agents = vec![open];
         app.channels.telegram.bot = Some("oido_bot".into());
+        app.rebuild_channel_servers();
         write(&mut app, "hello?");
         app.approve_pairing(T, ADA);
         app.channels.telegram.sent.clear();
@@ -2349,9 +2394,12 @@ mod tests {
             &db,
             vec![
                 text_stream("hello"),
-                call_stream(SEND_FILE, json!({"path": "report.txt", "caption": "Here"})),
+                call_stream(
+                    TG_SEND_FILE,
+                    json!({"path": "report.txt", "caption": "Here"}),
+                ),
                 text_stream("Sent."),
-                call_stream(SEND_FILE, json!({"path": "../secret"})),
+                call_stream(TG_SEND_FILE, json!({"path": "../secret"})),
                 text_stream("Could not."),
             ],
         );
@@ -2366,7 +2414,9 @@ mod tests {
         let sid = bound(&app);
         app.roster.owner_of_mut(&sid).unwrap().workdir = Some(dir.display().to_string());
         assert!(
-            seen.recv().unwrap().contains("\"send_file\""),
+            seen.recv()
+                .unwrap()
+                .contains(&format!("\"{TG_SEND_FILE}\"")),
             "offered in a Telegram chat"
         );
 
@@ -2386,7 +2436,7 @@ mod tests {
         assert!(
             seen.recv()
                 .unwrap()
-                .contains("sent report.txt to them on telegram")
+                .contains("sent report.txt to ada on telegram")
         );
 
         write(&mut app, "and the secret");
@@ -2396,15 +2446,425 @@ mod tests {
     }
 
     #[test]
-    fn send_file_is_not_offered_outside_telegram_chats() {
+    fn channel_tools_are_not_offered_outside_channel_chats_unless_given() {
         let db = TempDb::new();
         let (mut app, seen) = app_with_server(&db, vec![(200, EVENTS, text_stream("hi"))]);
         app.composer.edit = TextEdit::new("hello");
         app.send();
-        assert!(!seen.recv().unwrap().contains("\"send_file\""));
+        assert!(!seen.recv().unwrap().contains("mcp__telegram__"));
+    }
+
+    /// A running Telegram link whose thread answers each message an agent sends with `answer`,
+    /// and passes on what it was told.
+    fn telling(app: &mut App, answer: Result<(), String>) -> Receiver<Out> {
+        let (tx, rx) = std::sync::mpsc::channel::<Out>();
+        let (told_tx, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for out in rx {
+                if let Out::Tell { reply, .. } = &out {
+                    reply.answer(answer.clone());
+                    let _ = told_tx.send(out);
+                }
+            }
+        });
+        app.channels.telegram.link = Some(Link::new(Arc::new(AtomicBool::new(false)), tx));
+        told
+    }
+
+    #[test]
+    fn an_agent_given_telegrams_tools_messages_the_owner_from_any_chat() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(TG_SEND_MESSAGE, json!({"text": "The report is ready."})),
+                text_stream("Told you."),
+            ],
+        );
+        app.set_person_trusted(T, ADA, true);
+        let told = telling(&mut app, Ok(()));
+        app.roster
+            .current_mut()
+            .unwrap()
+            .tools
+            .push(TG_SEND_MESSAGE.into());
+        app.composer.edit = TextEdit::new("tell me on Telegram when it is done");
+        app.send();
+        assert!(
+            seen.recv()
+                .unwrap()
+                .contains(&format!("\"{TG_SEND_MESSAGE}\""))
+        );
+        match told
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+        {
+            Out::Tell { to, text, .. } => {
+                assert_eq!(
+                    (to.chat.as_str(), text.as_str()),
+                    (ADA, "The report is ready.")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(seen.recv().unwrap().contains("sent to ada on telegram"));
+    }
+
+    #[test]
+    fn in_a_channel_chat_its_tools_reach_only_the_person_unless_the_agent_was_given_them() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                text_stream("hello"),
+                call_stream(
+                    TG_SEND_MESSAGE,
+                    json!({"to": "-100200300", "text": "hi all"}),
+                ),
+                text_stream("Could not."),
+            ],
+        );
+        app.set_person_trusted(T, ADA, true);
+        let _told = telling(&mut app, Ok(()));
+        write(&mut app, "hi");
+        assert!(
+            seen.recv()
+                .unwrap()
+                .contains(&format!("\"{TG_SEND_MESSAGE}\"")),
+            "offered in a Telegram chat"
+        );
+        write(&mut app, "post in the group");
+        let _ = seen.recv();
+        assert!(
+            seen.recv()
+                .unwrap()
+                .contains("reaches only the person you talk to")
+        );
+    }
+
+    #[test]
+    fn what_a_channel_hears_is_logged_from_anyone_and_read_back_by_an_agent_given_it() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(
+                    "mcp__telegram__read_messages",
+                    json!({"chat": "Launch team", "since": "1d"}),
+                ),
+                text_stream("Read."),
+            ],
+        );
+        let at = now();
+        app.channel_heard(
+            T,
+            app.channels.telegram.generation,
+            vec![Heard::Overheard(Logged {
+                chat: "-100".into(),
+                chat_name: Some("Launch team".into()),
+                sender: "7".into(),
+                sender_name: "Grace".into(),
+                at,
+                text: "ship it friday".into(),
+                file: None,
+                msg_id: Some("1".into()),
+            })],
+        );
+        assert!(
+            said(&mut app).is_empty(),
+            "a group's message is not answered"
+        );
+        assert_eq!(app.channels.telegram.logged, 1, "kept");
+        app.roster
+            .current_mut()
+            .unwrap()
+            .tools
+            .push("mcp__telegram__read_messages".into());
+        app.composer.edit = TextEdit::new("what did the launch team say?");
+        app.send();
+        let _ = seen.recv();
+        let told = seen.recv().unwrap();
+        assert!(
+            told.contains("launch team (chat id -100)") && told.contains("grace: ship it friday"),
+            "{told}"
+        );
+        app.clear_channel_log(T);
+        assert_eq!(app.channels.telegram.logged, 0);
+    }
+
+    /// The desktop chat in which a call waits for a go-ahead.
+    fn held(app: &App) -> String {
+        app.roster
+            .current()
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .find(|sid| app.holding_in(sid))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_held_call_goes_to_the_owner_on_the_approvals_channel_and_the_first_answer_decides() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(crate::tools::SHELL, json!({"command": "sudo true"})),
+                text_stream("Done."),
+            ],
+        );
+        assert_eq!(app.approver(), Err(None), "none chosen");
+        app.set_channel_approvals(Some(T));
+        assert!(app.approver().unwrap_err().unwrap().contains("trusted"));
+        app.set_person_trusted(T, ADA, true);
+        assert_eq!(db.open().channels.approvals, Some(T), "saved");
+        app.composer.edit = TextEdit::new("restart it");
+        app.send();
+        let _ = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let sid = held(&app);
+        let card = std::mem::take(&mut app.channels.telegram.sent)
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Say { to, text, buttons } if !buttons.is_empty() => Some((to, text, buttons)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(card.0, Place::private(ADA));
+        assert!(
+            card.1.contains("waits for your go-ahead") && card.1.contains("sudo true"),
+            "{}",
+            card.1
+        );
+        assert!(card.1.contains("Runs as administrator"), "{}", card.1);
+        assert!(
+            !card.1.contains("Reply **A"),
+            "buttons on Telegram, no codes"
+        );
+        let press = |app: &mut App, data: &str| {
+            app.hear(
+                T,
+                Heard::Press {
+                    from: from(ADA),
+                    id: "cb".into(),
+                    data: data.into(),
+                    message: None,
+                },
+                now(),
+            );
+            std::mem::take(&mut app.channels.telegram.sent)
+                .into_iter()
+                .find_map(|o| match o {
+                    Out::Answered { note, .. } => note,
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        assert!(press(&mut app, &card.2[0].data).starts_with("Allowed"));
+        assert!(!app.holding_in(&sid), "decided");
+        assert!(press(&mut app, &card.2[1].data).contains("no longer works"));
+    }
+
+    #[test]
+    fn on_whatsapp_a_held_call_is_answered_by_its_code_once() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    EVENTS,
+                    call_stream(crate::tools::SHELL, json!({"command": "sudo true"})),
+                ),
+                (200, EVENTS, text_stream("Done.")),
+            ],
+        );
+        let w = &mut app.channels.whatsapp;
+        w.bot = Some("+35799123456".into());
+        w.users.push(Paired {
+            id: ADA.into(),
+            name: "Ada".into(),
+            handle: None,
+            agent: None,
+            trusted: true,
+        });
+        app.set_channel_approvals(Some(Kind::WhatsApp));
+        app.composer.edit = TextEdit::new("restart it");
+        app.send();
+        let _ = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let sid = held(&app);
+        let card = std::mem::take(&mut app.channels.whatsapp.sent)
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Say { text, buttons, .. } if text.contains("go-ahead") => {
+                    Some((text, buttons))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            card.0
+                .contains("Reply **A1** to allow it, or **R1** to refuse."),
+            "{}",
+            card.0
+        );
+        assert!(card.1.is_empty(), "no buttons on WhatsApp");
+        let reply = |app: &mut App, text: &str| {
+            let at = now();
+            app.hear(Kind::WhatsApp, heard(ADA, text, at), at);
+            std::mem::take(&mut app.channels.whatsapp.sent)
+                .into_iter()
+                .filter_map(|o| match o {
+                    Out::Say { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(reply(&mut app, "r1").starts_with("Refused"));
+        assert!(!app.holding_in(&sid));
+        assert!(
+            !reply(&mut app, "A1").starts_with("Allowed"),
+            "a code works once; after that it is an ordinary message"
+        );
+    }
+
+    #[test]
+    fn an_agents_chosen_tools_wait_and_its_cards_go_where_it_says() {
+        use crate::guard::{Approvals, SendTo};
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(crate::tools::SHELL, json!({"command": "echo hi"})),
+                text_stream("Done."),
+            ],
+        );
+        app.set_person_trusted(T, ADA, true);
+        assert_eq!(
+            app.approver(),
+            Err(None),
+            "Channels sends approvals nowhere"
+        );
+        app.roster.current_mut().unwrap().approvals = Approvals {
+            on: true,
+            to: SendTo::Telegram,
+            tools: vec![crate::tools::SHELL.into()],
+        };
+        app.composer.edit = TextEdit::new("say hi");
+        app.send();
+        let _ = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let sid = held(&app);
+        let rule = messages(&app, &sid).iter().find_map(|m| match m {
+            Message::Assistant { tools, .. } => tools.iter().find_map(|t| t.trip.clone()),
+            _ => None,
+        });
+        assert_eq!(rule.map(|t| t.rule), Some("agent.ask".to_owned()));
+        let card = said(&mut app).join("\n");
+        assert!(
+            card.contains("waits for your go-ahead") && card.contains("Needs your approval"),
+            "sent on Telegram though Channels sends nowhere: {card}"
+        );
+        assert_eq!(app.approver_for(&sid).map(|(k, _)| k), Ok(T));
+
+        app.roster.current_mut().unwrap().approvals.to = SendTo::Desktop;
+        app.set_channel_approvals(Some(T));
+        assert_eq!(
+            app.approver_for(&sid),
+            Err(None),
+            "only here, whatever Channels says"
+        );
+        app.roster.current_mut().unwrap().approvals.on = false;
+        assert_eq!(
+            app.approver_for(&sid).map(|(k, _)| k),
+            Ok(T),
+            "off: as Channels says"
+        );
+    }
+
+    #[test]
+    fn a_team_members_held_call_goes_where_its_own_approvals_say_and_is_answered_there() {
+        use crate::guard::ask::{Waiting, Where};
+        use crate::guard::{SendTo, Trip, TripState};
+        let db = TempDb::new();
+        let (mut app, _seen) = paired(&db, vec![]);
+        app.set_person_trusted(T, ADA, true);
+        let trip = Trip {
+            rule: "agent.ask".into(),
+            why: "You chose to approve every use of this tool by this agent.".into(),
+            state: TripState::Asking,
+            asked_at: Some(now()),
+        };
+        let mut w = Waiting::demo(
+            Where::Chat("s1".into()),
+            "reviewer",
+            "shell",
+            "rm -rf build",
+            trip,
+        );
+        w.shown = "rm -rf build".into();
+        w.send_to = Some(SendTo::Telegram);
+        let id = w.id.clone();
+        app.offer_waiting(&w);
+        app.waiting.push(w);
+        let (text, buttons) = std::mem::take(&mut app.channels.telegram.sent)
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Say { text, buttons, .. } if !buttons.is_empty() => Some((text, buttons)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            text.contains("reviewer waits for your go-ahead") && text.contains("rm -rf build"),
+            "{text}"
+        );
+        app.hear(
+            T,
+            Heard::Press {
+                from: from(ADA),
+                id: "cb".into(),
+                data: buttons[1].data.clone(),
+                message: None,
+            },
+            now(),
+        );
+        assert!(app.waiting.iter().all(|w| w.id != id), "answered: refused");
+
+        // Nothing of the call leaves when it could not be masked; "only here" sends nothing.
+        let mut hidden = Waiting::demo(
+            Where::Chat("s1".into()),
+            "reviewer",
+            "shell",
+            "x",
+            Trip {
+                rule: "hook".into(),
+                why: "A hook asked.".into(),
+                state: TripState::Asking,
+                asked_at: Some(now()),
+            },
+        );
+        hidden.shown = String::new();
+        hidden.send_to = Some(SendTo::Telegram);
+        app.offer_waiting(&hidden);
+        let told = said(&mut app).join("\n");
+        assert!(
+            told.contains("shown on the computer running Oido"),
+            "{told}"
+        );
+        hidden.send_to = Some(SendTo::Desktop);
+        app.offer_waiting(&hidden);
+        assert!(said(&mut app).is_empty());
     }
 
     const S: Kind = Kind::Slack;
+    const TG_SEND_FILE: &str = "mcp__telegram__send_file";
+    const TG_SEND_MESSAGE: &str = "mcp__telegram__send_message";
 
     /// What Slack hears when Ada writes `text` at `place`, as message `id`.
     fn slack_heard(text: &str, place: Place, id: &str) -> Heard {

@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::format;
-use crate::channels::{Button, Out, Person, Place};
+use std::collections::HashMap;
+
+use crate::channels::{Button, Logged, Out, Person, Place};
 use crate::update::VERSION;
 
 pub const API: &str = "https://slack.com/api";
@@ -245,6 +247,135 @@ pub(super) fn person(agent: &ureq::Agent, base: &str, bot: &Secret, id: &str) ->
     }
 }
 
+/// A channel's title, by its id; `None` if Slack will not say (a direct message has none).
+pub(super) fn channel_name(
+    agent: &ureq::Agent,
+    base: &str,
+    bot: &Secret,
+    id: &str,
+) -> Option<String> {
+    call(
+        agent,
+        base,
+        bot,
+        "conversations.info",
+        &[("channel", id.to_owned())],
+    )
+    .ok()?
+    .get("channel")?
+    .get("name")?
+    .as_str()
+    .map(|n| format!("#{n}"))
+}
+
+/// The last `limit` messages of channel `id` (`title` names it) since `oldest`, newest first,
+/// with their writers' names: what Slack itself keeps, from before Oido heard them too.
+pub fn history(
+    base: &str,
+    bot: &Secret,
+    id: &str,
+    title: Option<&str>,
+    oldest: i64,
+    limit: usize,
+) -> Result<Vec<Logged>, Error> {
+    let agent = agent(Duration::from_secs(30));
+    let v = call(
+        &agent,
+        base,
+        bot,
+        "conversations.history",
+        &[
+            ("channel", id.to_owned()),
+            ("oldest", oldest.to_string()),
+            ("limit", limit.min(200).to_string()),
+        ],
+    )?;
+    let mut names: HashMap<String, String> = HashMap::new();
+    let s = |v: &Value| v.as_str().map(str::to_owned);
+    let mut out = Vec::new();
+    for m in v["messages"].as_array().into_iter().flatten() {
+        let (Some(user), Some(ts)) = (s(&m["user"]), s(&m["ts"])) else {
+            continue;
+        };
+        if m.get("subtype").is_some_and(|t| t != "file_share") {
+            continue;
+        }
+        let name = names
+            .entry(user.clone())
+            .or_insert_with(|| person(&agent, base, bot, &user).name)
+            .clone();
+        out.push(Logged {
+            chat: id.to_owned(),
+            chat_name: title.map(str::to_owned),
+            sender: user,
+            sender_name: name,
+            at: ts
+                .split('.')
+                .next()
+                .and_then(|t| t.parse().ok())
+                .unwrap_or(0),
+            text: s(&m["text"]).unwrap_or_default(),
+            file: s(&m["files"][0]["name"]),
+            msg_id: Some(ts),
+        });
+    }
+    Ok(out)
+}
+
+/// Who and where the bot can reach in the workspace.
+#[derive(Debug, Default)]
+pub struct Directory {
+    /// Its people: id, name, handle.
+    pub people: Vec<(String, String, String)>,
+    /// The channels the app is in: id, `#name`.
+    pub channels: Vec<(String, String)>,
+}
+
+/// Who and where the bot can reach in the workspace, at most 200 of each.
+pub fn directory(base: &str, bot: &Secret) -> Result<Directory, Error> {
+    let agent = agent(Duration::from_secs(30));
+    let s = |v: &Value| v.as_str().unwrap_or_default().to_owned();
+    let users = call(&agent, base, bot, "users.list", &[("limit", "200".into())])?;
+    let people = users["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|u| {
+            !u["deleted"].as_bool().unwrap_or(false)
+                && !u["is_bot"].as_bool().unwrap_or(false)
+                && u["id"] != "USLACKBOT"
+        })
+        .map(|u| {
+            let real = s(&u["real_name"]);
+            let name = if real.trim().is_empty() {
+                s(&u["name"])
+            } else {
+                real
+            };
+            (s(&u["id"]), name, s(&u["name"]))
+        })
+        .collect();
+    let list = call(
+        &agent,
+        base,
+        bot,
+        "conversations.list",
+        &[
+            ("types", "public_channel,private_channel".into()),
+            ("exclude_archived", "true".into()),
+            ("limit", "200".into()),
+        ],
+    )?;
+    let channels = list["channels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["is_member"].as_bool().unwrap_or(false))
+        .map(|c| (s(&c["id"]), format!("#{}", s(&c["name"]))))
+        .collect();
+    Ok(Directory { people, channels })
+}
+
 /// Fetches a file someone shared, from Slack's file host only, refusing one over
 /// [`MAX_PICTURE`]. What Slack hands back when the app cannot read files is a web page, so a web
 /// page is refused unless the file shared (`declared`, its type as Slack gave it) is one.
@@ -408,6 +539,19 @@ fn send_once(agent: &ureq::Agent, base: &str, bot: &Secret, out: &Out) -> Result
         // Files go up on their own (`send_file`), not through the listener.
         Out::File { reply, .. } => {
             reply.answer(Err("Slack sends files on their own".into()));
+            Ok(())
+        }
+        // How it went is the agent's to hear, not a failed message's.
+        Out::Tell { to, text, reply } => {
+            let posted = post(agent, base, bot, to, text, &[]);
+            let posted = match posted {
+                Err(Error::RetryAfter(s)) => {
+                    thread::sleep(Duration::from_secs(s.min(60)));
+                    post(agent, base, bot, to, text, &[])
+                }
+                other => other,
+            };
+            reply.answer(posted.map_err(|e| e.to_string()));
             Ok(())
         }
         Out::Working { to, message, on } => {

@@ -10,7 +10,10 @@
 /// Why the result of the tool `name` is outside text, in words for a trip card, or `None` when it
 /// is not. `trust_folder`: whether the agent's working folder counts as the person's own.
 pub fn result_source(name: &str, trust_folder: bool) -> Option<&'static str> {
-    if name == crate::tools::SCRIPT {
+    if crate::channels::tools::says_own(name) {
+        // How a send went, in the app's own words.
+        None
+    } else if name == crate::tools::SCRIPT {
         // What its steps read, web pages and servers among it, is in what it gives back.
         Some("a script's result")
     } else if name == crate::web::NAME || crate::connector::is_tool(name) {
@@ -39,7 +42,6 @@ pub fn acts(name: &str) -> bool {
         || name == crate::files::WRITE
         || name == crate::files::EDIT
         || name == crate::web::NAME
-        || name == crate::channels::SEND_FILE
         || name == crate::tools::RUN_WORKFLOW
         || name == crate::tools::SCRIPT
         || name == crate::tools::DELEGATE
@@ -80,7 +82,8 @@ mod tests {
             crate::files::WRITE,
             crate::files::EDIT,
             crate::web::NAME,
-            crate::channels::SEND_FILE,
+            "mcp__telegram__send_file",
+            "mcp__whatsapp__send_message",
             crate::tools::DELEGATE,
             crate::tools::RUN_WORKFLOW,
             crate::tools::SCRIPT,

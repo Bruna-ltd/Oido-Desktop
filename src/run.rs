@@ -523,9 +523,11 @@ impl App {
             tools,
             cache_key: Some(sid.clone()),
         };
-        // A chat carried on privately from a channel can send files there.
-        if let Some(kind) = self.channels.files_go(&sid) {
-            request.tools.push(crate::channels::send_file_spec(kind));
+        // A chat carried on from a channel can message its person there, and send files privately.
+        for tool in self.bound_channel_tools(&sid) {
+            if !request.tools.iter().any(|t| t.name == tool.name) {
+                request.tools.push(tool);
+            }
         }
         // Older tool results and pictures are trimmed from what is sent when it would come near the
         // model's limit; the chat keeps them. If that is not enough, the older messages are
@@ -1149,8 +1151,13 @@ impl App {
 
         // The calls it asked for run now, once the guard has looked at them: a risky one waits
         // for your go-ahead, and the others with it.
-        if status == Status::Ok && !self.review_calls(sid, &live.hidden) {
-            self.hook_then_dispatch(sid);
+        if status == Status::Ok {
+            if self.review_calls(sid, &live.hidden) {
+                // Held: you can answer on the channel approvals go to, as well as here.
+                self.offer_holds(sid, &live.hidden);
+            } else {
+                self.hook_then_dispatch(sid);
+            }
         }
         // Idle only if nothing it asked for is running: a command that began is still the agent
         // at work.
@@ -1539,10 +1546,6 @@ impl App {
         }
         if crate::mcp::is_tool(&name) {
             self.start_mcp_call(&sid, &id, &name, &args);
-            return true;
-        }
-        if name == crate::channels::SEND_FILE {
-            self.start_send_file(&sid, &id, &args);
             return true;
         }
         if name == crate::web::NAME {

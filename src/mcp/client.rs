@@ -256,8 +256,8 @@ fn reach<T>(
             http.open(ctl)?;
             op(&mut http, ctl)
         }
-        Transport::Extension { .. } => Err(Failure::other(
-            "an extension is called through its own page, not reached as a server",
+        Transport::Extension { .. } | Transport::Channel(_) => Err(Failure::other(
+            "a built-in tool set is called by the app itself, not reached as a server",
         )),
         Transport::Stdio { command, args } => {
             let local = local(target, command, args)?;
