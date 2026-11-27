@@ -293,21 +293,16 @@ impl App {
         };
         // Its steps using a tool the agent chose to approve, it waits for your go-ahead once, before
         // it starts, on a card in the fire's chat and where the agent's approvals go.
-        let Some((agent_name, approvals)) = self
-            .roster
-            .agent_ref(&s.agent_id)
-            .map(|a| (a.name.clone(), a.approvals.clone()))
-        else {
-            self.start_fired(&wf, &s.agent_id, fired);
-            return;
-        };
-        let Some(found) = self.workflow_asks(&wf, &approvals.asking()) else {
+        let Some((agent_name, to, found)) = self.roster.agent_ref(&s.agent_id).and_then(|a| {
+            let found = self.workflow_asks(&wf, &a.approvals.asking())?;
+            Some((a.name.clone(), a.approvals.to, found))
+        }) else {
             self.start_fired(&wf, &s.agent_id, fired);
             return;
         };
         let asker = self
             .asker(crate::guard::ask::Where::Chat(sid.to_owned()), &agent_name)
-            .sending_to(Some(approvals.to));
+            .sending_to(Some(to));
         let args = serde_json::json!({ "name": wf.name }).to_string();
         let stop = Arc::clone(&fired.cancel);
         let agent_id = s.agent_id.clone();
@@ -326,42 +321,39 @@ impl App {
 
     /// Starts a schedule's workflow `wf`, as `agent_id`, once nothing holds it.
     fn start_fired(&mut self, wf: &crate::workflow::Saved, agent_id: &str, fired: Fired) {
-        let Fired {
-            schedule_id,
-            started_by,
-            chat_id,
-            inputs,
-            cancel,
-        } = fired;
         let job = wf.id.clone();
-        let chat = chat_id.clone();
-        let schedule = schedule_id.clone();
-        let started = self.launch_flow(wf, agent_id, &inputs, &started_by, None, cancel, {
-            move |app, record, finish| {
-                app.wf_jobs.remove(&job);
-                let (crate::command::Finish::Done(text) | crate::command::Finish::Stopped(text)) =
-                    finish;
-                let (status, outcome) = match record.status {
-                    RunStatus::Succeeded => (FireStatus::Succeeded, Outcome::Done),
-                    RunStatus::Stopped => (FireStatus::Failed, Outcome::Stopped),
-                    _ => (FireStatus::Failed, Outcome::Failed(record.error.clone())),
-                };
-                let note = if status == FireStatus::Succeeded {
-                    ""
-                } else {
-                    text.as_str()
-                };
-                app.append(&chat, Message::reply(text.clone(), None, outcome));
-                app.end_fire(&schedule, status, note, Some(record.id.clone()));
-            }
-        });
+        let chat = fired.chat_id.clone();
+        let schedule = fired.schedule_id.clone();
+        let cancel = Arc::clone(&fired.cancel);
+        let started = self.launch_flow(
+            wf,
+            agent_id,
+            &fired.inputs,
+            &fired.started_by,
+            None,
+            cancel,
+            {
+                move |app, record, finish| {
+                    app.wf_jobs.remove(&job);
+                    let (crate::command::Finish::Done(text)
+                    | crate::command::Finish::Stopped(text)) = finish;
+                    let (status, outcome) = match record.status {
+                        RunStatus::Succeeded => (FireStatus::Succeeded, Outcome::Done),
+                        RunStatus::Stopped => (FireStatus::Failed, Outcome::Stopped),
+                        _ => (FireStatus::Failed, Outcome::Failed(record.error.clone())),
+                    };
+                    let note = if status == FireStatus::Succeeded {
+                        ""
+                    } else {
+                        text.as_str()
+                    };
+                    app.append(&chat, Message::reply(text.clone(), None, outcome));
+                    app.end_fire(&schedule, status, note, Some(record.id.clone()));
+                }
+            },
+        );
         if let Err(why) = started {
-            self.wf_jobs.remove(&wf.id);
-            self.append(
-                &chat_id,
-                Message::reply("", None, Outcome::Failed(why.clone())),
-            );
-            self.end_fire(&schedule_id, FireStatus::Failed, &why, None);
+            self.fail_fired(&wf.id, &fired, &why);
         }
     }
 
