@@ -44,11 +44,17 @@ pub(super) enum Action {
         sid: String,
         save: bool,
     },
+    /// A call the guard holds, allowed or refused (see [`super::approve`]).
+    Hold {
+        sid: String,
+        call: String,
+        allow: bool,
+    },
 }
 
 impl Channel {
     /// Buttons for `user`, one per choice, that work once between them.
-    fn buttons(&mut self, user: &str, choices: Vec<(String, Action)>) -> Vec<Button> {
+    pub(super) fn buttons(&mut self, user: &str, choices: Vec<(String, Action)>) -> Vec<Button> {
         self.next_group += 1;
         let group = self.next_group;
         choices
@@ -89,7 +95,7 @@ impl Channel {
 }
 
 /// `text` cut to `max` characters, with an ellipsis if it was cut.
-fn clip(text: &str, max: usize) -> String {
+pub(super) fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
     match text.char_indices().nth(max) {
         Some((i, _)) => format!("{}…", &text[..i]),
@@ -158,6 +164,7 @@ impl App {
                 self.press_workflow(kind, user, &sid, save);
                 None
             }
+            Action::Hold { sid, call, allow } => Some(self.decide_hold(&sid, &call, allow)),
         }
     }
 

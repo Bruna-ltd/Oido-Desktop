@@ -10,6 +10,7 @@
 //! chat is over, what the agent wrote goes back to them, whoever wrote the message it answers,
 //! there or here; no desktop notification is raised for it.
 
+mod approve;
 mod log;
 mod mrkdwn;
 mod press;
@@ -419,6 +420,9 @@ pub struct Channel {
     next_group: u64,
     /// Drafts already offered with buttons, by their key.
     offered: HashSet<String>,
+    /// The held calls cards sent here answer by their code, by its number.
+    holds: HashMap<u64, approve::Hold>,
+    next_code: u64,
     link: Option<Link>,
     /// The open database's folder, where a channel keeps a session of its own (WhatsApp);
     /// `None` for a database in memory.
@@ -551,6 +555,8 @@ pub struct Channels {
     pub whatsapp: Channel,
     /// When the log was last cut to what is kept (see [`log::KEEP_SECS`]).
     purged: i64,
+    /// The channel the guard's holds are sent to for your go-ahead, if any (see [`approve`]).
+    pub approvals: Option<Kind>,
 }
 
 impl Channels {
@@ -621,6 +627,7 @@ impl App {
             self.load_channel(kind);
         }
         self.purge_channel_log(now());
+        self.load_channel_approvals();
         self.rebuild_channel_servers();
     }
 
@@ -1010,6 +1017,12 @@ impl App {
                 ..
             } => {
                 let text = text.trim();
+                if picture.is_none()
+                    && let Some(said) = self.answer_by_code(kind, &from.id, text)
+                {
+                    self.channels.get_mut(kind).say(&from.id, &said);
+                    return;
+                }
                 let mut prompt = Prompt::from(text);
                 if let Some(p) = picture {
                     let file = p
@@ -1357,7 +1370,8 @@ impl App {
                 format!("{name} is still working. This goes next.")
             } else if self.holding_in(&sid) {
                 format!(
-                    "{name} waits for approval on the computer running Oido. This goes after it."
+                    "{name} waits for approval {}. This goes after it.",
+                    self.approved_where()
                 )
             } else {
                 format!("{name} waits for your answer first. This goes after it.")
@@ -1458,12 +1472,12 @@ impl App {
                 }),
             _ => None,
         });
-        // Something it asked to do waits for the owner's go-ahead, which is given in Oido only.
+        // Something it asked to do waits for the owner's go-ahead.
         if self.holding_in(sid) {
-            said.push(
-                "⏳ Something it wants to do needs approval on the computer running Oido first. It carries on once that is decided."
-                    .to_owned(),
-            );
+            said.push(format!(
+                "⏳ Something it wants to do needs approval {} first. It carries on once that is decided.",
+                self.approved_where()
+            ));
         }
         let len = messages.len();
         // Told already (a turn can end twice when the run it started ended first): nothing new.
@@ -2576,6 +2590,147 @@ mod tests {
         );
         app.clear_channel_log(T);
         assert_eq!(app.channels.telegram.logged, 0);
+    }
+
+    /// The desktop chat in which a call waits for a go-ahead.
+    fn held(app: &App) -> String {
+        app.roster
+            .current()
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .find(|sid| app.holding_in(sid))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_held_call_goes_to_the_owner_on_the_approvals_channel_and_the_first_answer_decides() {
+        let db = TempDb::new();
+        let (mut app, seen) = paired(
+            &db,
+            vec![
+                call_stream(crate::tools::SHELL, json!({"command": "sudo true"})),
+                text_stream("Done."),
+            ],
+        );
+        assert_eq!(app.approver(), Err(None), "none chosen");
+        app.set_channel_approvals(Some(T));
+        assert!(app.approver().unwrap_err().unwrap().contains("trusted"));
+        app.set_person_trusted(T, ADA, true);
+        assert_eq!(db.open().channels.approvals, Some(T), "saved");
+        app.composer.edit = TextEdit::new("restart it");
+        app.send();
+        let _ = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let sid = held(&app);
+        let card = std::mem::take(&mut app.channels.telegram.sent)
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Say { to, text, buttons } if !buttons.is_empty() => Some((to, text, buttons)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(card.0, Place::private(ADA));
+        assert!(
+            card.1.contains("waits for your go-ahead") && card.1.contains("sudo true"),
+            "{}",
+            card.1
+        );
+        assert!(card.1.contains("Runs as administrator"), "{}", card.1);
+        assert!(
+            !card.1.contains("Reply **A"),
+            "buttons on Telegram, no codes"
+        );
+        let press = |app: &mut App, data: &str| {
+            app.hear(
+                T,
+                Heard::Press {
+                    from: from(ADA),
+                    id: "cb".into(),
+                    data: data.into(),
+                    message: None,
+                },
+                now(),
+            );
+            std::mem::take(&mut app.channels.telegram.sent)
+                .into_iter()
+                .find_map(|o| match o {
+                    Out::Answered { note, .. } => note,
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        assert!(press(&mut app, &card.2[0].data).starts_with("Allowed"));
+        assert!(!app.holding_in(&sid), "decided");
+        assert!(press(&mut app, &card.2[1].data).contains("no longer works"));
+    }
+
+    #[test]
+    fn on_whatsapp_a_held_call_is_answered_by_its_code_once() {
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    EVENTS,
+                    call_stream(crate::tools::SHELL, json!({"command": "sudo true"})),
+                ),
+                (200, EVENTS, text_stream("Done.")),
+            ],
+        );
+        let w = &mut app.channels.whatsapp;
+        w.bot = Some("+35799123456".into());
+        w.users.push(Paired {
+            id: ADA.into(),
+            name: "Ada".into(),
+            handle: None,
+            agent: None,
+            trusted: true,
+        });
+        app.set_channel_approvals(Some(Kind::WhatsApp));
+        app.composer.edit = TextEdit::new("restart it");
+        app.send();
+        let _ = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let sid = held(&app);
+        let card = std::mem::take(&mut app.channels.whatsapp.sent)
+            .into_iter()
+            .find_map(|o| match o {
+                Out::Say { text, buttons, .. } if text.contains("go-ahead") => {
+                    Some((text, buttons))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            card.0
+                .contains("Reply **A1** to allow it, or **R1** to refuse."),
+            "{}",
+            card.0
+        );
+        assert!(card.1.is_empty(), "no buttons on WhatsApp");
+        let reply = |app: &mut App, text: &str| {
+            let at = now();
+            app.hear(Kind::WhatsApp, heard(ADA, text, at), at);
+            std::mem::take(&mut app.channels.whatsapp.sent)
+                .into_iter()
+                .filter_map(|o| match o {
+                    Out::Say { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(reply(&mut app, "r1").starts_with("Refused"));
+        assert!(!app.holding_in(&sid));
+        assert!(
+            !reply(&mut app, "A1").starts_with("Allowed"),
+            "a code works once; after that it is an ordinary message"
+        );
     }
 
     const S: Kind = Kind::Slack;

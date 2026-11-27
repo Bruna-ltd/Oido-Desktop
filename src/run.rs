@@ -1151,8 +1151,13 @@ impl App {
 
         // The calls it asked for run now, once the guard has looked at them: a risky one waits
         // for your go-ahead, and the others with it.
-        if status == Status::Ok && !self.review_calls(sid, &live.hidden) {
-            self.hook_then_dispatch(sid);
+        if status == Status::Ok {
+            if self.review_calls(sid, &live.hidden) {
+                // Held: you can answer on the channel approvals go to, as well as here.
+                self.offer_holds(sid, &live.hidden);
+            } else {
+                self.hook_then_dispatch(sid);
+            }
         }
         // Idle only if nothing it asked for is running: a command that began is still the agent
         // at work.

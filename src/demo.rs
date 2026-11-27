@@ -513,6 +513,7 @@ pub static SCENES: &[Scene] = &[
             trusted: false,
         });
         t.logged = 128;
+        s.channels.approvals = Some(crate::channels::Kind::Telegram);
         s.route = Route::Channels;
     }),
     ("channels-connect", |s| {

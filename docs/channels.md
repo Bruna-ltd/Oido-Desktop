@@ -233,6 +233,23 @@ Slack needs the newer manifest for this (`channels:history`, `channels:read`, `g
 app made before is updated by pasting the manifest under App Manifest and reinstalling; the
 Channels screen offers it again once connected.
 
+## Approvals on a channel
+
+A call the guard holds for your go-ahead (a risky action, or acting while outside text is in view;
+see `docs/guardrails.md`) can also be answered from a channel (`src/channels/approve.rs`). The
+Channels screen's **Send approvals to** picks Off, Telegram, Slack or WhatsApp (setting
+`channels.approvals`). Cards go to you: the one paired person marked trusted on that channel; with
+none, or several, none go and the screen says why.
+
+When a reply's calls are reviewed and one is held, each held call gets one card: the agent, the
+tool, what it does (cut to 300 characters) and why it waits, all masked with the chat's secret
+placeholders, so a hidden value never leaves the computer this way. On Telegram and Slack it has
+**Allow** and **Refuse** buttons; on WhatsApp it says to reply `A7` or `R7` (a code per card, good
+once, and only from you). The first answer, on the card or on the desktop, decides; a later one is
+told it was already decided. A card's buttons and codes live while the app runs, like other
+buttons. In a chat carried on from a channel, the person is told the call waits for the owner's
+approval on that channel or on the computer.
+
 ## Not yet
 
 - Voice notes (would need speech to text), video in, Telegram groups.
