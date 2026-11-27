@@ -165,7 +165,13 @@ member's work when a lead hands it a task: the member's own approvals, never the
 (`flows::Prep::ask`). A member's held call waits on its card in the lead's chat and is sent where
 the member's approvals say (or, while they are off, where the lead's chat sends them), masked with
 the member's secrets; a call a hook holds there has nothing to mask with, so its card on a channel
-says only that it waits. Workflow steps do not check it yet.
+says only that it waits.
+
+A workflow or script asks once, before it starts: a `run_workflow` or `script` call whose steps
+(and the steps of the workflows its `flow` steps run) use a chosen tool is held as `agent.ask`, its
+card naming those tools (`App::steps_held`; for a member, `delegate::flow_asks`). Allowed, it runs
+and its steps do not ask again; refused, it does not start. A workflow you start yourself, from its
+page or a schedule, does not ask: no agent chose to run it.
 
 ## What you see
 

@@ -98,7 +98,8 @@ pub(crate) struct Prep {
     /// The places its agent has blocked for itself, beside the guard's.
     pub blocked: Vec<crate::guard::Blocked>,
     /// The tools each call to which waits for a go-ahead: a team member's own (see
-    /// [`crate::guard::approvals`]); none for a workflow's steps.
+    /// [`crate::guard::approvals`]); none for a workflow's steps, since the run waited once before
+    /// it started.
     pub ask: Vec<String>,
     /// The MCP tools the workflow calls, each with how to reach its server.
     pub mcp: Vec<McpTool>,
@@ -1716,6 +1717,84 @@ impl App {
         ))
     }
 
+    /// The tools in `asking` that `def`'s steps call, and the steps of the workflows it runs, by
+    /// the names people know them by. `home` is the agent whose workflows its `flow` steps name.
+    fn picked_in(
+        &self,
+        home: &str,
+        own: Option<&str>,
+        def: &Definition,
+        asking: &[String],
+    ) -> Vec<String> {
+        if asking.is_empty() {
+            return Vec::new();
+        }
+        let mut used = crate::workflow::definition::tools_used(def);
+        for w in self.flow_closure(home, own, def).unwrap_or_default() {
+            used.extend(crate::workflow::definition::tools_used(&w.definition));
+        }
+        let mut picked: Vec<String> = Vec::new();
+        for t in used.iter().filter(|t| asking.contains(t)) {
+            let label = crate::tools::shown(t, &self.mcp.servers).label;
+            if !picked.contains(&label) {
+                picked.push(label);
+            }
+        }
+        picked
+    }
+
+    /// Why saved workflow `wf` waits once before it starts, for an agent asking about `asking`.
+    fn workflow_asks(
+        &self,
+        wf: &Saved,
+        asking: &[String],
+    ) -> Option<crate::guard::actions::Finding> {
+        crate::guard::approvals::steps_ask(&self.picked_in(
+            &wf.agent_id,
+            Some(&wf.id),
+            &wf.definition,
+            asking,
+        ))
+    }
+
+    /// Why `agent_id`'s `run_workflow` or `script` call waits once, before it starts: its steps use
+    /// tools in `asking`, the ones it chose to approve. None for any other call.
+    pub(crate) fn steps_held(
+        &self,
+        agent_id: &str,
+        name: &str,
+        args: &str,
+        asking: &[String],
+    ) -> Option<crate::guard::actions::Finding> {
+        if asking.is_empty() {
+            return None;
+        }
+        match name {
+            crate::tools::RUN_WORKFLOW => {
+                let (wf, _) = self.workflow_called(agent_id, args).ok()?;
+                self.workflow_asks(&wf, asking)
+            }
+            crate::tools::SCRIPT => {
+                let def = parse_script(args).ok()?;
+                crate::guard::approvals::steps_ask(&self.picked_in(agent_id, None, &def, asking))
+            }
+            _ => None,
+        }
+    }
+
+    /// Why each of `agent_id`'s workflows waits once before it starts, by its name in lower case,
+    /// for the ones whose steps use tools in `asking`.
+    pub(crate) fn workflows_asking(
+        &self,
+        agent_id: &str,
+        asking: &[String],
+    ) -> std::collections::HashMap<String, crate::guard::actions::Finding> {
+        self.workflows_for(agent_id)
+            .into_iter()
+            .filter_map(|w| Some((w.name.to_lowercase(), self.workflow_asks(w, asking)?)))
+            .collect()
+    }
+
     // ---- the Workflows page
 
     fn open_workflow(&self) -> Option<&Saved> {
@@ -2767,6 +2846,77 @@ mod tests {
             .list_workflow_runs(&w.id, 10)
             .unwrap();
         assert_eq!((runs.len(), runs[0].started_by.as_str()), (1, "agent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workflow_or_script_using_a_tool_the_agent_approves_waits_once_then_its_steps_run() {
+        use crate::guard::{Approvals, SendTo, TripState};
+        let db = TempDb::new();
+        let (mut app, seen) = app_with_server(
+            &db,
+            vec![
+                (
+                    200,
+                    EVENTS,
+                    call_stream("run_workflow", json!({"name": "say it"})),
+                ),
+                (200, EVENTS, text_stream("Done.")),
+            ],
+        );
+        app.roster.current_mut().unwrap().tools = vec![
+            crate::tools::RUN_WORKFLOW.into(),
+            crate::tools::SHELL.into(),
+        ];
+        app.roster.current_mut().unwrap().approvals = Approvals {
+            on: true,
+            to: SendTo::Desktop,
+            tools: vec![crate::tools::SHELL.into()],
+        };
+        save_workflow(
+            &mut app,
+            vec![tool_step("s", "echo ok-from-flow", "r")],
+            json!({}),
+        );
+        let me = app.current().unwrap().id.clone();
+        let script = json!({"steps": [{"id": "a", "kind": "tool", "tool": "shell", "args": {"command": "ls"}}]}).to_string();
+        let quiet = json!({"steps": [{"id": "a", "kind": "code", "script": "1 + 1"}]}).to_string();
+        let asking = [crate::tools::SHELL.to_owned()];
+        assert!(
+            app.steps_held(&me, crate::tools::SCRIPT, &script, &asking)
+                .is_some()
+        );
+        assert!(
+            app.steps_held(&me, crate::tools::SCRIPT, &quiet, &asking)
+                .is_none()
+        );
+        assert!(
+            app.steps_held(&me, crate::tools::SCRIPT, &script, &[])
+                .is_none()
+        );
+
+        app.composer.edit = TextEdit::new("do the thing");
+        app.send();
+        assert!(seen.recv().unwrap().contains("run_workflow"));
+        let held = match app.current().unwrap().chat().messages.last() {
+            Some(Message::Assistant { tools, .. }) => tools[0].clone(),
+            other => panic!("no call: {other:?}"),
+        };
+        let trip = held.trip.clone().unwrap();
+        assert_eq!(
+            (trip.rule.as_str(), trip.state),
+            ("agent.ask", TripState::Asking)
+        );
+        assert!(trip.why.contains("Run commands"), "{}", trip.why);
+        assert!(app.commands.is_empty(), "it has not started");
+
+        let sid = app.current().unwrap().chat().id.clone();
+        app.decide_trip(&sid, &held.id, true);
+        let second = seen.recv().unwrap();
+        assert!(
+            second.contains("succeeded") && second.contains("ok-from-flow"),
+            "its shell step ran without asking again: {second}"
+        );
     }
 
     #[cfg(unix)]

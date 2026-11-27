@@ -85,6 +85,20 @@ pub(super) fn check(name: &str, asking: &[String]) -> Option<Finding> {
     })
 }
 
+/// What holds a `run_workflow` or `script` call once, before it starts: its steps call `picked`,
+/// tools the agent chose to approve, named as people know them. Its steps then run without asking
+/// again for those.
+pub(crate) fn steps_ask(picked: &[String]) -> Option<Finding> {
+    (!picked.is_empty()).then(|| Finding {
+        rule: "agent.ask",
+        why: format!(
+            "Its steps use tools you chose to approve for this agent: {}. Allowing it lets them run.",
+            picked.join(", ")
+        ),
+        action: Action::Ask,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +116,17 @@ mod tests {
         assert!(check("shell", &asking).is_some_and(|f| f.action == Action::Ask));
         assert!(check("read_file", &asking).is_none());
         assert!(check(crate::tools::ASK, &asking).is_none());
+    }
+
+    #[test]
+    fn steps_that_use_a_chosen_tool_wait_once_and_name_it() {
+        assert!(steps_ask(&[]).is_none());
+        let f = steps_ask(&["Shell".into(), "Send message (Telegram)".into()]);
+        assert!(
+            f.as_ref()
+                .is_some_and(|f| f.action == Action::Ask && f.rule == "agent.ask")
+        );
+        assert!(f.is_some_and(|f| f.why.contains("Shell, Send message (Telegram)")));
     }
 
     #[test]
