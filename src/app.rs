@@ -121,6 +121,10 @@ pub struct App {
     pub route_bulk: bool,
     pub routing: std::collections::HashSet<String>,
     pub bulk: std::collections::HashSet<String>,
+    /// Whether messages are planned (Settings), and the chats a plan is being made or run in, with
+    /// the flag that stops each (see `plan::chat`).
+    pub plan_on: bool,
+    pub planning: std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Summaries opened in a chat, by chat and position.
     pub summaries_open: std::collections::HashSet<(String, usize)>,
     /// Replies whose thinking you opened or closed yourself, by chat and position: open or not.
@@ -381,6 +385,8 @@ impl App {
             route_bulk: persist::route_bulk(store.as_ref()),
             routing: std::collections::HashSet::new(),
             bulk: std::collections::HashSet::new(),
+            plan_on: persist::plan_on(store.as_ref()),
+            planning: std::collections::HashMap::new(),
             summaries_open: std::collections::HashSet::new(),
             thinking_open: std::collections::HashMap::new(),
             viewing: None,

@@ -24,6 +24,7 @@ pub const ROUTE_BULK: &str = "router.bulk";
 pub const SCORE_RUNS: &str = "runs.score";
 /// Agents' own choices about that, by agent id (ADR-8).
 pub const SCORE_AGENTS: &str = "runs.score.agents";
+pub const PLAN: &str = "plan.on";
 const PANES: &str = "panes";
 const SIDEBAR_FOLDS: &str = "sidebar.folds";
 const ONBOARDED: &str = "onboarding.done";
@@ -123,6 +124,20 @@ pub fn score_runs(store: Option<&Store>) -> bool {
     db.setting::<bool>(SCORE_RUNS)
         .unwrap_or_else(|e| {
             eprintln!("oido: could not read the run scoring setting: {e}");
+            None
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a message that takes several steps is planned first (Settings → Context). Off unless
+/// turned on.
+pub fn plan_on(store: Option<&Store>) -> bool {
+    let Some(db) = store else {
+        return false;
+    };
+    db.setting::<bool>(PLAN)
+        .unwrap_or_else(|e| {
+            eprintln!("oido: could not read the planning setting: {e}");
             None
         })
         .unwrap_or(false)

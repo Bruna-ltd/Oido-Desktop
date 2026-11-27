@@ -759,6 +759,13 @@ impl Crew {
         self.job.prep.asker = asker.clone();
     }
 
+    /// The same member with no tools, for a task that is only thinking and answering.
+    pub(crate) fn without_tools(&self) -> Crew {
+        let mut crew = self.clone();
+        crew.job.tools.clear();
+        crew
+    }
+
     /// Does `task`, with `outside` the outside text it came from, if any. Blocks; `cancel` stops
     /// it.
     pub(crate) fn take(
@@ -1125,6 +1132,25 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// The agent of chat `sid`, ready to take tasks itself one after another, with no one there to
+    /// ask. Its runs are filed under the chat. Used by plans (see `plan::chat`).
+    pub(crate) fn crew_of(&self, sid: &str) -> Result<Crew, String> {
+        let agent = self.roster.owner_of(sid).ok_or("That chat is gone.")?;
+        let (_, job) = self.member_job(
+            agent,
+            agent,
+            sid,
+            Where::Chat(sid.to_owned()),
+            String::new(),
+            None,
+            None,
+        )?;
+        Ok(Crew {
+            name: agent.name.clone(),
+            job,
+        })
     }
 
     /// Records a task a workflow handed over, as a run of its own.

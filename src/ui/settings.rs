@@ -36,7 +36,7 @@ pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(section("Schedules", vec![schedules_row(s, k)], k))
                 .child(section(
                     "Context",
-                    vec![router_row(s, k), score_row(s, k)],
+                    vec![router_row(s, k), score_row(s, k), plan_row(s, k)],
                     k,
                 ))
                 .child(section("Browser", browser_rows(s, k), k))
@@ -256,6 +256,20 @@ fn score_row(s: &App, k: &Kit) -> El {
             .label("Spot runs worth a skill")
             .hide_label()
             .on_toggle(|s: &mut App| s.set_score_runs(!s.score_runs))
+            .build(k),
+        k,
+    )
+}
+
+fn plan_row(s: &App, k: &Kit) -> El {
+    setting(
+        "plan-on",
+        "Plan multi-step requests",
+        "In an agent that has a working folder, TypeSafe judges each message you send. A request that takes several steps is planned first, the steps run one after another, and the plan is kept in the folder's .oido folder. While a plan is open, your next message is placed against it. Needs TypeSafe connected; your message goes to TypeSafe.",
+        Switch::new(s.plan_on)
+            .label("Plan multi-step requests")
+            .hide_label()
+            .on_toggle(|s: &mut App| s.set_plan_on(!s.plan_on))
             .build(k),
         k,
     )
