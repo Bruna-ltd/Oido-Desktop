@@ -248,6 +248,9 @@ pub struct App {
     pub agent_drafts: Vec<crate::agent_tool::Draft>,
     /// Why approving an agent draft did not go through, by the draft's tool call.
     pub agent_draft_notice: Option<(String, String)>,
+    /// Why the saved data could not be opened or read, when it could not: the app then runs on
+    /// nothing saved, leaving the file as it was, and says so instead of looking empty.
+    pub data_error: Option<String>,
     /// The Schedules page.
     pub schedule_page: crate::schedules::Page,
     /// The channels (Telegram): each one's bot, the people paired with it and their chats.
@@ -314,9 +317,13 @@ pub fn now() -> i64 {
 }
 
 pub fn init() -> App {
-    let store = Store::open_default()
-        .map_err(|e| eprintln!("oido: running without saved data: {e}"))
-        .ok();
+    let (store, open_error) = match Store::open_default() {
+        Ok(db) => (Some(db), None),
+        Err(e) => {
+            eprintln!("oido: running without saved data: {e}");
+            (None, Some(e.to_string()))
+        }
+    };
     if let Some(db) = &store
         && let Err(e) = db.tidy_runs(now(), crate::runs::KEEP_SECS)
     {
@@ -327,7 +334,9 @@ pub fn init() -> App {
     {
         eprintln!("oido: could not tidy old workflow runs: {e}");
     }
-    App::new(store)
+    let mut app = App::new(store);
+    app.data_error = app.data_error.take().or(open_error);
+    app
 }
 
 impl App {
@@ -354,7 +363,7 @@ impl App {
     }
 
     pub fn new(store: Option<Store>) -> App {
-        let (store, roster, providers) = persist::load(store);
+        let (store, roster, providers, data_error) = persist::load(store);
         let look = crate::theme::Look::load(persist::appearance(store.as_ref()));
         let skills_dir = crate::skills::dir();
         let route = if persist::needs_onboarding(store.as_ref(), &providers) {
@@ -457,6 +466,7 @@ impl App {
             proposals: Vec::new(),
             agent_drafts: Vec::new(),
             agent_draft_notice: None,
+            data_error,
             schedule_page: crate::schedules::Page::default(),
             channels: crate::channels::Channels::default(),
             guard: crate::guard::Guard::load(store.as_ref()),
@@ -568,12 +578,20 @@ impl App {
             .unwrap_or_default();
     }
 
+    /// Opens the form for a new agent. Not while the saved data is unreadable: nothing made then
+    /// would be saved.
     pub fn new_agent(&mut self) {
+        if self.data_error.is_some() {
+            return;
+        }
         self.roster.open_new();
         self.route = Route::AgentForm;
     }
 
     pub fn new_member(&mut self, parent: &str) {
+        if self.data_error.is_some() {
+            return;
+        }
         self.roster.open_member(parent);
         self.route = if self.roster.editing.is_some() {
             Route::AgentForm
@@ -948,6 +966,14 @@ mod tests {
             db.open().roster.list.is_empty(),
             "and it stays that way on the next launch"
         );
+    }
+
+    #[test]
+    fn no_agent_is_started_while_the_saved_data_is_unreadable() {
+        let mut app = App::new(None);
+        app.data_error = Some("this data was made by a newer version".to_owned());
+        app.new_agent();
+        assert!(app.roster.editing.is_none() && app.route != Route::AgentForm);
     }
 
     #[test]

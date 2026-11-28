@@ -3151,6 +3151,7 @@ dependencies = [
  "qrcode",
  "regex",
  "rhai",
+ "ring",
  "roxmltree 0.21.2",
  "rune",
  "rune-kit",

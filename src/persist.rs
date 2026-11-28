@@ -41,16 +41,17 @@ struct Folds {
 /// providers (written once, so deleting all of it stays deleted).
 ///
 /// When the saved data cannot be read, the store is handed back as `None`: the app runs without
-/// saving, since every save from the empty state it starts with would overwrite what is there.
-pub fn load(store: Option<Store>) -> (Option<Store>, Roster, Providers) {
+/// saving, since every save from the empty state it starts with would overwrite what is there,
+/// and the reason comes back with it for the app to show.
+pub fn load(store: Option<Store>) -> (Option<Store>, Roster, Providers, Option<String>) {
     let Some(db) = store else {
-        return (None, Roster::new(), providers::init());
+        return (None, Roster::new(), providers::init(), None);
     };
     match try_load(&db) {
-        Ok((roster, providers)) => (Some(db), roster, providers),
+        Ok((roster, providers)) => (Some(db), roster, providers, None),
         Err(e) => {
             eprintln!("oido: could not read saved data, running without saving so it is kept: {e}");
-            (None, Roster::new(), providers::init())
+            (None, Roster::new(), providers::init(), Some(e.to_string()))
         }
     }
 }

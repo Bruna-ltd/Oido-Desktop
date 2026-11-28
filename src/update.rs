@@ -1,9 +1,14 @@
 //! Versions and updates: which version this is, asking GitHub for the newest release, and putting
 //! its binary in place of this one so the next launch runs it.
 //!
-//! A release is a GitHub release tagged `vX.Y.Z` with two files for each machine:
-//! `oido-desktop-<arch>-linux` and `oido-desktop-<arch>-linux.sha256` (`sha256sum`'s output).
-//! `scripts/release.sh` makes one. The binary is replaced by a rename in its own folder, so a
+//! A release is a GitHub release tagged `vX.Y.Z` with, for each machine, `oido-desktop-<arch>-linux`
+//! and `oido-desktop-<arch>-linux.sig`: an Ed25519 signature, by the key whose public half is
+//! `scripts/release.pub`, of `oido-desktop <version> <the binary's SHA-256 in hex>`. Signing the
+//! version with the binary means an older signed binary cannot be passed off under a newer tag.
+//! GitHub serving the files is not trusted: only the key is. `scripts/release.sh` makes one (with
+//! a `.sha256` beside it, which apps from before signing check).
+//!
+//! The binary is replaced by a rename in its own folder, so a
 //! running app keeps its old file and a failed download never leaves half a binary behind.
 
 use std::fmt;
@@ -13,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -29,6 +35,10 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// A download larger than this is refused (a release binary is about 50 MB).
 const MAX_BINARY: u64 = 400 * 1024 * 1024;
+/// The public half of the key releases are signed with, in hex.
+const RELEASE_KEY: &str = include_str!("../scripts/release.pub");
+/// An Ed25519 signature's length.
+const SIGNATURE_LEN: u64 = 64;
 
 /// A release version, `major.minor.patch`, ordered as numbers.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -65,12 +75,12 @@ impl fmt::Display for Version {
     }
 }
 
-/// The newest release, and where its binary for this machine and that binary's checksum are.
+/// The newest release, and where its binary for this machine and that binary's signature are.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Release {
     pub version: Version,
     binary: String,
-    checksum: String,
+    signature: String,
 }
 
 /// Where automatic and asked-for updates stand.
@@ -168,7 +178,7 @@ fn newer() -> Result<Option<Release>, String> {
     Ok(latest()?.filter(|r| r.version > current))
 }
 
-/// The release in GitHub's `releases/latest` answer, if it has `asset` and its checksum.
+/// The release in GitHub's `releases/latest` answer, if it has `asset` and its signature.
 fn parse_release(json: &str, asset: &str) -> Result<Option<Release>, String> {
     #[derive(Deserialize)]
     struct Answer {
@@ -190,19 +200,21 @@ fn parse_release(json: &str, asset: &str) -> Result<Option<Release>, String> {
             .find(|a| a.name == name)
             .map(|a| a.browser_download_url.clone())
     };
-    let sum = format!("{asset}.sha256");
-    Ok(url(asset).zip(url(&sum)).map(|(binary, checksum)| Release {
-        version,
-        binary,
-        checksum,
-    }))
+    let sig = format!("{asset}.sig");
+    Ok(url(asset)
+        .zip(url(&sig))
+        .map(|(binary, signature)| Release {
+            version,
+            binary,
+            signature,
+        }))
 }
 
-/// Downloads `release`, checks it against its checksum, and puts it in place of `exe`.
+/// Downloads `release`, checks its signature, and puts it in place of `exe`.
 ///
 /// # Errors
 ///
-/// The download, a checksum that does not match, or a binary that cannot be replaced (one
+/// The download, a signature that does not hold, or a binary that cannot be replaced (one
 /// installed by a package manager, say), in words.
 fn install(release: &Release, exe: &Path) -> Result<(), String> {
     let agent = agent(DOWNLOAD_TIMEOUT);
@@ -217,29 +229,34 @@ fn install(release: &Release, exe: &Path) -> Result<(), String> {
             .read_to_vec()
             .map_err(|e| format!("could not download the update: {e}"))
     };
-    let checksum = String::from_utf8(fetch(&release.checksum, 4096)?)
-        .map_err(|_| "the update's checksum is not text".to_owned())?;
+    let signature = fetch(&release.signature, SIGNATURE_LEN)?;
     let binary = fetch(&release.binary, MAX_BINARY)?;
-    verify(&binary, &checksum)?;
+    verify(&binary, release.version, &signature, RELEASE_KEY)?;
     replace(exe, &binary).map_err(|e| format!("could not replace {}: {e}", exe.display()))
 }
 
-/// Whether `bytes` match `checksum`, a SHA-256 in hex (`sha256sum`'s line: the hash, then a name).
-fn verify(bytes: &[u8], checksum: &str) -> Result<(), String> {
-    let want = checksum
-        .split_whitespace()
-        .next()
-        .ok_or("the update's checksum is empty")?
-        .to_ascii_lowercase();
-    let got: String = Sha256::digest(bytes)
+/// Whether `signature` is `key`'s (hex) over `binary` released as `version`.
+fn verify(binary: &[u8], version: Version, signature: &[u8], key: &str) -> Result<(), String> {
+    let key = hex(key.trim()).ok_or("this build's release key is not valid hex")?;
+    let sha: String = Sha256::digest(binary)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    if got == want {
-        Ok(())
-    } else {
-        Err("the download does not match its checksum".to_owned())
+    let signed = format!("oido-desktop {version} {sha}");
+    UnparsedPublicKey::new(&ED25519, key)
+        .verify(signed.as_bytes(), signature)
+        .map_err(|_| "the update is not signed by Oido's release key".to_owned())
+}
+
+/// `s`'s bytes, two hex digits each.
+fn hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
     }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 /// Writes `bytes` next to `exe` and renames them over it: either the whole new binary is in
@@ -319,7 +336,10 @@ impl App {
         let Some(exe) = &self.updates.exe else {
             return;
         };
-        match std::process::Command::new(exe).spawn() {
+        match std::process::Command::new(exe)
+            .env(crate::instance::AFTER_UPDATE, "1")
+            .spawn()
+        {
             Ok(_) => tx.quit(),
             Err(e) => self.updates.status = Status::Failed(format!("could not restart: {e}")),
         }
@@ -376,12 +396,14 @@ mod tests {
         "assets": [
             {"name": "oido-desktop-x86_64-linux", "browser_download_url": "https://x/bin"},
             {"name": "oido-desktop-x86_64-linux.sha256", "browser_download_url": "https://x/sum"},
+            {"name": "oido-desktop-x86_64-linux.sig", "browser_download_url": "https://x/sig"},
+            {"name": "oido-desktop-aarch64-linux.sha256", "browser_download_url": "https://x/armsum"},
             {"name": "oido-desktop-aarch64-linux", "browser_download_url": "https://x/arm"}
         ]
     }"#;
 
     #[test]
-    fn a_release_has_this_machines_binary_and_its_checksum_or_is_not_one() {
+    fn a_release_has_this_machines_binary_and_its_signature_or_is_not_one() {
         let release = parse_release(ANSWER, "oido-desktop-x86_64-linux")
             .unwrap()
             .unwrap();
@@ -390,29 +412,56 @@ mod tests {
             Release {
                 version: v("0.2.0"),
                 binary: "https://x/bin".to_owned(),
-                checksum: "https://x/sum".to_owned(),
+                signature: "https://x/sig".to_owned(),
             }
         );
-        let no_checksum = parse_release(ANSWER, "oido-desktop-aarch64-linux").unwrap();
+        let unsigned = parse_release(ANSWER, "oido-desktop-aarch64-linux").unwrap();
         assert_eq!(
-            no_checksum, None,
-            "a binary without its checksum is never offered"
+            unsigned, None,
+            "a binary with only a checksum, no signature, is never offered"
         );
         assert!(parse_release(r#"{"tag_name":"nightly","assets":[]}"#, "x").is_err());
     }
 
     #[test]
-    fn a_download_is_checked_against_sha256sums_line() {
-        // sha256 of "hello\n", as `sha256sum` prints it.
-        let line = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  oido\n";
-        assert_eq!(verify(b"hello\n", line), Ok(()));
-        assert_eq!(
-            verify(b"hello\n", &line.to_uppercase()),
-            Ok(()),
-            "hex in any case"
+    fn only_a_signature_by_the_key_over_this_binary_and_version_holds() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let pair = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let key: String = pair
+            .public_key()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let sha = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
+        let sig = pair.sign(format!("oido-desktop 0.2.0 {sha}").as_bytes());
+        let sig = sig.as_ref();
+        assert_eq!(verify(b"hello\n", v("0.2.0"), sig, &key), Ok(()));
+        assert!(verify(b"tampered\n", v("0.2.0"), sig, &key).is_err());
+        assert!(
+            verify(b"hello\n", v("0.3.0"), sig, &key).is_err(),
+            "an older signed binary under a newer tag"
         );
-        assert!(verify(b"tampered\n", line).is_err());
-        assert!(verify(b"hello\n", "").is_err());
+        let other = Ed25519KeyPair::from_seed_unchecked(&[8; 32]).unwrap();
+        let forged = other.sign(format!("oido-desktop 0.2.0 {sha}").as_bytes());
+        assert!(verify(b"hello\n", v("0.2.0"), forged.as_ref(), &key).is_err());
+    }
+
+    #[test]
+    fn a_signature_made_as_release_sh_makes_it_holds() {
+        // From a throwaway key, by scripts/release.sh's openssl commands, over "hello\n" as 0.2.0.
+        let key = "76a537b7184b91296472cdf32ac306c527e8abc8981b7a3583271bf6ce2380d4";
+        let sig = hex(
+            "a2892fb30b1806f28fc53139a52ff42c6eb1f566521bdeb1778c4f6d16855b08\
+                       a56a9c3178ba3559c96301b9b6e43d3ae448ae2803f6c7a99e0b5b4c55987107",
+        )
+        .unwrap();
+        assert_eq!(verify(b"hello\n", v("0.2.0"), &sig, key), Ok(()));
+    }
+
+    #[test]
+    fn this_build_carries_a_whole_release_key() {
+        assert_eq!(hex(RELEASE_KEY.trim()).map(|k| k.len()), Some(32));
     }
 
     #[test]

@@ -248,12 +248,57 @@ fn migrate(conn: &Connection) -> Result<()> {
     if found > known {
         return Err(Error::NewerSchema { found, known });
     }
+    if found > 0 && found < known {
+        back_up(conn, found)?;
+    }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
         // A step and its version bump land together or not at all.
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", i as i64 + 1)?;
         tx.commit()?;
+    }
+    Ok(())
+}
+
+/// Copies the file to `oido.db.bak-v<found>` beside it before an update's schema steps run, so a
+/// step that loses data can be undone by hand. One copy is kept: older ones are removed once this
+/// one is written. A copy already there for this version (an earlier try that stopped) is kept as
+/// it is. Nothing to do for a database in memory.
+///
+/// # Errors
+///
+/// The copy could not be made (a full disk, say). The steps do not run without one.
+fn back_up(conn: &Connection, found: i64) -> Result<()> {
+    let Some(db) = conn.path().filter(|p| !p.is_empty()).map(PathBuf::from) else {
+        return Ok(());
+    };
+    let Some(name) = db.file_name().and_then(|n| n.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{name}.bak-v");
+    let copy = db.with_file_name(format!("{prefix}{found}"));
+    if !copy.exists() {
+        conn.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
+    }
+    let Some(dir) = db.parent() else {
+        return Ok(());
+    };
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        let older = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&prefix));
+        if older
+            && path != copy
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            eprintln!(
+                "oido: could not remove the old copy {}: {e}",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
@@ -891,6 +936,43 @@ mod tests {
         }
         let s = Store::open(&path, Vault::fixed([1; 32])).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn an_update_copies_the_file_before_its_steps_and_keeps_one_copy() {
+        let dir = std::env::temp_dir().join(format!("oido-bak-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oido.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for step in &MIGRATIONS[..33] {
+                conn.execute_batch(step).unwrap();
+            }
+            conn.execute_batch("INSERT INTO settings (key, value) VALUES ('k', '\"v\"');")
+                .unwrap();
+            conn.pragma_update(None, "user_version", 33).unwrap();
+        }
+        let stale = dir.join("oido.db.bak-v30");
+        std::fs::write(&stale, b"an older update's copy").unwrap();
+
+        drop(Store::open(&path, Vault::fixed([1; 32])).unwrap());
+
+        let copy = Connection::open(dir.join("oido.db.bak-v33")).unwrap();
+        let version: i64 = copy
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 33,
+            "the copy is the file as it was before the steps"
+        );
+        let kept: String = copy
+            .query_row("SELECT value FROM settings WHERE key = 'k'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, "\"v\"");
+        assert!(!stale.exists(), "only the newest copy is kept");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

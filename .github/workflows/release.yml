@@ -96,6 +96,9 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # The release key's PEM (gh secret set OIDO_SIGNING_KEY < release-key.pem). Absent on a
+          # pull request's dry run, which signs nothing.
+          OIDO_SIGNING_KEY: ${{ secrets.OIDO_SIGNING_KEY }}
           OIDO_DRY_RUN: ${{ (github.event_name == 'pull_request' || inputs.dry_run) && '1' || '' }}
         run: |
           git config user.name "github-actions[bot]"

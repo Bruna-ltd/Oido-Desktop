@@ -24,7 +24,10 @@ const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 pub fn screen(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(agent) = s.current() else {
-        return no_agents(k);
+        return match &s.data_error {
+            Some(why) => unreadable(why, k),
+            None => no_agents(k),
+        };
     };
     viewer(s, k, layer);
     col()
@@ -167,6 +170,36 @@ fn empty(a: &Agent, k: &Kit) -> El {
             text("Say something to get started.")
                 .font(k.ty.small)
                 .color(k.c.text_muted),
+        )
+}
+
+/// The saved data could not be opened or read, so the roster is empty only on screen. Nothing made
+/// now would be saved, so there is no "New agent" here: the way forward is the reason.
+fn unreadable(why: &str, k: &Kit) -> El {
+    let file = crate::store::default_location()
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    col()
+        .key("data-unreadable")
+        .w_full()
+        .h_full()
+        .center()
+        .gap(12.0)
+        .child(
+            text("Your saved agents could not be opened")
+                .font(k.ty.body_medium)
+                .color(k.c.text_base),
+        )
+        .child(
+            text(format!(
+                "{why}. The file is untouched: {file}. Until it opens, nothing you do here is saved. Quit, update or fix it, and open Oido again."
+            ))
+            .font(k.ty.small)
+            .color(k.c.text_muted)
+            .max_w(460.0)
+            .wrap(),
         )
 }
 

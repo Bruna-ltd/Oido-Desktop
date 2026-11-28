@@ -22,6 +22,11 @@ const PATIENCE: Duration = Duration::from_secs(3);
 const RETRY: Duration = Duration::from_millis(100);
 /// The longest token a launch may send; real ones are well under 100 bytes.
 const MAX_TOKEN: u64 = 1024;
+/// Set on the launch an update restarts into: the app it replaces still holds the lock while it
+/// quits, so this launch waits for it rather than handing over to an app on its way out.
+pub const AFTER_UPDATE: &str = "OIDO_AFTER_UPDATE";
+/// How long that launch waits for the old app to finish quitting.
+const QUIT_PATIENCE: Duration = Duration::from_secs(15);
 
 /// What this launch should do.
 #[derive(Debug)]
@@ -53,12 +58,17 @@ pub fn claim() -> Launch {
     let Some(dir) = dirs::runtime_dir() else {
         return Launch::Run(None);
     };
-    claim_in(&dir, &db, &activation_token())
+    let wait = if std::env::var_os(AFTER_UPDATE).is_some() {
+        QUIT_PATIENCE
+    } else {
+        Duration::ZERO
+    };
+    claim_in(&dir, &db, &activation_token(), wait)
 }
 
 /// [`claim`], with the lock and socket in `dir`, for the database at `db`; a later launch sends
-/// `token`.
-fn claim_in(dir: &Path, db: &Path, token: &str) -> Launch {
+/// `token`. A taken lock is tried again for up to `wait` before handing over.
+fn claim_in(dir: &Path, db: &Path, token: &str, wait: Duration) -> Launch {
     let (lock_path, socket) = paths(dir, db);
     let lock = match File::options()
         .create(true)
@@ -75,7 +85,17 @@ fn claim_in(dir: &Path, db: &Path, token: &str) -> Launch {
             return Launch::Run(None);
         }
     };
-    match lock.try_lock() {
+    let mut waited = Duration::ZERO;
+    let locked = loop {
+        match lock.try_lock() {
+            Err(TryLockError::WouldBlock) if waited < wait => {
+                thread::sleep(RETRY);
+                waited += RETRY;
+            }
+            other => break other,
+        }
+    };
+    match locked {
         Ok(()) => match bind(&socket) {
             Ok(listener) => Launch::Run(Some(Claim {
                 _lock: lock,
@@ -203,7 +223,7 @@ mod tests {
     fn a_second_launch_shows_the_first_and_exits() {
         let dir = dir();
         let db = dir.join("oido.db");
-        let Launch::Run(Some(claim)) = claim_in(&dir, &db, "") else {
+        let Launch::Run(Some(claim)) = claim_in(&dir, &db, "", Duration::ZERO) else {
             panic!("the first launch runs the app");
         };
         let (tx, rx) = mpsc::channel();
@@ -211,21 +231,47 @@ mod tests {
             tx.send(token).expect("test is listening")
         });
 
-        assert!(matches!(claim_in(&dir, &db, "token-123"), Launch::Exit));
+        assert!(matches!(
+            claim_in(&dir, &db, "token-123", Duration::ZERO),
+            Launch::Exit
+        ));
         let got = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("the first app hears");
         assert_eq!(got, "token-123");
 
-        assert!(matches!(claim_in(&dir, &db, ""), Launch::Exit));
+        assert!(matches!(
+            claim_in(&dir, &db, "", Duration::ZERO),
+            Launch::Exit
+        ));
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("again"), "");
+    }
+
+    #[test]
+    fn the_launch_after_an_update_waits_for_the_old_app_to_quit() {
+        let dir = dir();
+        let db = dir.join("oido.db");
+        let old = claim_in(&dir, &db, "", Duration::ZERO);
+        assert!(matches!(old, Launch::Run(Some(_))));
+        let quitting = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            drop(old);
+        });
+        assert!(
+            matches!(
+                claim_in(&dir, &db, "", Duration::from_secs(5)),
+                Launch::Run(Some(_))
+            ),
+            "it takes over once the old app lets go, rather than handing over to it"
+        );
+        quitting.join().expect("old app quits");
     }
 
     #[test]
     fn apps_on_different_databases_run_side_by_side() {
         let dir = dir();
-        let first = claim_in(&dir, &dir.join("a.db"), "");
-        let second = claim_in(&dir, &dir.join("b.db"), "");
+        let first = claim_in(&dir, &dir.join("a.db"), "", Duration::ZERO);
+        let second = claim_in(&dir, &dir.join("b.db"), "", Duration::ZERO);
         assert!(matches!(first, Launch::Run(Some(_))));
         assert!(matches!(second, Launch::Run(Some(_))));
     }
@@ -237,7 +283,10 @@ mod tests {
         let (_, socket) = paths(&dir, &db);
         drop(UnixListener::bind(&socket).expect("stale socket"));
         assert!(socket.exists());
-        assert!(matches!(claim_in(&dir, &db, ""), Launch::Run(Some(_))));
+        assert!(matches!(
+            claim_in(&dir, &db, "", Duration::ZERO),
+            Launch::Run(Some(_))
+        ));
     }
 
     #[test]

@@ -38,6 +38,7 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .variant(IconButtonVariant::GhostMuted)
         .label("New agent")
         .help("New agent")
+        .disabled(s.data_error.is_some())
         .on_press(|s: &mut App| s.new_agent())
         .build(k)
         .key("new-agent");
